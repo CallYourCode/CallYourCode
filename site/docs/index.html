@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install — CallYourCode docs</title>
+<meta name="description" content="Install CallYourCode with one line: Bun, the repo, agent wiring, and the services. Or from a checkout on disk.">
+<link rel="canonical" href="https://callyourcode.com/docs/">
+<link rel="icon" href="/media/favicon.svg" type="image/svg+xml">
+<link rel="alternate icon" href="/media/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/media/icon-192.png">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="CallYourCode">
+<meta property="og:title" content="Install — CallYourCode docs">
+<meta property="og:description" content="Install CallYourCode with one line: Bun, the repo, agent wiring, and the services. Or from a checkout on disk.">
+<meta property="og:url" content="https://callyourcode.com/docs/">
+<meta property="og:image" content="https://callyourcode.com/media/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://callyourcode.com/media/og.png">
+<script>try { document.documentElement.dataset.theme = localStorage.getItem("cyc-theme") || "dark"; } catch (e) { document.documentElement.dataset.theme = "dark"; }</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"></noscript>
+<link rel="stylesheet" href="/styles.css?v=32">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="bar">
+    <a class="brand" href="/">
+      <span class="badge"><img src="/media/icon-192.png" alt="" width="28" height="28"></span>
+      <span class="name">CallYourCode</span>
+    </a>
+    <nav class="site-nav">
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/CallYourCode/CallYourCode">GitHub</a>
+      <button class="theme-toggle" type="button" title="Toggle theme">light</button>
+    </nav>
+    <button class="btn-login" type="button">Log in</button>
+  </div>
+</header>
+
+<main class="docs-main">
+  <nav class="docs-nav">
+      <a href="/docs/" class="active">Install</a>
+      <a href="/docs/pair">Pair your phone</a>
+      <a href="/docs/harnesses">Harnesses and muxes</a>
+      <a href="/docs/cli">CLI</a>
+      <a href="/docs/privacy">Privacy model</a>
+  </nav>
+
+  <div class="docs-article">
+    <p class="eyebrow">Docs</p>
+    <article>
+<h1>Install</h1>
+      <p>One line installs everything: Bun if missing, the repo to ~/callyourcode, wiring for every agent it detects, and the services.</p>
+      <pre>curl -fsSL https://callyourcode.com/install.sh | sh</pre>
+      <h2>From a checkout already on disk</h2>
+      <pre>sh scripts/install.sh --local
+sh scripts/install.sh --dry-run   # touches nothing</pre>
+      <h2>What you need</h2>
+      <p>Bun (the installer can install it for you). tmux, the default multiplexer, or herdr as the opt-in upgrade. At least one coding agent: Claude Code, Codex, OpenCode or Pi. A path from phone to machine: a Tailscale tailnet away from the desk, or plain localhost on one machine.</p>
+    </article>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="bar">
+    <span class="mono">CallYourCode · cyc</span>
+    <div class="links">
+      <a href="https://github.com/CallYourCode/CallYourCode">GitHub</a>
+      <a href="/docs/">Docs</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/site.js?v=8"></script>
+</body>
+</html>

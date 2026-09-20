@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pair your phone — CallYourCode docs</title>
+<meta name="description" content="Pair your phone to CallYourCode. The key moves out of band, in a URL fragment that never reaches a server.">
+<link rel="canonical" href="https://callyourcode.com/docs/pair">
+<link rel="icon" href="/media/favicon.svg" type="image/svg+xml">
+<link rel="alternate icon" href="/media/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/media/icon-192.png">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="CallYourCode">
+<meta property="og:title" content="Pair your phone — CallYourCode docs">
+<meta property="og:description" content="Pair your phone to CallYourCode. The key moves out of band, in a URL fragment that never reaches a server.">
+<meta property="og:url" content="https://callyourcode.com/docs/pair">
+<meta property="og:image" content="https://callyourcode.com/media/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://callyourcode.com/media/og.png">
+<script>try { document.documentElement.dataset.theme = localStorage.getItem("cyc-theme") || "dark"; } catch (e) { document.documentElement.dataset.theme = "dark"; }</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"></noscript>
+<link rel="stylesheet" href="/styles.css?v=32">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="bar">
+    <a class="brand" href="/">
+      <span class="badge"><img src="/media/icon-192.png" alt="" width="28" height="28"></span>
+      <span class="name">CallYourCode</span>
+    </a>
+    <nav class="site-nav">
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/CallYourCode/CallYourCode">GitHub</a>
+      <button class="theme-toggle" type="button" title="Toggle theme">light</button>
+    </nav>
+    <button class="btn-login" type="button">Log in</button>
+  </div>
+</header>
+
+<main class="docs-main">
+  <nav class="docs-nav">
+      <a href="/docs/">Install</a>
+      <a href="/docs/pair" class="active">Pair your phone</a>
+      <a href="/docs/harnesses">Harnesses and muxes</a>
+      <a href="/docs/cli">CLI</a>
+      <a href="/docs/privacy">Privacy model</a>
+  </nav>
+
+  <div class="docs-article">
+    <p class="eyebrow">Docs</p>
+    <article>
+<h1>Pair your phone</h1>
+      <pre>cyc pair      # a Local/Cloud chooser, then a link (or QR) to open on your phone
+cyc start     # start the services</pre>
+      <p>The pairing key is the one secret, and it moves out of band: shown on the machine, entered on the phone by link, QR or typed, even on localhost. It travels in a URL fragment, which never reaches any server, log or Referer.</p>
+      <p>A device that cannot prove it holds the key gets a pairing screen, not a connection. A changed engine identity stops the app with an explicit decision, never auto-trust.</p>
+      <h2>Voice models</h2>
+      <p>About 1 GB of voice models download in the background on first boot; each voice capability switches on the moment its files land.</p>
+    </article>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="bar">
+    <span class="mono">CallYourCode · cyc</span>
+    <div class="links">
+      <a href="https://github.com/CallYourCode/CallYourCode">GitHub</a>
+      <a href="/docs/">Docs</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/site.js?v=8"></script>
+</body>
+</html>

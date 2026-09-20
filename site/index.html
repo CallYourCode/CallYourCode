@@ -3,252 +3,222 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CallYourCode</title>
-<meta name="description" content="Talk to your own coding agents from your phone, in your own voice. Your machine. Your tailnet. No company server in the path.">
-<style>
-  :root {
-    --ground: #0d1117;
-    --panel: #131a24;
-    --line: #222c39;
-    --ink: #e9e5da;
-    --muted: #9aa3b2;
-    --accent: #34c26b;
-    --accent-dim: #7fe0a6;
-    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  }
-  * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
-  body {
-    margin: 0;
-    background: var(--ground);
-    color: var(--ink);
-    font-family: var(--sans);
-    font-size: 17px;
-    line-height: 1.7;
-    -webkit-font-smoothing: antialiased;
-  }
-  .wrap {
-    max-width: 65ch;
-    margin: 0 auto;
-    padding: 0 20px;
-  }
-  header { padding: 72px 0 8px; }
-  h1 {
-    font-family: var(--mono);
-    font-size: clamp(2rem, 8vw, 3rem);
-    letter-spacing: -0.02em;
-    margin: 0 0 12px;
-    color: var(--ink);
-    word-break: break-word;
-  }
-  .thesis {
-    font-size: clamp(1.15rem, 4.5vw, 1.4rem);
-    line-height: 1.5;
-    color: var(--ink);
-    margin: 0 0 28px;
-    max-width: 30ch;
-  }
-  section { padding: 40px 0; border-top: 1px solid var(--line); }
-  section:first-of-type { border-top: none; }
-  h2 {
-    font-family: var(--mono);
-    font-size: 0.82rem;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: var(--muted);
-    font-weight: 600;
-    margin: 0 0 18px;
-  }
-  h3 {
-    font-family: var(--mono);
-    font-size: 1rem;
-    margin: 0 0 4px;
-    color: var(--ink);
-  }
-  p { margin: 0 0 16px; }
-  p:last-child { margin-bottom: 0; }
-  .subline { color: var(--muted); font-size: 0.95rem; margin-top: 14px; }
-
-  .cmd {
-    display: flex;
-    align-items: stretch;
-    gap: 0;
-    border: 1px solid var(--accent);
-    border-radius: 8px;
-    background: var(--panel);
-    overflow: hidden;
-  }
-  .cmd code {
-    font-family: var(--mono);
-    font-size: 0.86rem;
-    color: var(--accent-dim);
-    padding: 14px 16px;
-    overflow-x: auto;
-    white-space: nowrap;
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-  .cmd code .prompt { color: var(--muted); user-select: none; }
-  .copy {
-    flex: 0 0 auto;
-    font-family: var(--mono);
-    font-size: 0.78rem;
-    background: transparent;
-    color: var(--accent);
-    border: none;
-    border-left: 1px solid var(--accent);
-    padding: 0 16px;
-    cursor: pointer;
-    letter-spacing: 0.06em;
-  }
-  .copy:hover, .copy:focus-visible { background: var(--accent); color: var(--ground); outline: none; }
-
-  .steps { list-style: none; padding: 0; margin: 0 0 28px; counter-reset: step; }
-  .steps li { position: relative; padding-left: 40px; margin-bottom: 20px; }
-  .steps li:last-child { margin-bottom: 0; }
-  .steps li::before {
-    counter-increment: step;
-    content: counter(step);
-    position: absolute;
-    left: 0; top: 0;
-    width: 26px; height: 26px;
-    font-family: var(--mono);
-    font-size: 0.85rem;
-    line-height: 26px;
-    text-align: center;
-    color: var(--muted);
-    border: 1px solid var(--line);
-    border-radius: 50%;
-  }
-  .steps p { margin: 0; color: var(--muted); font-size: 0.95rem; }
-  .steps code { font-family: var(--mono); color: var(--ink); font-size: 0.9em; }
-
-  .diagram {
-    font-family: var(--mono);
-    font-size: 0.8rem;
-    line-height: 1.5;
-    color: var(--muted);
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 16px;
-    overflow-x: auto;
-    margin: 0;
-    white-space: pre;
-  }
-
-  .row {
-    font-family: var(--mono);
-    font-size: 0.92rem;
-    color: var(--ink);
-    line-height: 1.9;
-  }
-  .row .sep { color: var(--muted); }
-
-  ul.plain { list-style: none; padding: 0; margin: 0; }
-  ul.plain li { padding-left: 20px; position: relative; margin-bottom: 10px; color: var(--muted); }
-  ul.plain li:last-child { margin-bottom: 0; }
-  ul.plain li::before { content: "\2013"; position: absolute; left: 0; color: var(--line); }
-  ul.plain strong { color: var(--ink); font-weight: 600; }
-
-  footer {
-    padding: 40px 0 72px;
-    border-top: 1px solid var(--line);
-    color: var(--muted);
-    font-size: 0.9rem;
-  }
-  footer a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--line); }
-  footer a:hover, footer a:focus-visible { color: var(--accent); border-bottom-color: var(--accent); outline: none; }
-  footer .meta { font-family: var(--mono); font-size: 0.82rem; margin-top: 10px; }
-</style>
+<title>CallYourCode — your coding agents in a chat app</title>
+<meta name="description" content="Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Your machine, no company server in the path.">
+<link rel="canonical" href="https://callyourcode.com/">
+<link rel="icon" href="/media/favicon.svg" type="image/svg+xml">
+<link rel="alternate icon" href="/media/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/media/icon-192.png">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="CallYourCode">
+<meta property="og:title" content="CallYourCode — call your coding agents from anywhere">
+<meta property="og:description" content="Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Your machine, no company server in the path.">
+<meta property="og:url" content="https://callyourcode.com/">
+<meta property="og:image" content="https://callyourcode.com/media/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="CallYourCode — call your coding agents from anywhere">
+<meta name="twitter:description" content="Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Your machine, no company server in the path.">
+<meta name="twitter:image" content="https://callyourcode.com/media/og.png">
+<script>try { document.documentElement.dataset.theme = localStorage.getItem("cyc-theme") || "dark"; } catch (e) { document.documentElement.dataset.theme = "dark"; }</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"></noscript>
+<link rel="stylesheet" href="/styles.css?v=32">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "CallYourCode",
+  "alternateName": "cyc",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "macOS, Linux",
+  "description": "Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Your machine, no company server in the path.",
+  "url": "https://callyourcode.com/",
+  "downloadUrl": "https://callyourcode.com/install.sh",
+  "softwareHelp": "https://callyourcode.com/docs/",
+  "sameAs": ["https://github.com/CallYourCode/CallYourCode"],
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "isAccessibleForFree": true
+}
+</script>
 </head>
 <body>
-<main class="wrap">
-  <header>
-    <h1>CallYourCode</h1>
-    <p class="thesis">Talk to your own coding agents from your phone, in your own voice.</p>
-    <div class="cmd">
-      <code id="install-cmd"><span class="prompt">$ </span>curl -fsSL https://callyourcode.com/install.sh | sh</code>
-      <button class="copy" id="copy-btn" type="button" aria-label="Copy install command">copy</button>
+
+<header class="site-header">
+  <div class="bar">
+    <a class="brand" href="index.html">
+      <span class="badge"><img src="/media/icon-192.png" alt="" width="28" height="28"></span>
+      <span class="name">CallYourCode</span>
+    </a>
+    <nav class="site-nav">
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/CallYourCode/CallYourCode">GitHub</a>
+      <button class="theme-toggle" type="button" title="Toggle theme">light</button>
+    </nav>
+    <button class="btn-login" type="button">Log in</button>
+  </div>
+</header>
+
+<main>
+  <section class="hero wrap">
+    <div class="copy">
+      <div class="copy-head">
+        <p class="eyebrow">Open source · runs on your machine</p>
+        <h1 class="hero-title">Call your coding agents from anywhere.</h1>
+        <p class="strapline">Terminal on your laptop, chat app on your phone.</p>
+      </div>
+      <div class="copy-rest">
+      <p class="subhead">Claude Code, Codex, OpenCode and Pi already live in a terminal on your machine. CallYourCode puts every one of them in your pocket as a chat with a voice. You speak, the words land in the pane, the agent works, and it speaks the result back.</p>
+      <div class="install">
+        <code>curl -fsSL https://callyourcode.com/install.sh | sh</code>
+        <button type="button" data-copy aria-label="Copy install command"><svg class="ic-copy" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h9"/></svg><svg class="ic-check" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M20 6L9 17l-5-5"/></svg></button>
+      </div>
+      </div>
     </div>
-    <p class="subline">Your machine. Your tailnet. No company server in the path.</p>
-  </header>
-
-  <section>
-    <h2>The wow moment</h2>
-    <p>Walk away from the desk and your phone rings itself into a conversation: an agent finishes a task and speaks the result. You reply out loud, "run the tests again and tell me what broke," and the words land in the pane as input while the agent keeps going. The whole loop runs on your own hardware over your own network.</p>
+    <div class="shot duo">
+      <img class="shot-light term" src="/media/terminal-crop.webp?v=4" width="1808" height="1160" alt="A tmux pane running Claude Code: the phone's message arrives as terminal input and the agent replies through cyc">
+      <img class="shot-dark term" src="/media/terminal-crop-dark.webp?v=4" width="1808" height="1160" alt="A tmux pane running Claude Code: the phone's message arrives as terminal input and the agent replies through cyc">
+      <img class="shot-light phone" src="/media/phone-cut.webp?v=2" width="1120" height="2098" alt="The same conversation as a chat on the phone: a written reply and a voice note back">
+      <img class="shot-dark phone" src="/media/phone-cut-dark.webp?v=2" width="1120" height="2098" alt="The same conversation as a chat on the phone: a written reply and a voice note back">
+    </div>
   </section>
 
-  <section>
-    <h2>How it works</h2>
-    <ol class="steps">
-      <li>
-        <h3>Install</h3>
-        <p>Run the one-liner. It installs Bun if missing, clones the repo to <code>~/callyourcode</code>, wires up your detected agents, and starts the services.</p>
-      </li>
-      <li>
-        <h3>Pair</h3>
-        <p>Run <code>cyc pair</code>, pick Local or Cloud, and open the link (or scan the QR) on your phone.</p>
-      </li>
-      <li>
-        <h3>Talk</h3>
-        <p>Open an agent pane on your phone and speak. What you say lands as ordinary terminal input; the agent speaks back.</p>
-      </li>
-    </ol>
-    <pre class="diagram" aria-label="phone connects to your machine over a sealed end-to-end WebRTC DataChannel">  phone  &lt;===  sealed E2E WebRTC  ===&gt;  your machine
-                                        (agent panes in tmux)</pre>
+  <section class="citizens wrap">
+    <div class="strip">
+      <span class="lead">Equal citizens:</span>
+      <span>Claude Code</span><span class="sep">/</span><span>Codex</span><span class="sep">/</span><span>OpenCode</span><span class="sep">/</span><span>Pi</span>
+      <span class="muxes">tmux · herdr</span>
+    </div>
   </section>
 
-  <section>
-    <h2>Works with</h2>
-    <p class="row">Claude Code <span class="sep">/</span> Codex <span class="sep">/</span> OpenCode <span class="sep">/</span> Pi</p>
-    <p class="subline">over tmux (the default) or herdr.</p>
+  <section class="freedoms wrap">
+    <p class="eyebrow">The two freedoms</p>
+    <h2 class="section-title">Whatever you run, however you run it. cyc sits over the panes.</h2>
+    <div class="card-grid">
+      <div class="card">
+        <h3>Any harness</h3>
+        <p>The four are equal: chat replies, voice both ways, status, context and model, prompts you can answer. A new harness is just a new adapter.</p>
+      </div>
+      <div class="card">
+        <h3>Any mux</h3>
+        <p>tmux is the default, because you already have it and know it. <a href="https://herdr.dev">herdr</a> is the opt-in upgrade. Both work at once.</p>
+      </div>
+      <div class="card">
+        <h3>Zero commitment</h3>
+        <p>It sits over the panes; it never replaces them. Sit down at the desk mid-conversation and keep typing. Killing cyc loses nothing.</p>
+      </div>
+    </div>
   </section>
 
-  <section>
-    <h2>Private by construction</h2>
-    <ul class="plain">
-      <li>The phone-to-engine link is a <strong>sealed, end-to-end encrypted WebRTC DataChannel</strong>. No company server sits in the data path.</li>
-      <li>Speech is synthesized and transcribed <strong>in-process</strong> by sherpa-onnx (kokoro for text to speech, whisper for speech to text). No cloud speech API, and no audio leaves your machine.</li>
-      <li>Everything is <strong>four Bun/TypeScript services and a PWA</strong>, running on your own hardware.</li>
-    </ul>
+  <section class="roster wrap">
+    <div class="head">
+      <div>
+        <p class="eyebrow">One roster, every agent</p>
+        <h2 class="section-title">Every pane on the machine, in one chat list.</h2>
+      </div>
+      <p class="aside">Each with its model, its crons, its git and files pages, and a live terminal view one tap away.</p>
+    </div>
+    <img class="shot-light" src="/media/laptop-cut.webp?v=2" width="3380" height="2190" alt="The CallYourCode app on a laptop: a roster of Claude Code, Codex, OpenCode and Pi agents, one conversation open">
+    <img class="shot-dark" src="/media/laptop-cut-dark.webp?v=2" width="3380" height="2190" alt="The CallYourCode app on a laptop: a roster of Claude Code, Codex, OpenCode and Pi agents, one conversation open">
   </section>
 
-  <footer>
-    <p><a href="https://github.com/CallYourCode/CallYourCode">github.com/CallYourCode/CallYourCode</a></p>
-    <p class="meta">Runs on Bun.</p>
-  </footer>
+  <section class="wow wrap">
+    <div class="copy">
+      <div>
+        <p class="eyebrow">The wow moment</p>
+        <h2 class="section-title">Walk away from the desk.</h2>
+      </div>
+      <p class="para">An agent finishes and your phone speaks the result. You say "run the tests again," and it lands in the pane. The agent keeps going.</p>
+      <div class="points">
+        <div>
+          <h3>Offline first, like WhatsApp</h3>
+          <p>Sends show instantly and retry until acknowledged. A failed delivery is shown honestly, never silently lost.</p>
+        </div>
+        <div>
+          <h3>Voice-first replies</h3>
+          <p>The spoken line lands before the text bubble. Voice is synthesized and transcribed on the machine, no cloud, no audio leaving it.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="plugins wrap">
+    <p class="eyebrow">Plugins</p>
+    <h2 class="section-title">Missing a feature? Just ask the AI to code up a plugin.</h2>
+    <p class="section-sub">Engines declare a plugin's surfaces and the app renders them: a card in the conversation, a composer widget, a toolbar entry opening a sandboxed panel.</p>
+    <div class="plugin-tabs">
+      <div class="tab-row" role="tablist">
+        <button class="ptab active" data-tab="crons" type="button">Crons</button>
+        <button class="ptab" data-tab="git" type="button">Git</button>
+        <button class="ptab" data-tab="files" type="button">Files</button>
+        <button class="ptab" data-tab="tui" type="button">TUI</button>
+      </div>
+      <div class="pt-panel" data-panel="crons">
+        <p class="pt-blurb">Schedules and reminders for any agent, one-off or repeating. Set them up by just asking the agent; after an outage they catch up once instead of replaying a backlog.</p>
+        <span class="plug-d"><img class="shot-light" src="/media/plug-crons.webp" width="2640" height="1640" alt="The Crons panel beside a conversation: two recurring schedules with toggles and next-run times"><img class="shot-dark" src="/media/plug-crons-dark.webp" width="2640" height="1640" alt="The Crons panel beside a conversation: two recurring schedules with toggles and next-run times"></span>
+        <span class="plug-m"><img class="shot-light" src="/media/plugm-crons.webp" width="780" height="1688" alt="The Crons panel on a phone: two recurring schedules with toggles and next-run times"><img class="shot-dark" src="/media/plugm-crons-dark.webp" width="780" height="1688" alt="The Crons panel on a phone: two recurring schedules with toggles and next-run times"></span>
+      </div>
+      <div class="pt-panel" data-panel="git" hidden>
+        <p class="pt-blurb">The branch and the changes in the agent's own repo, one tap from the chat.</p>
+        <span class="plug-d"><img src="/media/plug-git.webp" width="2640" height="1640" alt="The Git page: working-tree changes on the left, the selected file&#39;s diff open on the right"></span>
+        <span class="plug-m"><img src="/media/plugm-git.webp" width="780" height="1688" alt="The Git page on a phone: the changed file&#39;s diff open"></span>
+      </div>
+      <div class="pt-panel" data-panel="files" hidden>
+        <p class="pt-blurb">Browse and preview the files the agent is working in, without leaving the conversation.</p>
+        <span class="plug-d"><img src="/media/plug-files.webp" width="2640" height="1640" alt="The Files page: the agent&#39;s working tree on the left, a file preview on the right"></span>
+        <span class="plug-m"><img src="/media/plugm-files.webp" width="780" height="1688" alt="The Files page on a phone: the agent&#39;s working tree"></span>
+      </div>
+      <div class="pt-panel" data-panel="tui" hidden>
+        <p class="pt-blurb">The real terminal, live. The same pane the agent runs in, opened right inside the app.</p>
+        <span class="plug-d"><img src="/media/plug-terminal.webp" width="2640" height="1640" alt="The TUI view: the agent&#39;s actual Claude Code pane, live inside the app"></span>
+        <span class="plug-m"><img src="/media/plugm-terminal.webp" width="780" height="1688" alt="The TUI view on a phone: the agent&#39;s actual pane with a touch key bar"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="privacy wrap">
+    <p class="eyebrow">Privacy</p>
+    <h2 class="section-title">No company server in the data path.</h2>
+    <div class="grid">
+      <div>
+        <h3>Sealed end to end</h3>
+        <p>One encrypted WebRTC channel carries chat, voice, files and diffs straight between phone and machine.</p>
+      </div>
+      <div>
+        <h3>Voice stays local</h3>
+        <p>Transcription and synthesis run on your machine. No audio and no transcript ever leaves it.</p>
+      </div>
+      <div>
+        <h3>Open source</h3>
+        <p>All of it. Trust it the way you trust anything that touches your agents: by reading it.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta wrap">
+    <div class="band">
+      <h2>Your terminal coding sessions in a chat app</h2>
+      <div class="install-dark">
+        <code>curl -fsSL https://callyourcode.com/install.sh | sh</code>
+        <button type="button" data-copy aria-label="Copy install command"><svg class="ic-copy" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h9"/></svg><svg class="ic-check" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M20 6L9 17l-5-5"/></svg></button>
+      </div>
+    </div>
+  </section>
 </main>
 
-<script>
-  (function () {
-    var btn = document.getElementById("copy-btn");
-    var cmd = "curl -fsSL https://callyourcode.com/install.sh | sh";
-    btn.addEventListener("click", function () {
-      function done() {
-        var prev = btn.textContent;
-        btn.textContent = "copied";
-        setTimeout(function () { btn.textContent = prev; }, 1600);
-      }
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(cmd).then(done, fallback);
-      } else {
-        fallback();
-      }
-      function fallback() {
-        var ta = document.createElement("textarea");
-        ta.value = cmd;
-        ta.setAttribute("readonly", "");
-        ta.style.position = "absolute";
-        ta.style.left = "-9999px";
-        document.body.appendChild(ta);
-        ta.select();
-        try { document.execCommand("copy"); done(); } catch (e) {}
-        document.body.removeChild(ta);
-      }
-    });
-  })();
-</script>
+<footer class="site-footer">
+  <div class="bar">
+    <span class="mono">CallYourCode · cyc</span>
+    <div class="links">
+      <a href="https://github.com/CallYourCode/CallYourCode">GitHub</a>
+      <a href="/docs/">Docs</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/site.js?v=8"></script>
 </body>
 </html>
