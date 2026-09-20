@@ -1,4 +1,4 @@
-/* callyourcode.com — tokens and layout, from the design handoff.
+/* callyourcode.com - tokens and layout, from the design handoff.
    Dark is the default; light swaps via :root[data-theme="light"]. */
 :root {
   --ground: #14110e;
