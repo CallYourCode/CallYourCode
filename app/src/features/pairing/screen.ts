@@ -28,6 +28,12 @@ let heldCaptured = false;
 let heldPair: string | null = null;
 let heldEngine: string | null = null;
 let heldApplied = false;
+/* A ?pair= link followed this page load leaves the key in the URL until pairing
+ * actually completes, so a refresh before the user taps Pair re-fills the key
+ * instead of dead-ending on an empty box. Set when the URL carried the key,
+ * cleared once the link's engine finishes pairing (stripAppliedParams there). */
+let linkPairActive = false;
+let linkPairEngineId: string | null = null;
 const pendingByEngineId = new Map<string, HeldKey>();
 
 function readPairParams(search: string, hash = ''): {pair: string | null; engine: string | null} {
@@ -44,6 +50,10 @@ function capturePairParams(): void {
   const p = readPairParams(location.search, location.hash);
   heldPair = p.pair;
   heldEngine = p.engine;
+  if (heldPair) {
+    linkPairActive = true;
+    linkPairEngineId = heldEngine;
+  }
 }
 
 let requestResync: (() => void) | null = null;
@@ -365,6 +375,14 @@ export function mountPairingScreen(
   const finishRow = (row: Row) => {
     if (row.done) return;
     row.done = true;
+    // Pairing completed. If this is the engine a ?pair= link targeted, the key
+    // has served its purpose, so strip it from the URL now (not before, so a
+    // mid-pair reload could recover it).
+    if (linkPairActive && (linkPairEngineId === null || row.engineId === linkPairEngineId)) {
+      stripAppliedParams();
+      linkPairActive = false;
+      linkPairEngineId = null;
+    }
     row.el.classList.remove('is-confirm');
     row.el.classList.add('is-paired');
     row.phase = 'paired';
@@ -574,7 +592,9 @@ export function mountPairingScreen(
   const markApplied = () => {
     if (heldApplied) return;
     heldApplied = true;
-    stripAppliedParams();
+    // Do NOT strip the URL here: the key is only pre-filled at this point, not
+    // paired. Keeping it in the URL lets a reload before the Pair tap recover it.
+    // stripAppliedParams runs in finishRow, once pairing actually completes.
     heldPair = null;
     heldEngine = null;
   };

@@ -285,3 +285,40 @@ describe('settings Engines section', () => {
     );
   });
 });
+
+describe('pair-link reload survival', () => {
+  afterEach(() => {
+    window.history.replaceState({}, '', '/');
+  });
+
+  test('a followed pair link keeps the key in the URL until pairing completes, surviving a reload', async () => {
+    seedConfig([ENGINE_A]);
+    const {b64urlencode} = await import('@shared/e2e');
+    const keyText = b64urlencode(new Uint8Array(32).fill(9));
+    window.history.replaceState({}, '', `/?engine=eng-a#pair=${keyText}`);
+
+    // First open: the key auto-fills the confirm row and MUST stay in the URL,
+    // so a refresh before the user taps Pair is not a dead end.
+    const first = await mountScreen();
+    expect(first.root.querySelector<HTMLInputElement>('.cyc-pairing-input')?.value).toBe(keyText);
+    expect(window.location.hash).toContain('pair=');
+
+    // Reload: fresh module state, same URL. The key is recovered from the URL.
+    teardowns.forEach((d) => d());
+    teardowns = [];
+    vi.resetModules();
+    document.body.innerHTML = '';
+    const second = await mountScreen();
+    expect(second.root.querySelector<HTMLInputElement>('.cyc-pairing-input')?.value).toBe(keyText);
+
+    // Pairing completes: the tap enrolls (putKey + pairEngine), then the keyring
+    // reports the engine paired, which finishes the row. Only now is the key
+    // stripped from the URL.
+    second.root.querySelector<HTMLElement>('.cyc-pairing-pair')!.click();
+    await settle(10);
+    pairInFake(UH_A);
+    fireKeyring();
+    await settle(10);
+    expect(window.location.hash).not.toContain('pair=');
+  });
+});
