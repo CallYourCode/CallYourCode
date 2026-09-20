@@ -38,6 +38,81 @@ on your own hardware over your own network.
   Over your own tailnet, or plain localhost, there is no company server at
   all.
 
+## What it is, in one picture
+
+```mermaid
+flowchart LR
+  subgraph phone [Your phone]
+    APP["The app (PWA)<br/>offline-first chat"]
+  end
+  subgraph machine [Your machine]
+    ENG[Agent engine]
+    VOICE["Voice engine<br/>(local STT + TTS)"]
+    subgraph mux [tmux or herdr]
+      C[Claude Code]
+      X[Codex]
+      O[OpenCode]
+      P[Pi]
+    end
+  end
+  SRV["App server<br/>(blind: login, discovery,<br/>sealed push relay)"]
+  APP <==>|"sealed E2E<br/>WebRTC DataChannel"| ENG
+  ENG <--> VOICE
+  ENG <--> C & X & O & P
+  APP -.->|"signaling only,<br/>opaque strings"| SRV
+  SRV -.-> ENG
+```
+
+One sealed, end-to-end encrypted WebRTC DataChannel between the app and the
+engine carries the entire product: chat, voice, files, diffs, terminal
+frames, plugin pages. The app server never sits in the data path; on
+localhost or your own tailnet there is no company server at all.
+
+## The two freedoms
+
+**Any harness.** Claude Code, Codex, OpenCode and Pi are equal citizens. Each
+gets the same treatment: replies in the chat, voice both ways, status,
+history, context and model shown, permission prompts surfaced as answerable
+questions. Adding a harness is adding an adapter, never a special case.
+
+**Any mux.** tmux is the default, because people already have it and know it.
+herdr is the opt-in upgrade. Both work at once.
+
+**Zero commitment.** cyc sits over the panes; it never replaces them. The
+terminal underneath stays fully usable: you can sit down at the desk
+mid-conversation and just keep typing. Sessions come from the mux,
+hand-started panes included; the transcripts are the harnesses' own. Killing
+cyc loses nothing.
+
+## How the app behaves
+
+**Offline first, like WhatsApp.** Everything is visible with no network:
+chats, photos, voice notes, shown documents. The app cold-starts offline.
+Every user action applies locally the instant it happens, is stored durably,
+and drains to the engine when it is reachable. Sends show instantly and retry
+with the same identity until acknowledged; a genuinely failed delivery is
+shown honestly (red row, tap to retry), never silently lost. Losing user
+input is the cardinal sin.
+
+**Chat-app-grade feel.** Scrolling follows the finger. Unread markers and
+mark-as-unread. Reply quoting with jump-back. Voice notes with slide-to-lock
+and live transcription. A global audio player. Session activity as muted
+pills, not noise. Quiet when idle: the app does not rerender constantly, and
+a phone running hot is treated as a product bug.
+
+**AI as a first-class citizen.** Streaming replies with a thinking
+indicator. Voice-first ordering on agent replies: the spoken line lands
+before the text bubble. Permission dialogs arrive as questions you can answer
+from the phone. The agent can push files, diffs, images and whole interactive
+pages into the chat. A live terminal view of the real pane is one tap away.
+
+**Extensions ship as plugins.** Crons (schedules and reminders), the model
+indicator, Git and Files pages, the TUI view: product features are plugins
+with their own UI, on three declared surfaces (a card in the conversation, a
+declarative composer widget, a toolbar entry opening a sandboxed panel).
+Engines declare, the app renders. This is also the community contribution
+surface, with enforced caps rather than advisory ones.
+
 One roster, every agent on the machine: Claude Code, Codex, OpenCode and Pi,
 each with its model, its crons, its git and files pages, and a TUI view.
 
