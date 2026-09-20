@@ -1,0 +1,357 @@
+/* ==========================================================================
+ * Chat motion primitives (keyframes are document-global; referenced inline from
+ * the chat producers). Grouped here by feature: message highlight, transcript
+ * progress dots, typing indicator.
+ * ======================================================================== */
+
+/* Message-jump highlight flash: ramp the tint in, hold it briefly at full, then
+   ease it back out. Reauthored with a plateau (vs a single crest) so the target
+   row stays legible mid-flash; start/end are transparent, 2s total. */
+@keyframes cyc-msg-flash {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  42% {
+    opacity: 1;
+  }
+}
+
+/* Transcript progress dots. The dots are real spans (built by the transcript /
+   partial-caption producers); each blinks fully in and out on the same 1.5s
+   cycle, staggered by a third, so the ellipsis reads as a left-to-right wave. */
+@keyframes cyc-dot-wave {
+  0%,
+  66%,
+  100% {
+    opacity: 0;
+  }
+  33% {
+    opacity: 1;
+  }
+}
+
+/* The busy glyph (busyDotsGlyph in domHelpers.ts): three real dot spans, nzbin
+   three-dots "dot-flashing" style (https://nzbin.github.io/three-dots/), each
+   flashing opacity full -> dim on the same 1s cycle, staggered a fifth of a
+   turn apart by the inline animation-delay set in JS. Plain CSS class (not a
+   Tailwind arbitrary [animation:...] utility) so nothing depends on Tailwind's
+   static class scanner seeing a dynamically-built class name; that is what
+   silently dropped the per-dot stagger in the previous implementation. Color
+   is currentColor so it follows the caller's text color (accent in the
+   toolbar and list row) in both themes. */
+/* A small visible gap after the dots so the trailing time/elapsed suffix
+   ("<dots> <1m") never jams against them ("<dots><1m"). Lives on the glyph
+   itself so every caller of busyDotsGlyph -- the list row (chatRow.ts) and the
+   toolbar header (header.ts), both via createTypingIndicator -- gets the gap. */
+.cyc-busy-dots {
+  margin-inline-end: 0.35em;
+}
+.cyc-busy-dot {
+  width: 0.3em;
+  height: 0.3em;
+  margin-inline: 0.1em;
+  border-radius: 50%;
+  background-color: currentColor;
+  animation: cyc-busy-dot-flash 1s infinite linear;
+}
+.cyc-busy-dot:first-child {
+  margin-inline-start: 0;
+}
+.cyc-busy-dot:last-child {
+  margin-inline-end: 0;
+}
+
+@keyframes cyc-busy-dot-flash {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Under reduced motion the busy dots keep flashing, only gentler: a small
+   three-dot typing indicator is a mild opacity pulse, not the large or
+   parallax motion Reduce Motion is meant to suppress, and freezing it here
+   made the indicator look dead on devices with the OS setting on (iOS). Keep
+   the same cyc-busy-dot-flash keyframe (a plain opacity pulse that runs on iOS
+   Safari); only slow the cycle so the motion is softer. */
+@media (prefers-reduced-motion: reduce) {
+  .cyc-busy-dot {
+    animation-duration: 1.6s;
+  }
+}
+
+.cyc-message img,
+.cyc-message video {
+  object-fit: cover;
+  width: 100%;
+  height: 100%;
+}
+
+.cyc-message .cyc-clip .cyc-clip-toggle .cyc-clip-play-part {
+  background-color: var(--cyc-bubble-glyph);
+}
+
+/* A message that holds a voice clip fills the reading column even when its text
+   is short, so the fixed-count waveform strip is never squished into slivers. The
+   frame's max-width is already this token; pinning `width` to it gives the frame a
+   definite width (the phone `calc(100% - 2.75rem)` value keeps the inset, and
+   doc/file frames -- which carry no `.cyc-clip.cyc-voice` -- are untouched). The
+   companion rule stretches the bubble itself to fill that frame: an incoming
+   bubble would already stretch by flex `align-items`, but an outgoing one carries
+   `ml-auto` (from MESSAGE_CONTENT_UTILS) which cancels the cross-axis stretch, so
+   without this its short-text voice clip stays shrink-wrapped and the waveform
+   squishes. `width:100%` fills both directions. */
+.cyc-message-frame:has(.cyc-clip.cyc-voice) {
+  width: var(--cyc-msg-frame-max);
+}
+.cyc-message-content:has(.cyc-clip.cyc-voice) {
+  width: 100%;
+}
+
+.cyc-message .cyc-transcript {
+  margin-bottom: 0.75rem;
+  margin-top: 0.25rem;
+}
+
+/* Inline code / time ink keyed off the send-direction state the row carries. */
+.cyc-message.cyc-msg-received .cyc-inline-code {
+  color: rgb(var(--cyc-sender-rgb));
+}
+
+.cyc-message.cyc-msg-sent.cyc-msg-failed .cyc-stamp-status {
+  color: var(--cyc-bubble-error);
+}
+
+.cyc-message.cyc-msg-sent .cyc-inline-code {
+  color: var(--cyc-bubble-time);
+}
+
+.cyc-message-text :is(i, em) {
+  font-style: italic;
+}
+
+.cyc-message-text :is(u, ins) {
+  text-decoration-line: underline;
+}
+
+.cyc-message-text :is(s, del) {
+  text-decoration-line: line-through;
+}
+
+.cyc-message-text :is(u, ins) :is(s, del),
+.cyc-message-text :is(s, del) :is(u, ins) {
+  text-decoration-line: underline line-through;
+}
+
+/* Sender-coloured quote card. Code headers keep --cyc-accent, not this wash. */
+.cyc-callout-surface {
+  position: relative;
+  overflow: clip;
+  background-color: color-mix(in srgb, rgb(var(--cyc-sender-rgb)) 10%, transparent);
+  /* No border rail here: the rail is the .cyc-callout-bar node quoteDecor.ts
+     prepends for .cyc-callout-rail. Painting both doubled the quote bar. */
+}
+
+.cyc-code-frame {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--cyc-border-color);
+}
+
+/* Inside a chat message the code block takes the same horizontal inset as the
+   surrounding message text (MESSAGE_TEXT_UTILS' mx-2.5). Without it the frame
+   fills the message-text box edge to edge, so on phone (where a received bubble
+   sits against the screen edge) its border ran to the screen edges with no side
+   gap. margin-inline keeps the gap symmetric in LTR and RTL, and the frame still
+   spans the rest of the content column, lining up within the conversation column
+   like the bubble text above and below it. The fullscreen viewer and markdown
+   page renderer reuse .cyc-code-frame outside .cyc-message and keep their own
+   geometry. */
+.cyc-message .cyc-code-frame {
+  margin-inline: 0.625rem;
+}
+
+.cyc-callout {
+  display: block;
+  max-width: 100%;
+  padding: 0.25rem 0.75rem 0.25rem 0.5rem;
+  font-size: 0.875rem;
+  line-height: 1.25;
+  white-space: pre-wrap;
+  unicode-bidi: plaintext;
+}
+
+#cyc-thread-pane .cyc-mast {
+  width: 100%;
+}
+
+.cyc-message-list > .cyc-loader-box.cyc-loader-swing {
+  pointer-events: none;
+  cursor: default;
+  z-index: 2;
+}
+
+.cyc-transcript {
+  margin-top: 0.375rem;
+  font-size: 0.9375rem;
+  line-height: 1.3;
+  opacity: 0.9;
+  white-space: pre-wrap;
+}
+
+/* Generated code blocks: white-space/overflow/scrollbar keyed off the flow state. */
+#cyc-app .cyc-code-frame .cyc-src-body {
+  font-family: 'JetBrains Mono', monospace;
+  white-space: pre-wrap;
+  overflow: visible;
+}
+
+#cyc-app .cyc-code-frame[data-cyc-code-flow='pan'] .cyc-src-body {
+  white-space: pre;
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+#cyc-app .cyc-code-frame[data-cyc-code-flow='pan'] .cyc-src-body::-webkit-scrollbar {
+  display: none;
+}
+
+.cyc-voice-strip {
+  position: absolute;
+  top: calc(100% + 0.375rem);
+  left: 50%;
+  transform: translateX(-50%) translateY(-0.25rem);
+  background: var(--cyc-surface);
+  color: var(--cyc-text-muted);
+  border-radius: 1rem;
+  padding: 0.1875rem 0.75rem;
+  font-size: 0.8125rem;
+  line-height: 1.2;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+  z-index: 3;
+}
+.cyc-voice-strip.cyc-shown {
+  opacity: 1;
+  transform: translateX(-50%);
+}
+
+/* Chat-header primitives: the border-radius resets ride !important because a
+   layered utility cannot beat the un-layered !important radius rules below. */
+.cyc-thread .cyc-pane-header .cyc-mast-utils .cyc-icon-btn {
+  border-radius: 0.625rem !important;
+  overflow: hidden;
+}
+
+.cyc-speed-btn {
+  border-radius: 0.625rem !important;
+}
+
+.cyc-thread .cyc-pane-header .cyc-mast-utils > .cyc-icon-btn + .cyc-icon-btn {
+  margin-inline-start: 0;
+}
+.cyc-svgico > svg {
+  display: block;
+  width: 1em;
+  height: 1em;
+}
+.cyc-thread .cyc-pane-header .cyc-mast-utils .cyc-conv-toggle[disabled] {
+  pointer-events: none;
+  cursor: default;
+}
+
+.cyc-thread > .cyc-pane-header.cyc-mast {
+  padding-top: var(--cyc-safe-top);
+}
+
+.cyc-thread .cyc-pane-header .cyc-mast-utils .cyc-mast-off .cyc-icon {
+  color: var(--cyc-text-muted);
+}
+
+.cyc-thread .cyc-pane-header .cyc-mast-utils .cyc-ctx-warn .cyc-icon {
+  color: #f2c63c;
+}
+
+.cyc-thread .cyc-pane-header .cyc-mast-utils .cyc-ctx-hot .cyc-icon {
+  color: var(--cyc-danger, #e06c62);
+}
+
+/* Generated list items: the pre-wrap (body) / pre-line (session event) split is the
+   one part that differs by generated scope and cannot be a single producer literal. */
+.cyc-message .cyc-message-text li {
+  white-space: pre-wrap;
+}
+
+.cyc-list-row-subtitle.cyc-list-row-working {
+  /* Colour only: the subtitle is one size in every state (chatRow sets 0.875rem
+     inline !important), so busy text ("thinking · 2m") differs from an idle
+     "19m" by the accent alone. */
+  color: var(--cyc-accent) !important;
+}
+.cyc-ask-choice[disabled] {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.cyc-list-row-subtitle.cyc-list-row-asking {
+  color: var(--cyc-danger) !important;
+}
+
+.cyc-state-badge {
+  background-color: var(--cyc-text-muted);
+}
+
+/* A blocked dot and an unread pill can coexist on a row. */
+.cyc-state-badge + .cyc-session-badge-unread {
+  margin-inline-start: 0.25rem;
+}
+
+.cyc-list-row-sep,
+.cyc-list-row-detail {
+  color: var(--cyc-text-muted);
+  font-weight: 400;
+  white-space: pre;
+}
+.cyc-session-entry .cyc-list-row-quiet-icon {
+  margin-inline-start: 0.125rem;
+}
+
+.cyc-message.cyc-msg-system.cyc-session-event.cyc-se-open .cyc-service-text li {
+  white-space: pre-line;
+}
+
+.cyc-menu-item.cyc-menu-item-disabled {
+  pointer-events: none;
+  opacity: 0.3;
+}
+
+/* Phone surfaces square off; a layered utility cannot beat un-layered !important. */
+@media (max-width: 550px) {
+  html body .cyc-thread > .cyc-pane-header.cyc-mast {
+    border-radius: 0 !important;
+  }
+  html body #cyc-thread-pane .cyc-agents-bar,
+  html body #cyc-thread-pane .cyc-jump-bar {
+    border-radius: 0 !important;
+  }
+}
+html body .cyc-mast,
+html body .cyc-message-content,
+html body .cyc-service-text,
+html body .cyc-callout-surface,
+html body .cyc-voice-strip,
+html body .cyc-thread .cyc-pane-header .cyc-mast-utils .cyc-icon-btn,
+html body .cyc-speed-btn {
+  border-radius: 6px !important;
+}

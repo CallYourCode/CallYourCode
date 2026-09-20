@@ -1,0 +1,108 @@
+.cyc-ctl {
+  background: none;
+  outline: none;
+  border: none;
+  cursor: pointer;
+}
+
+.cyc-ctl:disabled {
+  pointer-events: none !important;
+  opacity: 0.3;
+}
+
+.cyc-overflow::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.cyc-overflow-x::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+:where(#cyc-app, .cyc-menu, .cyc-modal),
+:where(#cyc-app, .cyc-menu, .cyc-modal) :where(*) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--cyc-overflow) transparent;
+}
+
+:where(#cyc-app, .cyc-menu, .cyc-modal)::-webkit-scrollbar,
+:where(#cyc-app, .cyc-menu, .cyc-modal) ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+:where(#cyc-app, .cyc-menu, .cyc-modal)::-webkit-scrollbar-track,
+:where(#cyc-app, .cyc-menu, .cyc-modal)::-webkit-scrollbar-track-piece,
+:where(#cyc-app, .cyc-menu, .cyc-modal)::-webkit-scrollbar-corner,
+:where(#cyc-app, .cyc-menu, .cyc-modal) ::-webkit-scrollbar-track,
+:where(#cyc-app, .cyc-menu, .cyc-modal) ::-webkit-scrollbar-track-piece,
+:where(#cyc-app, .cyc-menu, .cyc-modal) ::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+:where(#cyc-app, .cyc-menu, .cyc-modal)::-webkit-scrollbar-button,
+:where(#cyc-app, .cyc-menu, .cyc-modal) ::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+:where(#cyc-app, .cyc-menu, .cyc-modal)::-webkit-scrollbar-thumb,
+:where(#cyc-app, .cyc-menu, .cyc-modal) ::-webkit-scrollbar-thumb {
+  background: var(--cyc-overflow);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 10px;
+}
+:where(#cyc-app, .cyc-menu, .cyc-modal)::-webkit-scrollbar-thumb:hover,
+:where(#cyc-app, .cyc-menu, .cyc-modal) ::-webkit-scrollbar-thumb:hover {
+  background: var(--cyc-overflow-hover);
+  background-clip: padding-box;
+}
+:where(#cyc-app, .cyc-menu, .cyc-modal)::-webkit-scrollbar-thumb:active,
+:where(#cyc-app, .cyc-menu, .cyc-modal) ::-webkit-scrollbar-thumb:active {
+  background: var(--cyc-overflow-active);
+  background-clip: padding-box;
+}
+
+/* Force 6px radius on shared chrome. Layered Tailwind cannot beat un-layered
+   !important. The toggle track is NOT in this list: it slides a circular knob,
+   so it keeps the pill radius its own Tailwind classes declare; squaring it
+   under the round knob read as broken. */
+html body .cyc-icon-btn,
+html body .cyc-ctl-primary,
+html body .cyc-modal-box,
+html body .cyc-sheet-btn,
+html body .cyc-menu,
+html body .cyc-menu-item,
+html body .cyc-sheet,
+html body .cyc-bar-wrap,
+html body .cyc-action-float {
+  border-radius: 6px !important;
+}
+
+/* The floating corner buttons are squarish, not full circles. This un-layered
+   rule sits after the 6px .cyc-action-float rule above (same specificity, later
+   in source) so it wins the cascade at every size (44px phone, 52px otherwise). */
+html body .cyc-corner-btn {
+  border-radius: 14px !important;
+}
+
+/* A pending toggle's half-way knob breathes so the wait reads as deliberate
+   progress, not a knob stuck mid-slide. The label already dims to 0.6. */
+.cyc-toggle-pending .cyc-toggle-knob {
+  animation: cyc-toggle-wait 1.1s ease-in-out infinite;
+}
+@keyframes cyc-toggle-wait {
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cyc-toggle-pending .cyc-toggle-knob {
+    animation: none;
+  }
+}

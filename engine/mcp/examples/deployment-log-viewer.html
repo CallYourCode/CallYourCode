@@ -1,0 +1,314 @@
+<!doctype html>
+<!--
+  Archetype: LOG VIEWER. A stream too long to paste into chat, made readable:
+  level filters with live counts, text search, a time range, consecutive
+  repeats collapsed with a multiplier, a tail-follow toggle that keeps new
+  lines coming, and tap-a-line to send it back as a report.
+  cyc APIs: cyc.load()/cyc.save() keep the filters he set; cyc.submit() sends
+  a tapped line. Works standalone too: without window.cyc it previews.
+  The stream here is invented demo data; a real page would inline real lines.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>deploy-42 logs</title>
+<style>
+  :root {
+    --bg: var(--cyc-bg, #f4f4f5); --surface: var(--cyc-surface, #ffffff);
+    --text: var(--cyc-text, #111114); --muted: var(--cyc-muted, #707579);
+    --accent: var(--cyc-accent, #3390ec); --border: var(--cyc-border, #dfe1e5);
+    --err: #c0392b; --warn: #9a6700; --dbg: #8250df;
+  }
+  html[data-cyc-theme="dark"] {
+    --bg: var(--cyc-bg, #181818); --surface: var(--cyc-surface, #212121);
+    --text: var(--cyc-text, #f2f2f5); --muted: var(--cyc-muted, #aaaaaa);
+    --accent: var(--cyc-accent, #8774e1); --border: var(--cyc-border, #3a3a3c);
+    --err: #ff6b5e; --warn: #e3b341; --dbg: #b39df5;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 10px 10px 24px; }
+  h1 { font-size: 18px; margin: 2px 2px 8px; }
+  h1 small { color: var(--muted); font-weight: 400; font-size: 12px; }
+
+  .controls {
+    position: sticky; top: 0; z-index: 5; background: var(--bg);
+    padding: 4px 0 8px; display: flex; flex-direction: column; gap: 8px;
+  }
+  #q {
+    width: 100%; min-height: 44px; padding: 0 12px;
+    background: var(--surface); color: var(--text); font: inherit;
+    border: 1px solid var(--border); border-radius: 10px;
+  }
+  #q:focus { outline: none; border-color: var(--accent); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    min-height: 40px; padding: 0 12px; font: inherit; font-size: 13px;
+    background: var(--surface); color: var(--muted);
+    border: 1px solid var(--border); border-radius: 20px; cursor: pointer;
+  }
+  .chip[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .chip .n { opacity: .7; font-weight: 400; }
+  .chip.follow[aria-pressed="true"] { background: var(--accent); color: #fff; }
+
+  #meta { font-size: 12px; color: var(--muted); padding: 0 2px; }
+
+  #log {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 6px 0; overflow-x: hidden;
+  }
+  .line {
+    display: flex; gap: 8px; align-items: baseline;
+    padding: 5px 10px; cursor: pointer;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    word-break: break-word;
+  }
+  .line:nth-child(odd) { background: color-mix(in srgb, var(--border) 22%, transparent); }
+  .line .t { color: var(--muted); flex: 0 0 auto; }
+  .line .lv { flex: 0 0 44px; font-weight: 700; }
+  .line .m { flex: 1; min-width: 0; white-space: pre-wrap; }
+  .line.ERROR .lv { color: var(--err); } .line.ERROR .m { color: var(--err); }
+  .line.WARN  .lv { color: var(--warn); }
+  .line.DEBUG .lv, .line.DEBUG .m { color: var(--muted); }
+  .line.INFO  .lv { color: var(--accent); }
+  .rep {
+    flex: 0 0 auto; font-size: 11px; font-weight: 700; color: var(--accent);
+    border: 1px solid var(--accent); border-radius: 10px; padding: 0 7px;
+  }
+  .line.picked { outline: 2px solid var(--accent); border-radius: 6px; }
+  .empty { padding: 18px 12px; color: var(--muted); font-style: italic; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 16px; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.25);
+    opacity: 0; pointer-events: none; transition: opacity .25s; max-width: 90vw;
+  }
+  #toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>deploy-42 logs <small id="standalone-note"></small></h1>
+
+  <div class="controls">
+    <input id="q" type="search" placeholder="search text, e.g. timeout" autocomplete="off">
+    <div class="chips" id="levels">
+      <button class="chip" data-lv="ERROR" aria-pressed="true">error <span class="n"></span></button>
+      <button class="chip" data-lv="WARN"  aria-pressed="true">warn <span class="n"></span></button>
+      <button class="chip" data-lv="INFO"  aria-pressed="true">info <span class="n"></span></button>
+      <button class="chip" data-lv="DEBUG" aria-pressed="false">debug <span class="n"></span></button>
+    </div>
+    <div class="chips">
+      <button class="chip" data-range="5"  aria-pressed="false">last 5 min</button>
+      <button class="chip" data-range="15" aria-pressed="false">last 15 min</button>
+      <button class="chip" data-range="0"  aria-pressed="true">all 30 min</button>
+      <button class="chip follow" id="follow" aria-pressed="false">▶ follow tail</button>
+    </div>
+    <div id="meta"></div>
+  </div>
+
+  <div id="log"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+  'use strict';
+  const inApp = typeof window.cyc !== 'undefined';
+  const bridge = inApp ? window.cyc : {
+    load:   async () => ({ ok: true, saved: false, data: null }),
+    save:   async () => ({ ok: false }),
+    submit: async () => ({ ok: false, message: 'preview mode: not inside the app, nothing was sent' }),
+    close:  () => {},
+  };
+  if (!inApp) document.getElementById('standalone-note').textContent = '(preview mode)';
+
+  // ---- the demo stream: seeded, so every open shows the same story ---------
+  function mulberry32(a) {
+    return () => {
+      a |= 0; a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rnd = mulberry32(42);
+  const SERVICES = ['api', 'worker', 'cache', 'db'];
+  const LINES = [
+    ['INFO',  s => `${s}: request served in ${3 + Math.floor(rnd() * 90)}ms`],
+    ['INFO',  s => `${s}: healthcheck ok`],
+    ['DEBUG', s => `${s}: cache probe key=user:${1000 + Math.floor(rnd() * 40)}`],
+    ['DEBUG', s => `${s}: pool acquire took ${Math.floor(rnd() * 4)}ms`],
+    ['WARN',  s => `${s}: slow response ${800 + Math.floor(rnd() * 1600)}ms`],
+    ['WARN',  s => `${s}: retrying upstream call (attempt 2)`],
+    ['ERROR', s => `${s}: request failed after 3 retries: connection reset`],
+    ['ERROR', s => `${s}: timeout waiting for db after 5000ms`],
+  ];
+  function inventLine(ts) {
+    const roll = rnd();
+    // mostly info/debug, a steady trickle of warn, occasional error bursts
+    const idx = roll < 0.42 ? 0 : roll < 0.56 ? 1 : roll < 0.74 ? 2 : roll < 0.82 ? 3
+              : roll < 0.90 ? 4 : roll < 0.95 ? 5 : roll < 0.98 ? 6 : 7;
+    const [lv, mk] = LINES[idx];
+    return { ts, lv, m: mk(SERVICES[Math.floor(rnd() * SERVICES.length)]) };
+  }
+  const BOOT = Date.now();
+  const all = [];
+  // 30 minutes of history, one line every ~4s
+  for (let t = BOOT - 30 * 60000; t < BOOT; t += 2500 + rnd() * 3000) {
+    all.push(inventLine(t));
+    // repeated-line bursts, so collapsing has something to collapse
+    if (rnd() < 0.06) {
+      const burst = all[all.length - 1];
+      for (let k = 0, n = 2 + Math.floor(rnd() * 10); k < n; k++) {
+        t += 300; all.push({ ts: t, lv: burst.lv, m: burst.m });
+      }
+    }
+  }
+
+  // ---- filter state --------------------------------------------------------
+  const state = { levels: { ERROR: true, WARN: true, INFO: true, DEBUG: false }, q: '', rangeMin: 0, follow: false };
+  const expanded = new Set(); // collapsed groups the user opened, by first-line ts
+  let picked = null;          // ts of the line offered for reporting
+
+  const $ = (s, el) => (el || document).querySelector(s);
+  const $$ = (s, el) => [...(el || document).querySelectorAll(s)];
+  const fmt = ts => {
+    const d = new Date(ts);
+    const p = n => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  };
+
+  // ---- paint ---------------------------------------------------------------
+  function visible() {
+    const q = state.q.toLowerCase();
+    const since = state.rangeMin ? Date.now() - state.rangeMin * 60000 : 0;
+    return all.filter(l => state.levels[l.lv] && l.ts >= since && (!q || l.m.toLowerCase().includes(q)));
+  }
+
+  function paint() {
+    const rows = visible();
+    // collapse consecutive identical messages into one row with a count
+    const groups = [];
+    for (const l of rows) {
+      const g = groups[groups.length - 1];
+      if (g && g.m === l.m && g.lv === l.lv && !expanded.has(g.ts)) { g.n++; g.last = l.ts; }
+      else groups.push({ ts: l.ts, last: l.ts, lv: l.lv, m: l.m, n: 1 });
+    }
+    const log = $('#log');
+    log.textContent = '';
+    if (!groups.length) {
+      const d = document.createElement('div');
+      d.className = 'empty';
+      d.textContent = 'Nothing matches these filters.';
+      log.appendChild(d);
+    }
+    for (const g of groups) {
+      const div = document.createElement('div');
+      div.className = 'line ' + g.lv + (picked === g.ts ? ' picked' : '');
+      const parts = [
+        `<span class="t">${fmt(g.ts)}</span>`,
+        `<span class="lv">${g.lv}</span>`,
+        `<span class="m"></span>`,
+      ];
+      div.innerHTML = parts.join('');
+      $('.m', div).textContent = g.m + (g.n > 1 ? '' : '');
+      if (g.n > 1) {
+        const x = document.createElement('span');
+        x.className = 'rep';
+        x.textContent = '×' + g.n;
+        div.appendChild(x);
+      }
+      div.addEventListener('click', () => tapLine(g));
+      log.appendChild(div);
+    }
+    // counts on the level chips reflect the OTHER filters, so they answer
+    // "what would this chip show me"
+    const q = state.q.toLowerCase();
+    const since = state.rangeMin ? Date.now() - state.rangeMin * 60000 : 0;
+    for (const chip of $$('#levels .chip')) {
+      const lv = chip.dataset.lv;
+      const n = all.filter(l => l.lv === lv && l.ts >= since && (!q || l.m.toLowerCase().includes(q))).length;
+      $('.n', chip).textContent = String(n);
+      chip.setAttribute('aria-pressed', String(state.levels[lv]));
+    }
+    for (const chip of $$('[data-range]')) {
+      chip.setAttribute('aria-pressed', String(Number(chip.dataset.range) === state.rangeMin));
+    }
+    $('#meta').textContent = `${rows.length} lines, ${groups.length} rows after collapsing repeats. Tap a row once to pick it, twice to send it to the agent.`;
+    if (state.follow) log.lastElementChild?.scrollIntoView({ block: 'end' });
+  }
+
+  // tap once: expand a collapsed group / pick the line; tap the picked line
+  // again: submit it back to the conversation
+  async function tapLine(g) {
+    if (g.n > 1) { expanded.add(g.ts); paint(); return; }
+    if (picked !== g.ts) { picked = g.ts; paint(); return; }
+    const r = await bridge.submit({
+      label: `${g.lv} ${fmt(g.ts)}`,
+      body: { kind: 'log-line-report', at: new Date(g.ts).toISOString(), level: g.lv, line: g.m },
+    });
+    toast(r.ok ? 'Line staged on the composer.' : 'Submit failed: ' + (r.message || 'unknown'));
+    picked = null;
+    paint();
+  }
+
+  let toastTimer = null;
+  function toast(msg) {
+    const t = $('#toast');
+    t.textContent = msg;
+    t.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('on'), 2600);
+  }
+
+  // ---- controls ------------------------------------------------------------
+  let saveTimer = null;
+  function persist() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => { bridge.save({ filters: state }); }, 800);
+  }
+  $('#q').addEventListener('input', () => { state.q = $('#q').value; paint(); persist(); });
+  $$('#levels .chip').forEach(chip => chip.addEventListener('click', () => {
+    state.levels[chip.dataset.lv] = !state.levels[chip.dataset.lv];
+    paint(); persist();
+  }));
+  $$('[data-range]').forEach(chip => chip.addEventListener('click', () => {
+    state.rangeMin = Number(chip.dataset.range);
+    paint(); persist();
+  }));
+
+  // ---- tail follow ---------------------------------------------------------
+  let ticker = null;
+  $('#follow').addEventListener('click', () => {
+    state.follow = !state.follow;
+    $('#follow').setAttribute('aria-pressed', String(state.follow));
+    $('#follow').textContent = state.follow ? '⏸ following' : '▶ follow tail';
+    clearInterval(ticker);
+    if (state.follow) {
+      ticker = setInterval(() => { all.push(inventLine(Date.now())); paint(); }, 900);
+    }
+    paint();
+  });
+
+  // ---- boot ----------------------------------------------------------------
+  (async () => {
+    const r = await bridge.load();
+    if (r.ok && r.saved && r.data && r.data.filters) {
+      const f = r.data.filters;
+      if (f.levels) Object.assign(state.levels, f.levels);
+      if (typeof f.q === 'string') { state.q = f.q; $('#q').value = f.q; }
+      if (typeof f.rangeMin === 'number') state.rangeMin = f.rangeMin;
+      // follow is never restored: a page opening should not start moving
+    }
+    paint();
+  })();
+</script>
+</body>
+</html>

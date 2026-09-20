@@ -1,0 +1,14 @@
+[mcp_servers.otherserver]
+command = "bun"
+args = ["/opt/other/other-mcp.ts"]
+
+[mcp_servers.otherserver.env]
+FOO = "bar"
+
+[hooks.state."/home/user/.codex/hooks.json:pre_tool_use:0:0"]
+enabled = true
+trusted_hash = "sha256:f166b7ae3a88fad83412807ebefc5b33afae4f3f8e0a41add2e0a32dfcf64e61"
+
+[hooks.state."/home/user/.codex/hooks.json:stop:0:0"]
+enabled = true
+trusted_hash = "sha256:7b24686e47cd22a0f26605642b85e10dc1c4a66966faffd2b10490f30e88bfba"

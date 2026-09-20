@@ -1,0 +1,50 @@
+{
+  /* THE OTHER 37,000 LINES.
+   *
+   * tsconfig.check.json checks the server.ts graph: every module the engine
+   * actually boots. That is the production half, and it is zero. It is also
+   * less than half the TypeScript in this package -- the test files, the seam
+   * rig under test-utils/, the boot harness and the four e2e specs are none of
+   * them reachable from server.ts, so none of them was ever compiled by
+   * anything.
+   *
+   * WHAT THAT COST, found the day this config was written: enroll.test.ts
+   * declared `let engine: Engine | null = null` against a type it did not
+   * import, and had done since the file was rewritten. Nothing said a word.
+   *
+   * WHY IT MATTERS MORE THAN IT SOUNDS. test-utils/wire-core.ts performs the
+   * same ordered wiring server.ts's boot() does, with the same deps shapes, and
+   * the plan that built it says in as many words that drift in the wiring shape
+   * is caught by "E2E-1 plus the type system". The type system was not looking.
+   * A deps bag that has quietly stopped matching the module it is handed to is
+   * exactly the failure this catches and no test does, because a seam test that
+   * builds the wrong shape simply proves the wrong thing, green.
+   *
+   * Same compiler, same strictness, same pinned 5.7.3 as the production check.
+   * Two configs rather than one because `files` there names a graph and
+   * `include` here names a tree, and because "the shipped engine type-checks"
+   * and "the tests type-check" are two facts worth being able to read apart.
+   *
+   *   bun run typecheck        (runs both)
+   */
+  "compilerOptions": {
+    "noEmit": true,
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "typeRoots": ["./node_modules/@types", "./node_modules"],
+    "types": ["bun-types"],
+    "lib": ["esnext", "dom"]
+  },
+  "include": [
+    "src/bun-shims.d.ts",
+    "src/qrcode-terminal.d.ts",
+    "src/**/*.test.ts",
+    "src/e2e/**/*.ts",
+    "src/test-utils/**/*.ts",
+    "src/fixtures/**/*.ts"
+  ]
+}

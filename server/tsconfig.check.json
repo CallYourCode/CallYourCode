@@ -1,0 +1,35 @@
+{
+  /* THE APP SERVER'S TYPE CHECK, and where its compiler comes from.
+   *
+   * This package had no type check at all: `bun test` runs its 22 files and
+   * nothing ever compiled them, so a route handler could read a field the
+   * engine had renamed and the only way to find out was production.
+   *
+   * THE COMPILER IS THE ENGINE'S PINNED ONE (../engine/agent-engine/node_modules), and
+   * that is deliberate rather than lazy. The two packages share `shared/` and
+   * app-server cross-imports agent-engine/src/security/enroll.ts helpers, so one of them
+   * checking against a different TypeScript than the other would answer a
+   * different number about the same lines. gates.test.ts's note on the engine's
+   * own script makes the same argument about `bunx`: a version the tool picks
+   * for itself is a version nobody chose. This names 5.7.3, once, for both.
+   *
+   * Nothing here installs anything, which is why the typeRoots reach across
+   * rather than a devDependency being added.
+   *
+   *   bun run typecheck
+   */
+  "compilerOptions": {
+    "noEmit": true,
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "typeRoots": ["../engine/agent-engine/node_modules/@types", "../engine/agent-engine/node_modules"],
+    "types": ["bun-types"],
+    "lib": ["esnext", "dom"]
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
+}

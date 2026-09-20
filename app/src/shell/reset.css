@@ -1,0 +1,55 @@
+/* CYC document reset. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html {
+  -webkit-tap-highlight-color: transparent;
+  line-height: 1.5;
+}
+:where(ul) {
+  list-style: none;
+  padding-inline-start: 0;
+}
+a {
+  text-decoration: none;
+}
+button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  font-family: inherit;
+  font-size: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+:is(button, input):focus {
+  outline: 0;
+}
+:is(img, video) {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+/* Low elevation: a two-layer key/ambient shadow in the app ink. */
+.cyc-elevation-low {
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.18),
+    0 4px 12px rgba(0, 0, 0, 0.12);
+}
+/* App state classes. `!important` beats layered Tailwind and inline styles. */
+.cyc-off {
+  display: none !important;
+}
+.cyc-motion-suppressed {
+  transition: none !important;
+}
+
+strong {
+  font-weight: 500;
+}
+pre,
+code {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}

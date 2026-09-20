@@ -1,0 +1,275 @@
+{
+  "req": {
+    "empty": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        0
+      ],
+      "sha256": "411fc43ba88a03361445654349bc0cd3aae97eff044ec843c020d186989083d1"
+    },
+    "tiny": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        8
+      ],
+      "sha256": "ffff1bcceabecbf9c5cee3c433611ca94913f9bce8637a94076ef925156bdea2"
+    },
+    "json-ish": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        24
+      ],
+      "sha256": "f53714c33bacfd88fb6ff4700f1003d6e07bea483e90e1f264d30cd9d4917c6d"
+    },
+    "exactly-chunk": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        349528
+      ],
+      "sha256": "8a48517b61c6ff0c065f2057ea0740815b31d43c08c812adf74fae824cc59830"
+    },
+    "one-over": {
+      "frames": 2,
+      "more": [
+        true,
+        false
+      ],
+      "blens": [
+        349528,
+        4
+      ],
+      "sha256": "07691b25952286ef0ef567a74bf0933280bd3a74041a676ff5f7e35308e3e7c9"
+    },
+    "two-and-a-bit": {
+      "frames": 3,
+      "more": [
+        true,
+        true,
+        false
+      ],
+      "blens": [
+        349528,
+        349528,
+        136
+      ],
+      "sha256": "72977a61c703095f0f9a47efd1a235d24b86e91a9f09772140eb0b33479ad6c3"
+    }
+  },
+  "res": {
+    "empty": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        0
+      ],
+      "sha256": "239b5be64ed72906e1ae0550dabf99a4187b681ab68aa4d57f0178ec56a5e9f4"
+    },
+    "tiny": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        8
+      ],
+      "sha256": "50717ee562e3813ecf249a3676ec50e3dd6a05da0ce78a0a6cf62d683bec1c62"
+    },
+    "json-ish": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        24
+      ],
+      "sha256": "24e340e2ada7aad75deface79f0e3182ba288b1b2390c975ccc9eac2e691672c"
+    },
+    "exactly-chunk": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        349528
+      ],
+      "sha256": "d3a1f5b1a556310be9012887a31f1083d74a83e99e10e0297e7da2c2c5e782af"
+    },
+    "one-over": {
+      "frames": 2,
+      "more": [
+        true,
+        false
+      ],
+      "blens": [
+        349528,
+        4
+      ],
+      "sha256": "a4299cc972a1bd9a452dd3540761836a6317a900c15d24664aa862b76e6253bd"
+    },
+    "two-and-a-bit": {
+      "frames": 3,
+      "more": [
+        true,
+        true,
+        false
+      ],
+      "blens": [
+        349528,
+        349528,
+        136
+      ],
+      "sha256": "d2d4715ea89e58eda305369c3ce524ad90beca50cecdc57573bf89bca90f9912"
+    }
+  },
+  "reqStream": {
+    "empty": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        0
+      ],
+      "sha256": "411fc43ba88a03361445654349bc0cd3aae97eff044ec843c020d186989083d1"
+    },
+    "tiny": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        8
+      ],
+      "sha256": "ffff1bcceabecbf9c5cee3c433611ca94913f9bce8637a94076ef925156bdea2"
+    },
+    "json-ish": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        24
+      ],
+      "sha256": "f53714c33bacfd88fb6ff4700f1003d6e07bea483e90e1f264d30cd9d4917c6d"
+    },
+    "exactly-chunk": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        349528
+      ],
+      "sha256": "8a48517b61c6ff0c065f2057ea0740815b31d43c08c812adf74fae824cc59830"
+    },
+    "one-over": {
+      "frames": 2,
+      "more": [
+        true,
+        false
+      ],
+      "blens": [
+        349528,
+        4
+      ],
+      "sha256": "07691b25952286ef0ef567a74bf0933280bd3a74041a676ff5f7e35308e3e7c9"
+    },
+    "two-and-a-bit": {
+      "frames": 3,
+      "more": [
+        true,
+        true,
+        false
+      ],
+      "blens": [
+        349528,
+        349528,
+        136
+      ],
+      "sha256": "72977a61c703095f0f9a47efd1a235d24b86e91a9f09772140eb0b33479ad6c3"
+    }
+  },
+  "resStream": {
+    "empty": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        0
+      ],
+      "sha256": "239b5be64ed72906e1ae0550dabf99a4187b681ab68aa4d57f0178ec56a5e9f4"
+    },
+    "tiny": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        8
+      ],
+      "sha256": "50717ee562e3813ecf249a3676ec50e3dd6a05da0ce78a0a6cf62d683bec1c62"
+    },
+    "json-ish": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        24
+      ],
+      "sha256": "24e340e2ada7aad75deface79f0e3182ba288b1b2390c975ccc9eac2e691672c"
+    },
+    "exactly-chunk": {
+      "frames": 1,
+      "more": [
+        false
+      ],
+      "blens": [
+        349528
+      ],
+      "sha256": "d3a1f5b1a556310be9012887a31f1083d74a83e99e10e0297e7da2c2c5e782af"
+    },
+    "one-over": {
+      "frames": 2,
+      "more": [
+        true,
+        false
+      ],
+      "blens": [
+        349528,
+        4
+      ],
+      "sha256": "a4299cc972a1bd9a452dd3540761836a6317a900c15d24664aa862b76e6253bd"
+    },
+    "two-and-a-bit": {
+      "frames": 3,
+      "more": [
+        true,
+        true,
+        false
+      ],
+      "blens": [
+        349528,
+        349528,
+        136
+      ],
+      "sha256": "d2d4715ea89e58eda305369c3ce524ad90beca50cecdc57573bf89bca90f9912"
+    }
+  },
+  "reqAbort": "{\"t\":\"req-abort\",\"id\":\"ID\"}"
+}

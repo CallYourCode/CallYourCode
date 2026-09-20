@@ -1,0 +1,122 @@
+/* Search placeholder wipe-in. `hidden` uses display:none, so this cannot be a transition. */
+@keyframes cyc-search-label-reveal {
+  from {
+    clip-path: inset(0 100% 0 0);
+    transform: translateX(-6px);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+    transform: translateX(0);
+  }
+}
+
+.cyc-segstrip-scroll .cyc-overflow-x {
+  display: flex;
+  position: relative;
+}
+
+.cyc-seg.active {
+  color: var(--cyc-accent);
+}
+
+.cyc-seg.active .cyc-seg-bg {
+  opacity: 1;
+}
+
+/* Hide the conversation FAB inside the laptop left pane. */
+#cyc-left-pane .cyc-conversation-toggle {
+  display: none !important;
+}
+
+@keyframes cyc-pulse {
+  50% {
+    opacity: 0.72;
+  }
+}
+/* Message-list swap: out scales down and fades; dropping the class eases back in. */
+.cyc-msg-swapping {
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+}
+.cyc-msg-swapping.cyc-msg-swap-out {
+  opacity: 0;
+  transform: scale(0.95);
+  transition:
+    opacity 0.09s ease,
+    transform 0.09s ease;
+}
+
+.cyc-stack .cyc-session-entry.cyc-motion-suppressed {
+  transition: none;
+}
+
+
+.cyc-list-row-enter {
+  display: none;
+}
+.cyc-stack.cyc-armed .cyc-list-row-enter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cyc-stack.cyc-armed .cyc-session-entry .cyc-session-details {
+  padding-inline-end: 2.75rem;
+}
+
+@keyframes cyc-eq-bounce {
+  0%,
+  100% {
+    height: 30%;
+  }
+  50% {
+    height: 100%;
+  }
+}
+.cyc-host-tabs.cyc-reordering .cyc-seg {
+  transition: transform 0.2s ease;
+}
+.cyc-host-tabs .cyc-seg.cyc-motion-suppressed {
+  transition: none;
+}
+.cyc-agents-bar {
+  position: absolute;
+  top: calc(var(--cyc-chat-header-height) + 0.25rem);
+  inset-inline: 0;
+  width: 100%;
+  max-width: var(--cyc-chat-width);
+  margin-inline: auto;
+  border-radius: 1.25rem;
+  z-index: 2;
+  display: flex;
+  align-items: stretch;
+  box-shadow: 0px 1px 5px -1px rgba(0, 0, 0, 0.21);
+}
+.cyc-thread.cyc-has-agents-bar .cyc-voice-strip {
+  top: calc(100% + 3.625rem);
+}
+
+@media (max-width: 550px) {
+  #cyc-thread-pane .cyc-agents-bar {
+    border-radius: 0;
+    top: var(--cyc-chat-header-height);
+  }
+  #cyc-thread-pane .cyc-jump-bar {
+    top: var(--cyc-chat-header-height);
+  }
+  #cyc-thread-pane .cyc-thread.cyc-has-agents-bar .cyc-jump-bar {
+    top: calc(var(--cyc-chat-header-height) + 3.5rem);
+  }
+}
+@media (max-width: 550px) {
+  .cyc-jump-bar {
+    border-radius: 0;
+  }
+}
+html body .cyc-agents-bar,
+html body .cyc-seg,
+html body .cyc-seg-bg,
+html body .cyc-host-tabs-wrap {
+  border-radius: 6px !important;
+}

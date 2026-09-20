@@ -1,0 +1,281 @@
+<!doctype html>
+<!--
+  Archetype: EDITABLE BOARD. A task list he can actually work: sections
+  (Now / Next / Later), drag between them by the grip (SortableJS from CDN),
+  tick, tap-to-edit, delete, add. The arrangement is his work, so it persists.
+  cyc APIs: cyc.load() brings the board back, cyc.save() keeps every change
+  (debounced), cyc.submit() sends the whole board as JSON, cyc.close().
+  Works standalone too: without window.cyc it runs in preview mode.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Release week board</title>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+<style>
+  :root {
+    --bg: var(--cyc-bg, #f4f4f5); --surface: var(--cyc-surface, #ffffff);
+    --text: var(--cyc-text, #111114); --muted: var(--cyc-muted, #707579);
+    --accent: var(--cyc-accent, #3390ec); --border: var(--cyc-border, #dfe1e5);
+  }
+  html[data-cyc-theme="dark"] {
+    --bg: var(--cyc-bg, #181818); --surface: var(--cyc-surface, #212121);
+    --text: var(--cyc-text, #f2f2f5); --muted: var(--cyc-muted, #aaaaaa);
+    --accent: var(--cyc-accent, #8774e1); --border: var(--cyc-border, #3a3a3c);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 0 0 84px;
+  }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 14px 12px 0; }
+  h1 { font-size: 20px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; margin: 3px 0 12px; }
+
+  .grp { margin-bottom: 18px; }
+  .gh {
+    display: flex; align-items: baseline; gap: 8px;
+    font-size: 12px; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--accent);
+    border-bottom: 1px solid var(--border); padding: 0 2px 6px;
+  }
+  .gh .count { color: var(--muted); font-weight: 600; letter-spacing: 0; }
+
+  .items { list-style: none; margin: 0; padding: 6px 0 0; min-height: 50px; }
+  /* an empty section keeps a visible drop target */
+  .items:empty::after {
+    content: "drop tasks here"; display: block; padding: 12px 10px;
+    color: var(--muted); font-size: 13px; font-style: italic;
+    border: 1px dashed var(--border); border-radius: 10px; opacity: .75;
+  }
+
+  .task {
+    display: flex; align-items: center; gap: 4px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; margin: 8px 0; padding: 4px;
+    touch-action: pan-y; /* vertical page scroll stays; the grip owns the drag */
+  }
+  .task.sortable-chosen { box-shadow: 0 8px 22px rgba(0, 0, 0, .25); }
+  .task.sortable-ghost { opacity: .4; border-style: dashed; }
+  .grip {
+    flex: 0 0 40px; min-height: 48px; border: 0; background: none;
+    color: var(--muted); font-size: 20px; cursor: grab; touch-action: none;
+  }
+  .txt { flex: 1; min-width: 0; padding: 12px 2px; word-break: break-word; }
+  .txt[contenteditable="true"] {
+    outline: 1px dashed var(--accent); border-radius: 6px; padding: 12px 6px;
+  }
+  .task.done .txt { color: var(--muted); text-decoration: line-through; }
+  .tick, .del {
+    flex: 0 0 44px; min-height: 44px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--bg); color: var(--muted);
+    font-size: 16px; cursor: pointer;
+  }
+  .del { border: 0; background: none; }
+  .task.done .tick { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  .add {
+    width: 100%; min-height: 44px; margin-top: 4px;
+    border: 1px dashed var(--border); border-radius: 10px;
+    background: none; color: var(--muted); font: inherit; cursor: pointer;
+  }
+
+  .bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    background: var(--surface); border-top: 1px solid var(--border);
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  }
+  .bar-inner { max-width: 640px; margin: 0 auto; display: flex; gap: 10px; align-items: center; }
+  .status { flex: 1; font-size: 12.5px; color: var(--muted); }
+  #send {
+    min-height: 48px; padding: 0 18px; border: 0; border-radius: 10px;
+    background: var(--accent); color: #fff; font: inherit; font-size: 16px;
+    font-weight: 600; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Release week</h1>
+  <p class="sub">Drag by the ≡ grip to reorder or move between sections. Tap a task to edit its text. Every change is kept.</p>
+
+  <section class="grp">
+    <div class="gh">Now <span class="count" data-count="now"></span></div>
+    <ul class="items" id="now"></ul>
+    <button class="add" data-add="now">+ add to Now</button>
+  </section>
+  <section class="grp">
+    <div class="gh">Next <span class="count" data-count="next"></span></div>
+    <ul class="items" id="next"></ul>
+    <button class="add" data-add="next">+ add to Next</button>
+  </section>
+  <section class="grp">
+    <div class="gh">Later <span class="count" data-count="later"></span></div>
+    <ul class="items" id="later"></ul>
+    <button class="add" data-add="later">+ add to Later</button>
+  </section>
+</div>
+
+<div class="bar"><div class="bar-inner">
+  <div class="status" id="status"></div>
+  <button id="send">Send board</button>
+</div></div>
+
+<script>
+  'use strict';
+  const inApp = typeof window.cyc !== 'undefined';
+  const bridge = inApp ? window.cyc : {
+    load:   async () => ({ ok: true, saved: false, data: null }),
+    save:   async () => ({ ok: false, message: 'preview mode' }),
+    submit: async () => ({ ok: false, message: 'preview mode: not inside the app, nothing was sent' }),
+    close:  () => {},
+  };
+
+  const SECTIONS = ['now', 'next', 'later'];
+  // invented demo tasks; a real board would be written by the agent that shows it
+  const SEED = {
+    now: [
+      { text: 'Fix the flaky login test on CI', done: false },
+      { text: 'Write the release notes draft', done: false },
+      { text: 'Bump the API client to v3', done: true },
+    ],
+    next: [
+      { text: 'Add a retry to the image upload', done: false },
+      { text: 'Profile the slow settings screen', done: false },
+    ],
+    later: [
+      { text: 'Migrate icons to the new set', done: false },
+      { text: 'Explore offline-first storage', done: false },
+    ],
+  };
+
+  const $ = (s, el) => (el || document).querySelector(s);
+  const $$ = (s, el) => [...(el || document).querySelectorAll(s)];
+
+  // ---- rows ----------------------------------------------------------------
+  function addRow(section, item) {
+    const li = document.createElement('li');
+    li.className = 'task' + (item.done ? ' done' : '');
+    li.innerHTML =
+      '<button class="grip" aria-label="drag">≡</button>' +
+      '<div class="txt"></div>' +
+      '<button class="tick" aria-label="done">✓</button>' +
+      '<button class="del" aria-label="delete">✕</button>';
+    $('.txt', li).textContent = item.text;
+    const txt = $('.txt', li);
+    txt.addEventListener('click', () => {
+      if (txt.getAttribute('contenteditable') !== 'true') {
+        txt.setAttribute('contenteditable', 'true');
+        txt.focus();
+      }
+    });
+    txt.addEventListener('blur', () => {
+      txt.removeAttribute('contenteditable');
+      if (!txt.textContent.trim()) li.remove(); // an emptied task is a deleted task
+      changed();
+    });
+    $('.tick', li).addEventListener('click', () => { li.classList.toggle('done'); changed(); });
+    $('.del', li).addEventListener('click', () => { li.remove(); changed(); });
+    document.getElementById(section).appendChild(li);
+  }
+
+  function readBoard() {
+    const board = {};
+    for (const s of SECTIONS) {
+      board[s] = $$('#' + s + ' .task').map(li => ({
+        text: $('.txt', li).textContent.trim(),
+        done: li.classList.contains('done'),
+      })).filter(t => t.text);
+    }
+    return board;
+  }
+
+  function drawBoard(board) {
+    for (const s of SECTIONS) {
+      document.getElementById(s).textContent = '';
+      (board[s] || []).forEach(item => addRow(s, item));
+    }
+    paintCounts();
+  }
+
+  function paintCounts() {
+    const board = readBoard();
+    for (const s of SECTIONS) {
+      const open = board[s].filter(t => !t.done).length;
+      $(`[data-count="${s}"]`).textContent = `${open} open / ${board[s].length}`;
+    }
+  }
+
+  // ---- persistence ---------------------------------------------------------
+  let saveTimer = null;
+  let loadFailed = false;
+  function changed() {
+    paintCounts();
+    if (loadFailed) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      const r = await bridge.save({ board: readBoard() });
+      $('#status').textContent = r.ok ? 'saved'
+        : (inApp ? 'not saved: ' + (r.message || '') : 'Preview mode: not connected to the app.');
+    }, 800);
+  }
+
+  // ---- drag ----------------------------------------------------------------
+  // one Sortable per section, same group name = drag between them
+  if (typeof Sortable !== 'undefined') {
+    for (const s of SECTIONS) {
+      new Sortable(document.getElementById(s), {
+        group: 'board', handle: '.grip', animation: 150, onSort: changed,
+      });
+    }
+  } else {
+    // the CDN did not load (offline?); the board still works, minus dragging
+    $('#status').textContent = 'Drag disabled: SortableJS did not load.';
+  }
+
+  // ---- add / submit --------------------------------------------------------
+  $$('.add').forEach(btn => btn.addEventListener('click', () => {
+    addRow(btn.dataset.add, { text: 'New task', done: false });
+    const li = document.getElementById(btn.dataset.add).lastElementChild;
+    const txt = $('.txt', li);
+    txt.setAttribute('contenteditable', 'true');
+    // select the placeholder so typing replaces it
+    const range = document.createRange();
+    range.selectNodeContents(txt);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    txt.focus();
+    changed();
+  }));
+
+  $('#send').addEventListener('click', async () => {
+    const board = readBoard();
+    const open = SECTIONS.reduce((n, s) => n + board[s].filter(t => !t.done).length, 0);
+    const r = await bridge.submit({
+      label: `Board: ${open} open`,
+      body: { kind: 'release-week-board', board },
+    });
+    $('#status').textContent = r.ok
+      ? 'Board staged on the composer.'
+      : 'Submit failed: ' + (r.message || 'unknown');
+  });
+
+  // ---- boot: saved board first, seed only when nothing is stored -----------
+  (async () => {
+    const r = await bridge.load();
+    if (!r.ok) {
+      loadFailed = true;
+      drawBoard(SEED);
+      $('#status').textContent = 'Could not read the saved board; saving is off so it is not overwritten.';
+      return;
+    }
+    drawBoard(r.saved && r.data && r.data.board ? r.data.board : SEED);
+    if (!inApp) $('#status').textContent = 'Preview mode: not connected to the app.';
+  })();
+</script>
+</body>
+</html>

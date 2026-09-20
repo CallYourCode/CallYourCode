@@ -1,0 +1,29 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "callyourcode-turn",
+      "dependencies": {
+        "turn-server": "0.6.6",
+      },
+    },
+  },
+  "packages": {
+    "@rgrove/parse-xml": ["@rgrove/parse-xml@4.2.3", "", {}, "sha512-Jhlb+0zYez1T1yXUQs3F1qAtFuJljBVNdy9TKmLDauAXkxsOXopKYOyQ5Wm6SvP3fycav0GviX4Y15WWhGetMw=="],
+
+    "lemon-tls": ["lemon-tls@0.7.0", "", {}, "sha512-ISJCWju0XZ7/bxMTdMTX7RC9M5Po7FP/ySCO4ktZTdMMXfr32B2OSV3lZ1N3tSxSttB8oL3DAv5SWfL4lFeWCw=="],
+
+    "mdns-local": ["mdns-local@0.1.0", "", {}, "sha512-oeLjn8+LRCnegwvi20mDbcSr1Vjh654AD55SSAJqGZzd7eQ+Ozf31iMWBBCFOjxONt7jXRlcmmK6mCKNOdp5xQ=="],
+
+    "port-mapper": ["port-mapper@0.1.3", "", { "dependencies": { "@rgrove/parse-xml": "^4.2.3" }, "optionalDependencies": { "turn-server": "^0.5.6" } }, "sha512-lsmWlVypRpa/0LodRZAiTDONebqPBLqoxCpSwx0U5xLA2bZhRZ5D7f80c0lC1PZVVpFxMC/rdMFFBJsX1s0PEQ=="],
+
+    "turn-server": ["turn-server@0.6.6", "", { "optionalDependencies": { "lemon-tls": "^0.7.0", "mdns-local": "^0.1.0", "port-mapper": "^0.1.3", "ws": "^8.18.0" } }, "sha512-82hl3HqjjLb3EnFnGBfCQjnVO5tSUFA6nCwomPKZjFXVYFe8oNTaTIMXr2hcCO9otIpZXaKT7iyJeA6TUknj+g=="],
+
+    "ws": ["ws@8.21.3", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw=="],
+
+    "port-mapper/turn-server": ["turn-server@0.5.6", "", { "optionalDependencies": { "lemon-tls": "^0.5.5", "ws": "^8.18.0" } }, "sha512-pOCvLNIBzyVwDSScc8oIwhxNRCVi2LmtDgfja7EVGaw8AwEzT4k5mHI66ynRdiwuin35d54tKAVfDhD4DI53MA=="],
+
+    "port-mapper/turn-server/lemon-tls": ["lemon-tls@0.5.5", "", {}, "sha512-n65z7gNekhgOzgFumYEpKcPmJSV7pKk7R/zui3wVCn7D1DgK9MDyaD6zA8wkkwIyXTNiorkEBQZjw1E5LL2XMQ=="],
+  }
+}

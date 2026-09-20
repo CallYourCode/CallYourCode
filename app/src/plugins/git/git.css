@@ -1,0 +1,228 @@
+@charset "UTF-8";
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    'Helvetica Neue',
+    Ubuntu,
+    Arial,
+    sans-serif;
+}
+
+#cyc-app {
+  position: relative;
+  height: 100%;
+}
+
+#cyc-stage {
+  position: absolute;
+  inset: 0;
+}
+
+
+:where(#cyc-app),
+:where(#cyc-app) :where(*) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--cyc-overflow) transparent;
+}
+
+:where(#cyc-app)::-webkit-scrollbar,
+:where(#cyc-app) ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+:where(#cyc-app)::-webkit-scrollbar-track,
+:where(#cyc-app)::-webkit-scrollbar-track-piece,
+:where(#cyc-app)::-webkit-scrollbar-corner,
+:where(#cyc-app) ::-webkit-scrollbar-track,
+:where(#cyc-app) ::-webkit-scrollbar-track-piece,
+:where(#cyc-app) ::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+:where(#cyc-app)::-webkit-scrollbar-button,
+:where(#cyc-app) ::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+:where(#cyc-app)::-webkit-scrollbar-thumb,
+:where(#cyc-app) ::-webkit-scrollbar-thumb {
+  background: var(--cyc-overflow);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 10px;
+}
+
+:where(#cyc-app)::-webkit-scrollbar-thumb:hover,
+:where(#cyc-app) ::-webkit-scrollbar-thumb:hover {
+  background: var(--cyc-overflow-hover);
+  background-clip: padding-box;
+}
+
+:where(#cyc-app)::-webkit-scrollbar-thumb:active,
+:where(#cyc-app) ::-webkit-scrollbar-thumb:active {
+  background: var(--cyc-overflow-active);
+  background-clip: padding-box;
+}
+
+/* Code viewer geometry: `--fx-line-h` from the font step, `--fx-num-w` from the line count. */
+#cyc-app .cyc-fx-code-wrap {
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+  padding: 0.5rem 0;
+  --fx-line-h: 18px;
+  --fx-num-w: 3ch;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+  line-height: var(--fx-line-h);
+  white-space: normal;
+  background: none;
+}
+
+#cyc-app .cyc-fx-line {
+  display: flex;
+  align-items: stretch;
+  min-height: var(--fx-line-h);
+}
+
+#cyc-app .cyc-fx-num {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  box-sizing: content-box;
+  width: var(--fx-num-w);
+  padding: 0 0.5rem 0 0.75rem;
+  text-align: right;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#cyc-app .cyc-fx-ln {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0 0.75rem 0 0.5rem;
+  font: inherit;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  background: none;
+  color: inherit;
+}
+
+
+#cyc-app .cyc-gt-diff .cyc-fx-num {
+  background: inherit;
+}
+
+#cyc-app .cyc-gt-diff .cyc-fx-num:nth-of-type(2) {
+  left: calc(var(--fx-num-w) + 1.25rem);
+  padding: 0 0.5rem 0 0.25rem;
+}
+
+#cyc-app .cyc-gt-sign {
+  position: sticky;
+  left: calc(2 * var(--fx-num-w) + 2rem);
+  z-index: 1;
+  flex: 0 0 1ch;
+  align-self: stretch;
+  background: inherit;
+  text-align: center;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Residual: the word-wrap reflow. A state (`.cyc-fx-wrapped`) toggled on the pane
+   that reflows its descendant code-wrap and lines -- a descendant relationship. */
+#cyc-app .cyc-fx-wrapped .cyc-fx-code-wrap {
+  width: auto;
+}
+
+#cyc-app .cyc-fx-wrapped .cyc-fx-ln {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+/* Residual: text-selection allowances. Descendant (`.cyc-fx *`) relationships:
+   the viewer's text is selectable, its controls and gutters are not. */
+#cyc-app .cyc-fx,
+#cyc-app .cyc-fx * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#cyc-app .cyc-fx button,
+#cyc-app .cyc-fx .cyc-fx-num,
+#cyc-app .cyc-fx .cyc-fx-icon,
+#cyc-app .cyc-fx .cyc-fx-icon-seti,
+#cyc-app .cyc-fx .cyc-fx-vbtn,
+#cyc-app .cyc-fx .cyc-fx-vbtn-wrap {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Residual: git-owned combinator / pseudo / compound-state overrides the layered
+   gitChrome.ts utilities and inline paint must yield to, plus the `.cyc-gt-dim`
+   opacity toggle and the modal stacking. */
+#cyc-app .cyc-gt > .cyc-modal {
+  z-index: 20;
+}
+
+#cyc-app .cyc-gt-dim {
+  opacity: 0.65;
+}
+
+#cyc-app .cyc-gt-brow:last-child {
+  border-bottom: none;
+}
+
+#cyc-app .cyc-gt-clabel .cyc-gt-name {
+  flex: 1 1 auto;
+}
+
+#cyc-app .cyc-gt-act.cyc-gt-act-off {
+  background: none;
+  opacity: 0.5;
+}
+
+#cyc-app .cyc-cx-file:first-child {
+  border-top: none;
+}
+
+#cyc-app .cyc-cx-frow .cyc-gt-name {
+  flex: 0 1 auto;
+}
+
+#cyc-app .cyc-cx-stepbtn[disabled] {
+  opacity: 0.3;
+  cursor: default;
+}
+
+#cyc-app .cyc-gt,
+#cyc-app .cyc-gt * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#cyc-app .cyc-gt button,
+#cyc-app .cyc-gt .cyc-gt-act,
+#cyc-app .cyc-gt .cyc-gt-refresh {
+  user-select: none;
+  -webkit-user-select: none;
+}

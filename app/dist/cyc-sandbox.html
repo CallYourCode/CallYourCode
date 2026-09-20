@@ -1,0 +1,19 @@
+<!doctype html>
+
+<meta charset="utf-8" />
+<script>
+  (function () {
+    'use strict';
+    function onMsg(e) {
+      if (e.source !== window.parent) return;
+      var m = e.data;
+      if (!m || m.cycSandbox !== 1 || m.type !== 'doc' || typeof m.html !== 'string') return;
+      window.removeEventListener('message', onMsg);
+      document.open();
+      document.write(m.html);
+      document.close();
+    }
+    window.addEventListener('message', onMsg);
+    window.parent.postMessage({cycSandbox: 1, type: 'ready'}, '*');
+  })();
+</script>

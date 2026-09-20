@@ -1,0 +1,21 @@
+{
+  "default": "ok.",
+  "rules": [
+    {
+      "match": "SLOW-TURN",
+      "reply": "working on it, this takes a while: SLOW-TURN in progress and still going, chunk by chunk, until the stream ends.",
+      "slowMs": 400,
+      "chunks": 25
+    },
+    {
+      "match": "LONG-TURN",
+      "reply": "a long one: LONG-TURN streaming slowly for most of a minute so the harness stays busy while a schedule comes due, chunk after chunk after chunk, until the stream finally ends.",
+      "slowMs": 1500,
+      "chunks": 30
+    },
+    {
+      "match": "ECHO",
+      "reply": "echo: {{last}}"
+    }
+  ]
+}

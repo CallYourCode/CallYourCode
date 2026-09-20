@@ -1,0 +1,62 @@
+diff --git a/node_modules/werift/.bun-tag-88fa462f6db25595 b/.bun-tag-88fa462f6db25595
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/werift/.bun-tag-fae87b3939cfc328 b/.bun-tag-fae87b3939cfc328
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/lib/common/src/transport.js b/lib/common/src/transport.js
+index 4f11da0c6df6a8c6e8cb44cf6e1a1c2090c1e60e..a5580dd52549cd75824f0b873d05d1d64773c3cb 100644
+--- a/lib/common/src/transport.js
++++ b/lib/common/src/transport.js
+@@ -140,6 +140,12 @@ class UdpTransport {
+                 log("onData error", error);
+             }
+         });
++        /* cyc: an ICE connectivity check to a closed port makes the kernel return ICMP port unreachable; node surfaces it as a "recvmsg ECONNREFUSED" "error" event, and with no listener it becomes an uncaughtException that kills the engine. Log it and drop it: a refused check is a failed candidate pair, not a dead transport, so ICE keeps working. */
++        this.socket.on("error", (err) => {
++            if (this.closed)
++                return;
++            log("socket error", err);
++        });
+     }
+     static async init(type, options = {}) {
+         const transport = new UdpTransport(type, options);
+diff --git a/lib/index.mjs b/lib/index.mjs
+index bd453cff7e694f564dff562025b3f6047d86ee50..23255ce8100b0cb21e6560ffb198c83d0c56e0ed 100644
+--- a/lib/index.mjs
++++ b/lib/index.mjs
+@@ -648,6 +648,12 @@ var UdpTransport = class _UdpTransport {
+         log("onData error", error);
+       }
+     });
++    /* cyc: an ICE connectivity check to a closed port makes the kernel return ICMP port unreachable; node surfaces it as a "recvmsg ECONNREFUSED" "error" event, and with no listener it becomes an uncaughtException that kills the engine. Log it and drop it: a refused check is a failed candidate pair, not a dead transport, so ICE keeps working. */
++    this.socket.on("error", (err) => {
++      if (this.closed)
++        return;
++      log("socket error", err);
++    });
+   }
+   type = "udp";
+   socket;
+@@ -12750,7 +12756,7 @@ var log30 = debug("werift/sctp/sctp");
+ var COOKIE_LENGTH = 24;
+ var COOKIE_LIFETIME = 60;
+ var MAX_STREAMS = 65535;
+-var USERDATA_MAX_LENGTH = 1200;
++var USERDATA_MAX_LENGTH = 1024;
+ var SCTP_DATA_LAST_FRAG = 1;
+ var SCTP_DATA_FIRST_FRAG = 2;
+ var SCTP_DATA_UNORDERED = 4;
+diff --git a/lib/sctp/src/sctp.js b/lib/sctp/src/sctp.js
+index 45d5e3ce415add4a686b7da8bcbd89fa330d0b6e..26956bf0815d81e104a45afba82ca923e86f6a30 100644
+--- a/lib/sctp/src/sctp.js
++++ b/lib/sctp/src/sctp.js
+@@ -13,7 +13,7 @@ const log = (0, common_1.debug)("werift/sctp/sctp");
+ const COOKIE_LENGTH = 24;
+ const COOKIE_LIFETIME = 60;
+ const MAX_STREAMS = 65535;
+-const USERDATA_MAX_LENGTH = 1200;
++const USERDATA_MAX_LENGTH = 1024; /* cyc: 1200 lands the inner packet at exactly the tailscale 1280 MTU boundary and large frames die on wifi paths; 1024 clears it with margin */
+ // # protocol constants
+ const SCTP_DATA_LAST_FRAG = 0x01;
+ const SCTP_DATA_FIRST_FRAG = 0x02;

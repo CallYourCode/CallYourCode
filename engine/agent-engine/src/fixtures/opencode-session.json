@@ -1,0 +1,145 @@
+{
+  "session": {
+    "id": "ses_fef9371fbffewhWV3LZjuWdmn8",
+    "directory": "/home/user/projects/wt-612-engine-multiharness",
+    "title": "Pong reply request",
+    "agent": "build",
+    "model": {
+      "id": "deepseek-v4-pro",
+      "providerID": "deepseek",
+      "variant": "default"
+    },
+    "tokens_input": 8806,
+    "tokens_output": 3,
+    "tokens_cache_read": 0,
+    "tokens_reasoning": 20,
+    "time_created": 1786981944836,
+    "time_updated": 1786981948125
+  },
+  "messages": [
+    {
+      "id": "msg_0106c8f67001AQ2WBreXo8333x",
+      "session_id": "ses_fef9371fbffewhWV3LZjuWdmn8",
+      "time_created": 1786981945191,
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1786981945191
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "deepseek",
+          "modelID": "deepseek-v4-pro"
+        },
+        "summary": {
+          "diffs": []
+        }
+      }
+    },
+    {
+      "id": "msg_0106c8f77001M3UeTqIAgipZ81",
+      "session_id": "ses_fef9371fbffewhWV3LZjuWdmn8",
+      "time_created": 1786981945207,
+      "data": {
+        "parentID": "msg_0106c8f67001AQ2WBreXo8333x",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/home/user/projects/wt-612-engine-multiharness",
+          "root": "/home/user/projects/wt-612-engine-multiharness"
+        },
+        "cost": 0.00385062,
+        "tokens": {
+          "total": 8829,
+          "input": 8806,
+          "output": 3,
+          "reasoning": 20,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "deepseek-v4-pro",
+        "providerID": "deepseek",
+        "time": {
+          "created": 1786981945207,
+          "completed": 1786981948121
+        },
+        "finish": "stop"
+      }
+    }
+  ],
+  "parts": [
+    {
+      "id": "prt_0106c8f6c001wBn8ogNAWV8Hql",
+      "message_id": "msg_0106c8f67001AQ2WBreXo8333x",
+      "session_id": "ses_fef9371fbffewhWV3LZjuWdmn8",
+      "time_created": 1786981945199,
+      "data": {
+        "type": "text",
+        "text": "\"Reply with the single word pong and nothing else.\""
+      }
+    },
+    {
+      "id": "prt_0106c9575001ZcKXNy4qV0Vhy1",
+      "message_id": "msg_0106c8f77001M3UeTqIAgipZ81",
+      "session_id": "ses_fef9371fbffewhWV3LZjuWdmn8",
+      "time_created": 1786981946741,
+      "data": {
+        "snapshot": "9e0fca96aaeaf114f5b1e53a163b657123a28142",
+        "type": "step-start"
+      }
+    },
+    {
+      "id": "prt_0106c994c0015LaJ5pXspsEKOl",
+      "message_id": "msg_0106c8f77001M3UeTqIAgipZ81",
+      "session_id": "ses_fef9371fbffewhWV3LZjuWdmn8",
+      "time_created": 1786981947724,
+      "data": {
+        "type": "reasoning",
+        "text": "The user is asking me to reply with \"pong\" only. This is a simple request.",
+        "time": {
+          "start": 1786981947724,
+          "end": 1786981948082
+        }
+      }
+    },
+    {
+      "id": "prt_0106c9ab4001VZSfelgtYBaAKO",
+      "message_id": "msg_0106c8f77001M3UeTqIAgipZ81",
+      "session_id": "ses_fef9371fbffewhWV3LZjuWdmn8",
+      "time_created": 1786981948084,
+      "data": {
+        "type": "text",
+        "text": "pong",
+        "time": {
+          "start": 1786981948084,
+          "end": 1786981948085
+        }
+      }
+    },
+    {
+      "id": "prt_0106c9ac6001RkYMQEVW6m1kwE",
+      "message_id": "msg_0106c8f77001M3UeTqIAgipZ81",
+      "session_id": "ses_fef9371fbffewhWV3LZjuWdmn8",
+      "time_created": 1786981948103,
+      "data": {
+        "reason": "stop",
+        "snapshot": "9e0fca96aaeaf114f5b1e53a163b657123a28142",
+        "type": "step-finish",
+        "tokens": {
+          "total": 8829,
+          "input": 8806,
+          "output": 3,
+          "reasoning": 20,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "cost": 0.00385062
+      }
+    }
+  ]
+}

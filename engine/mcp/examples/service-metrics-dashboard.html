@@ -1,0 +1,217 @@
+<!doctype html>
+<!--
+  Archetype: METRICS DASHBOARD. Stat tiles with deltas over two uPlot charts
+  (a two-series latency line, a requests-per-hour bar). The two habits that
+  keep a canvas page alive in the viewer: size with a ResizeObserver (never
+  once at startup -- srcdoc pages can lay out after the script runs), and
+  rebuild the charts when data-cyc-theme flips so the colours follow the app.
+  cyc APIs: none -- a dashboard only shows; that is a legitimate page too.
+  The numbers are invented demo data; a real page inlines real numbers.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>api-gateway 24h</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1/dist/uPlot.min.css">
+<script src="https://cdn.jsdelivr.net/npm/uplot@1/dist/uPlot.iife.min.js"></script>
+<style>
+  :root {
+    --bg: var(--cyc-bg, #f4f4f5); --surface: var(--cyc-surface, #ffffff);
+    --text: var(--cyc-text, #111114); --muted: var(--cyc-muted, #707579);
+    --accent: var(--cyc-accent, #3390ec); --border: var(--cyc-border, #dfe1e5);
+    --good: #2c7a2c; --bad: #c0392b; --series2: #ff8c42;
+  }
+  html[data-cyc-theme="dark"] {
+    --bg: var(--cyc-bg, #181818); --surface: var(--cyc-surface, #212121);
+    --text: var(--cyc-text, #f2f2f5); --muted: var(--cyc-muted, #aaaaaa);
+    --accent: var(--cyc-accent, #8774e1); --border: var(--cyc-border, #3a3a3c);
+    --good: #5dbb63; --bad: #ff6b5e; --series2: #ffa163;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding-bottom: 24px;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 14px 12px 0; }
+  h1 { font-size: 19px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; margin: 3px 0 14px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 14px; }
+  @media (min-width: 560px) { .tiles { grid-template-columns: repeat(4, 1fr); } }
+  .tile {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 12px 10px;
+  }
+  .tile .v { font-size: 22px; font-weight: 700; }
+  .tile .l { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .tile .d { font-size: 12px; font-weight: 600; margin-top: 4px; }
+  .tile .d.up { color: var(--good); }
+  .tile .d.down { color: var(--bad); }
+
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px; margin-bottom: 14px;
+  }
+  .panel h2 { font-size: 14px; font-weight: 600; color: var(--muted); margin: 0 0 8px; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; }
+  .stage { width: 100%; }
+  .fallback { color: var(--muted); font-style: italic; padding: 16px 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>api-gateway</h1>
+  <p class="sub">Last 24 hours, hourly buckets. Invented demo data.</p>
+
+  <div class="tiles">
+    <div class="tile"><div class="v" id="t-req"></div><div class="l">requests</div><div class="d up" id="d-req"></div></div>
+    <div class="tile"><div class="v" id="t-err"></div><div class="l">error rate</div><div class="d" id="d-err"></div></div>
+    <div class="tile"><div class="v" id="t-p95"></div><div class="l">p95 latency</div><div class="d" id="d-p95"></div></div>
+    <div class="tile"><div class="v" id="t-up"></div><div class="l">uptime</div><div class="d up" id="d-up"></div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Latency, ms</h2>
+    <div class="legend">
+      <span><i id="lg-p50"></i>p50</span>
+      <span><i id="lg-p95"></i>p95</span>
+    </div>
+    <div class="stage" id="lat"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Requests per hour</h2>
+    <div class="stage" id="req"></div>
+  </div>
+</div>
+
+<script>
+  'use strict';
+  // ---- invented data, seeded so every open matches -------------------------
+  function mulberry32(a) {
+    return () => {
+      a |= 0; a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rnd = mulberry32(7);
+  const HOURS = 24;
+  const now = Math.floor(Date.now() / 1000);
+  const t0 = now - HOURS * 3600;
+  const xs = [], p50 = [], p95 = [], reqs = [];
+  for (let i = 0; i < HOURS; i++) {
+    const dayCurve = 0.55 + 0.45 * Math.sin(((i - 3) / 24) * 2 * Math.PI); // quiet nights
+    xs.push(t0 + i * 3600);
+    reqs.push(Math.round(1200 * dayCurve + rnd() * 260));
+    const base = 38 + 26 * dayCurve + rnd() * 8;
+    p50.push(Math.round(base));
+    p95.push(Math.round(base * (2.1 + rnd() * 0.9) + (i === 14 ? 160 : 0))); // one visible spike
+  }
+  const totalReq = reqs.reduce((a, b) => a + b, 0);
+
+  // tiles
+  const $ = s => document.querySelector(s);
+  $('#t-req').textContent = (totalReq / 1000).toFixed(1) + 'k';
+  $('#d-req').textContent = '+6% vs yesterday';
+  $('#t-err').textContent = '0.41%';
+  $('#d-err').textContent = '+0.12 pt';
+  $('#d-err').className = 'd down';
+  $('#t-p95').textContent = Math.max(...p95) + ' ms peak';
+  $('#d-p95').textContent = 'spike at 14:00';
+  $('#d-p95').className = 'd down';
+  $('#t-up').textContent = '99.98%';
+  $('#d-up').textContent = 'no incidents';
+
+  // ---- charts --------------------------------------------------------------
+  const HAVE_UPLOT = typeof uPlot !== 'undefined';
+  if (!HAVE_UPLOT) {
+    // the CDN did not load; say so instead of leaving silent empty panels
+    for (const id of ['lat', 'req']) {
+      const d = document.createElement('div');
+      d.className = 'fallback';
+      d.textContent = 'Chart library did not load (offline?). The tiles above still hold the numbers.';
+      document.getElementById(id).appendChild(d);
+    }
+  }
+
+  // colours come from the CSS variables, so one function serves both themes
+  function palette() {
+    const cs = getComputedStyle(document.documentElement);
+    const v = n => cs.getPropertyValue(n).trim();
+    return { accent: v('--accent'), series2: v('--series2'), muted: v('--muted'), grid: v('--border') };
+  }
+
+  const plots = { lat: null, req: null };
+  const sizes = { lat: { width: 0, height: 220 }, req: { width: 0, height: 180 } };
+
+  function axis(p) {
+    return { stroke: p.muted, grid: { stroke: p.grid, width: 1 }, ticks: { stroke: p.grid } };
+  }
+
+  function build() {
+    if (!HAVE_UPLOT) return;
+    const p = palette();
+    document.getElementById('lg-p50').style.background = p.accent;
+    document.getElementById('lg-p95').style.background = p.series2;
+    for (const key of ['lat', 'req']) {
+      plots[key]?.destroy();
+      plots[key] = null;
+      if (!sizes[key].width) continue; // stage not laid out yet; the observer will call again
+      const opts = key === 'lat' ? {
+        ...sizes.lat, legend: { show: false }, cursor: { show: false },
+        series: [
+          {},
+          { stroke: p.accent, width: 2 },
+          { stroke: p.series2, width: 2 },
+        ],
+        axes: [axis(p), { ...axis(p), size: 46 }],
+      } : {
+        ...sizes.req, legend: { show: false }, cursor: { show: false },
+        series: [
+          {},
+          { stroke: p.accent, fill: p.accent + '55', width: 1,
+            paths: uPlot.paths.bars({ size: [0.65, 100] }) },
+        ],
+        axes: [axis(p), { ...axis(p), size: 46 }],
+      };
+      const data = key === 'lat' ? [xs, p50, p95] : [xs, reqs];
+      plots[key] = new uPlot(opts, data, document.getElementById(key));
+    }
+  }
+
+  /* ResizeObserver, never a one-shot measure: in the viewer this document is
+     an iframe written with srcdoc, and the first layout can land AFTER this
+     script ran. The observer covers first layout, rotation, and resize. */
+  if (HAVE_UPLOT) {
+    /* rebuild on the NEXT frame, never inside the observer callback: build()
+       replaces the plot DOM inside the observed element, and doing that
+       synchronously makes webkit report a ResizeObserver loop */
+    let raf = 0;
+    const ro = new ResizeObserver(entries => {
+      let dirty = false;
+      for (const e of entries) {
+        const key = e.target.id;
+        const w = Math.round(e.contentRect.width);
+        if (w && w !== sizes[key].width) { sizes[key].width = w; dirty = true; }
+      }
+      if (dirty) { cancelAnimationFrame(raf); raf = requestAnimationFrame(build); }
+    });
+    ro.observe(document.getElementById('lat'));
+    ro.observe(document.getElementById('req'));
+
+    /* Rebuild when the app flips its theme: the viewer rewrites data-cyc-theme
+       (and the injected --cyc-* variables) on <html>, and canvases do not
+       follow CSS on their own. */
+    new MutationObserver(build).observe(document.documentElement, {
+      attributes: true, attributeFilter: ['data-cyc-theme', 'style'],
+    });
+  }
+</script>
+</body>
+</html>

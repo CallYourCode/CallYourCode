@@ -1,0 +1,22 @@
+
+[0m[38;2;215;119;87m╭───[0m [0m[38;2;215;119;87mClaude Code [0m[38;2;153;153;153mv2.1.221 [0m[38;2;215;119;87m─────────────────────────────────────────────────────╮[0m
+[0m[38;2;215;119;87m│                                                    [0m[2m[38;2;215;119;87m│ [0m[1m[38;2;215;119;87mTips for getting        [0m[38;2;215;119;87m│[0m
+[0m[38;2;215;119;87m│ [0m               [0m[1mWelcome back Example!               [0m[2m[38;2;215;119;87m│ [0m[1m[38;2;215;119;87mstarted                 [0m[38;2;215;119;87m│[0m
+[0m[38;2;215;119;87m│                                                    [0m[2m[38;2;215;119;87m│ [0mRun /init to create a … [0m[38;2;215;119;87m│[0m
+[0m[38;2;177;185;249m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔[0m
+   [0m[1m[38;2;177;185;249mSelect model[0m        
+   [0m[38;2;153;153;153mSwitch between Claude models. Your pick becomes the default for new [0m
+   [0m[38;2;153;153;153msessions. For other/previous model names, specify with --model.[0m
+
+   [0m[38;2;177;185;249m❯ [0m[38;2;153;153;153m1. [0m[38;2;78;186;101mDefault (recommended)[0m [0m[38;2;78;186;101m✔[0m  [0m[38;2;153;153;153mOpus 5 with 1M context · Best for everyday, [0m
+                                 [0m[38;2;153;153;153mcomplex tasks[0m
+     [0m[38;2;153;153;153m2. [0mOpus (1M context)        [0m[38;2;153;153;153mOpus 5 with 1M context · Best for everyday, [0m
+                                 [0m[38;2;153;153;153mcomplex tasks[0m
+     [0m[38;2;153;153;153m3. [0mFable                    [0m[38;2;215;119;87mFable 5[0m[38;2;153;153;153m · Most capable for your hardest and [0m
+                                 [0m[38;2;153;153;153mlongest-running tasks[0m
+     [0m[38;2;153;153;153m4. [0mSonnet                   [0m[38;2;215;119;87mSonnet 5[0m[38;2;153;153;153m · Efficient for routine tasks[0m
+   [0m[38;2;153;153;153m↓[0m [0m[38;2;153;153;153m5. [0mHaiku                    [0m[38;2;153;153;153mHaiku 4.5 · Fastest for quick answers[0m
+
+   [0m[38;2;215;119;87m●[0m[38;2;153;153;153m High effort (default) [0m[38;2;80;80;80m←/→ to adjust[0m
+
+   [0m[38;2;153;153;153mEnter to set as default · s to use this session only · Esc to cancel[0m

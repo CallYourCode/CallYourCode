@@ -1,0 +1,27 @@
+[
+  { "term": "herdr", "hints": ["header", "hurdle", "harder", "hidr", "herder"] },
+  {
+    "term": "CallYourCode",
+    "hints": [
+      "callyourcode",
+      "call your claude",
+      "call your clod",
+      "call your cloud",
+      "call your clot",
+      "call your clawed",
+      "call your claud",
+      "call you claude",
+      "call your called"
+    ]
+  },
+  { "term": "claude", "hints": ["clod", "cloud", "clot", "clawed", "claud", "clawd"] },
+  { "term": "linux", "hints": ["k8 plus", "cake plus", "kate plus", "k eight plus"] },
+  { "term": "tailscale", "hints": ["tailscape", "tail scale", "tale scale", "tailskill"] },
+  { "term": "whisper", "hints": ["wisper", "whispr", "visper"] },
+  { "term": "parakeet", "hints": ["paracate", "palicate", "parakete", "paraket", "para keet"] },
+  { "term": "kokoro", "hints": ["cocoro", "kokora", "kokoru", "cocorro"] },
+  { "term": "regtech", "hints": ["rectech", "reg tech", "rec tech", "wreck tech"] },
+  { "term": "MCP", "hints": ["mcp", "m c p"] },
+  { "term": "jsonl", "hints": ["json l", "jason l", "jasonl", "json-l"] },
+  { "term": "worktree", "hints": ["work tree", "worktry", "work three"] }
+]

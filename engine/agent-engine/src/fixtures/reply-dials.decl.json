@@ -1,0 +1,77 @@
+{
+  "id": "reply-dials",
+  "name": "Reply dials",
+  "version": 1,
+  "composer": [
+    {
+      "type": "menu",
+      "icon": "edit",
+      "label": "Prompt bits",
+      "key": "bits",
+      "items": [
+        {
+          "text": "short answer",
+          "insert": "short answer"
+        },
+        {
+          "text": "discuss. don't do.",
+          "insert": "discuss. don't do."
+        },
+        {
+          "text": "add to task list, don't discuss or do.",
+          "insert": "add to task list, don't discuss or do."
+        },
+        {
+          "text": "do in a background agent.",
+          "insert": "do in a background agent."
+        },
+        {
+          "text": "explain with examples.",
+          "insert": "explain with examples."
+        },
+        {
+          "text": "Answer with a md file with the show tool.",
+          "insert": "Answer with a md file with the show tool."
+        },
+        {
+          "text": "Show an interactive HTML page with the show tool.",
+          "insert": "Show an interactive HTML page with the show tool."
+        }
+      ]
+    },
+    {
+      "type": "slider",
+      "icon": "equalizer",
+      "label": "Verbosity",
+      "key": "verbosity",
+      "value": 3,
+      "steps": [
+        {
+          "n": 1,
+          "name": "Terminal",
+          "hint": "Reply with a copy of your terminal output via the chat tool. Send the same detail you would print in the terminal."
+        },
+        {
+          "n": 2,
+          "name": "Chat",
+          "hint": "Reply with the chat tool, the way you would message someone. complete but not exhaustive, structured where structure helps, a few short paragraphs at most."
+        },
+        {
+          "n": 3,
+          "name": "Read out",
+          "hint": "Reply with the chat tool AND the speak tool. Send a short spoken summary of the reply via speak tool and a full text message via chat tool."
+        },
+        {
+          "n": 4,
+          "name": "Spoken",
+          "hint": "Answer with the speak tool. The spoken answer must stand on its own: concise, complete, whole sentences, no markdown, no paths read aloud. Use the chat tool only for what speech cannot carry, when it is needed: code, tables, diffs, file paths, long lists."
+        },
+        {
+          "n": 5,
+          "name": "Voice only",
+          "hint": "Answer with the speak tool only: concise, complete, whole sentences, no markdown. Do not send a chat message."
+        }
+      ]
+    }
+  ]
+}

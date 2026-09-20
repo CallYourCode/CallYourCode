@@ -1,0 +1,57 @@
+{
+  "v": 2,
+  "identity": {
+    "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEosHu8rNZMjehiRdwSIhMG/8DS0RhEQp0gaHseM0eB+a59O1IfTnqnlSkqKUWEQUNk5mEe3Je00hRjGWeqMYtRQ==",
+    "fp": "IbAz_-vwDyQFnX3-h_Oivd7vu1PK6JAx9tCXyNdbP4o",
+    "fpDisplay": "21b0 33ff ebf0 0f24"
+  },
+  "deviceSpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFplBqNCrY2VsjPvoBZSkGbecPDB/4ZqH+ZiORz6gs5Fc1QAuQPloaiu2kXk7mYnJu3ZOndBOD95B5N7p5zAClg==",
+  "engEphJwk": {
+    "crv": "P-256",
+    "d": "9FWW_LnWPBLf0rgFPwWOcXxuBE_o0yhKkRUoP-pWE0g",
+    "ext": true,
+    "key_ops": [
+      "deriveBits"
+    ],
+    "kty": "EC",
+    "x": "BsS5pciiTwauxe5L5t6FROMskG0UD2xsluyyFP9iPFA",
+    "y": "4roCXjCcjK3aHFm7n42sES72j8oBxd9RBin0YECNHDQ"
+  },
+  "devEphJwk": {
+    "crv": "P-256",
+    "d": "X3xbtu2_zk3o6Co_esSIMfS0SZjHTSJVBVL73D5IKbw",
+    "ext": true,
+    "key_ops": [
+      "deriveBits"
+    ],
+    "kty": "EC",
+    "x": "7ZQGZlzaFNKyuHHhwcilnqI7k6ZUNvY_0-SbYxW4mVg",
+    "y": "qjuUttlLFsdpkMmHhaI87ZPbzeLzrdBdraxu6m5Ud1o"
+  },
+  "ce": "BO2UBmZc2hTSsrhx4cHIpZ6iO5OmVDb2P9Pkm2MVuJlYqjuUttlLFsdpkMmHhaI87ZPbzeLzrdBdraxu6m5Ud1o=",
+  "ee": "BAbEuaXIok8GrsXuS+behUTjLJBtFA9sbJbsshT/YjxQ4roCXjCcjK3aHFm7n42sES72j8oBxd9RBin0YECNHDQ=",
+  "cn": "F1s/2Nl8lU1H96zA06NYsg==",
+  "en": "Y+6xC7orC2g1m8KUUunWgg==",
+  "secSig": "I55XykyrfZYKrkryp7VT99nIgauptNzXlF09cn+Q1O/7GXhIXXHCF10ZLkmCH2oQ1z5d6qglkknQ9u2MkiyV0w==",
+  "secokSig": "5omhqyxYNtnYrpi5pEyRQjG7K9WgcrkM7YC6otzNEqYu8k+Q+CL6z10RiBEqUEdvqPiGNPTkWQ3mtigaoofstw==",
+  "frameInner": {
+    "t": "sec-done",
+    "fp": "IbAz_-vwDyQFnX3-h_Oivd7vu1PK6JAx9tCXyNdbP4o",
+    "paired": false
+  },
+  "sealed": {
+    "t": "x",
+    "n": 0,
+    "ct": "yH9imFgsC0rsL5X5RpLwZMPg3xxNSokjmXbxO0YjJpmcbjWP3OrUnI5qxw1kPrOzwD6kzrYlh/cUhalL1MoKi6z36C8hXcwb+XEh1uHS1o9CsWjzAI/V946mqZdAzEDo7lY="
+  },
+  "contentKey": "SaPBFqL1FbQwyoKY7mZv+UsZkWHaQpslVgLb1Boj4NU=",
+  "blobGen": 7,
+  "blob": "Q1lCMgAAAAcD0rdJ8fRpgzotataoY7S2QO2ku6aK5qNaNT6lZm6fOE7r",
+  "blobPt": "bm90ZSAx",
+  "engineNotifyPt": {
+    "title": "93% of the 5-hour limit",
+    "body": "sam@example.com · resets soon",
+    "open": "usage:linux"
+  },
+  "engineNotifyBlob": "ajv4OBN1f7BwTlIKBOLXsI3ieHxu0rwtQ3DcN/77P5raDvwD78BUL00kO9iu6yTPYmshFfE26jvFAKgvUMP5nt7DNX5DYNfg7xbWV/TH6NhURfhRef036gidGOB9fhZrq8otWu8FqTm/gkbCUHYWYeZ0akbyEpdK8aolpQ=="
+}

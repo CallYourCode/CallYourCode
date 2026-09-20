@@ -1,0 +1,13 @@
+# deps
+node_modules/
+# env / secrets
+.env
+.env.*
+!.env.*.example
+# logs / scratch
+*.log
+!testbench/evidence/*.log
+.DS_Store
+# per-machine
+*.tsbuildinfo
+*.local.md

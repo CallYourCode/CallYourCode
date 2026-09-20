@@ -1,0 +1,22 @@
+  33. Thirty-three is a nice palindrome.
+  34. Thirty-four sits in the Fibonacci sequence.
+  35. Thirty-five is five times seven.
+  36. Thirty-six is six squared.
+  37. Thirty-seven is prime and unassuming.
+  38. Thirty-eight is one shy of forty minus one.
+  39. Thirty-nine is three times thirteen.
+  40. Forty ends the list.
+  
+[0m[38;2;153;153;153m✻ Brewed for 9s[0m
+  
+[0m[38;2;80;80;80m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55mNow print the numbers 1 to 60 one per line with a sentence each. No tools.[0m[48;2;55;55;55m    [0m
+  
+[0m[38;2;215;119;87m✶ [0m[38;2;235;159;127mAct[0m[38;2;215;119;87mualizing… [0m
+[0m[38;2;153;153;153m  ⎿  Tip: Name your conversations with /rename to find them easily in /resume [0m
+     [0m[38;2;153;153;153mlater[0m
+                                                   
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────[0m
+[0m[38;2;153;153;153m❯ [0m
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────[0m
+  [0m[38;2;153;153;153mO5 · high · ctx 3% · example · 5h 36% · 7d 69% · $0           [0m            [0m[38;2;78;186;101m/rc[0m
+  [0m[38;2;153;153;153m⏸ manual mode on · ← 3 agents[0m

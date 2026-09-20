@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CallYourCode</title>
+<meta name="description" content="Talk to your own coding agents from your phone, in your own voice. Your machine. Your tailnet. No company server in the path.">
+<style>
+  :root {
+    --ground: #0d1117;
+    --panel: #131a24;
+    --line: #222c39;
+    --ink: #e9e5da;
+    --muted: #9aa3b2;
+    --accent: #34c26b;
+    --accent-dim: #7fe0a6;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 65ch;
+    margin: 0 auto;
+    padding: 0 20px;
+  }
+  header { padding: 72px 0 8px; }
+  h1 {
+    font-family: var(--mono);
+    font-size: clamp(2rem, 8vw, 3rem);
+    letter-spacing: -0.02em;
+    margin: 0 0 12px;
+    color: var(--ink);
+    word-break: break-word;
+  }
+  .thesis {
+    font-size: clamp(1.15rem, 4.5vw, 1.4rem);
+    line-height: 1.5;
+    color: var(--ink);
+    margin: 0 0 28px;
+    max-width: 30ch;
+  }
+  section { padding: 40px 0; border-top: 1px solid var(--line); }
+  section:first-of-type { border-top: none; }
+  h2 {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+    margin: 0 0 18px;
+  }
+  h3 {
+    font-family: var(--mono);
+    font-size: 1rem;
+    margin: 0 0 4px;
+    color: var(--ink);
+  }
+  p { margin: 0 0 16px; }
+  p:last-child { margin-bottom: 0; }
+  .subline { color: var(--muted); font-size: 0.95rem; margin-top: 14px; }
+
+  .cmd {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .cmd code {
+    font-family: var(--mono);
+    font-size: 0.86rem;
+    color: var(--accent-dim);
+    padding: 14px 16px;
+    overflow-x: auto;
+    white-space: nowrap;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .cmd code .prompt { color: var(--muted); user-select: none; }
+  .copy {
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    background: transparent;
+    color: var(--accent);
+    border: none;
+    border-left: 1px solid var(--accent);
+    padding: 0 16px;
+    cursor: pointer;
+    letter-spacing: 0.06em;
+  }
+  .copy:hover, .copy:focus-visible { background: var(--accent); color: var(--ground); outline: none; }
+
+  .steps { list-style: none; padding: 0; margin: 0 0 28px; counter-reset: step; }
+  .steps li { position: relative; padding-left: 40px; margin-bottom: 20px; }
+  .steps li:last-child { margin-bottom: 0; }
+  .steps li::before {
+    counter-increment: step;
+    content: counter(step);
+    position: absolute;
+    left: 0; top: 0;
+    width: 26px; height: 26px;
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    line-height: 26px;
+    text-align: center;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 50%;
+  }
+  .steps p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+  .steps code { font-family: var(--mono); color: var(--ink); font-size: 0.9em; }
+
+  .diagram {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--muted);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 16px;
+    overflow-x: auto;
+    margin: 0;
+    white-space: pre;
+  }
+
+  .row {
+    font-family: var(--mono);
+    font-size: 0.92rem;
+    color: var(--ink);
+    line-height: 1.9;
+  }
+  .row .sep { color: var(--muted); }
+
+  ul.plain { list-style: none; padding: 0; margin: 0; }
+  ul.plain li { padding-left: 20px; position: relative; margin-bottom: 10px; color: var(--muted); }
+  ul.plain li:last-child { margin-bottom: 0; }
+  ul.plain li::before { content: "\2013"; position: absolute; left: 0; color: var(--line); }
+  ul.plain strong { color: var(--ink); font-weight: 600; }
+
+  footer {
+    padding: 40px 0 72px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  footer a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--line); }
+  footer a:hover, footer a:focus-visible { color: var(--accent); border-bottom-color: var(--accent); outline: none; }
+  footer .meta { font-family: var(--mono); font-size: 0.82rem; margin-top: 10px; }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <h1>CallYourCode</h1>
+    <p class="thesis">Talk to your own coding agents from your phone, in your own voice.</p>
+    <div class="cmd">
+      <code id="install-cmd"><span class="prompt">$ </span>curl -fsSL https://callyourcode.com/install.sh | sh</code>
+      <button class="copy" id="copy-btn" type="button" aria-label="Copy install command">copy</button>
+    </div>
+    <p class="subline">Your machine. Your tailnet. No company server in the path.</p>
+  </header>
+
+  <section>
+    <h2>The wow moment</h2>
+    <p>Walk away from the desk and your phone rings itself into a conversation: an agent finishes a task and speaks the result. You reply out loud, "run the tests again and tell me what broke," and the words land in the pane as input while the agent keeps going. The whole loop runs on your own hardware over your own network.</p>
+  </section>
+
+  <section>
+    <h2>How it works</h2>
+    <ol class="steps">
+      <li>
+        <h3>Install</h3>
+        <p>Run the one-liner. It installs Bun if missing, clones the repo to <code>~/callyourcode</code>, wires up your detected agents, and starts the services.</p>
+      </li>
+      <li>
+        <h3>Pair</h3>
+        <p>Run <code>cyc pair</code>, pick Local or Cloud, and open the link (or scan the QR) on your phone.</p>
+      </li>
+      <li>
+        <h3>Talk</h3>
+        <p>Open an agent pane on your phone and speak. What you say lands as ordinary terminal input; the agent speaks back.</p>
+      </li>
+    </ol>
+    <pre class="diagram" aria-label="phone connects to your machine over a sealed end-to-end WebRTC DataChannel">  phone  &lt;===  sealed E2E WebRTC  ===&gt;  your machine
+                                        (agent panes in tmux)</pre>
+  </section>
+
+  <section>
+    <h2>Works with</h2>
+    <p class="row">Claude Code <span class="sep">/</span> Codex <span class="sep">/</span> OpenCode <span class="sep">/</span> Pi</p>
+    <p class="subline">over tmux (the default) or herdr.</p>
+  </section>
+
+  <section>
+    <h2>Private by construction</h2>
+    <ul class="plain">
+      <li>The phone-to-engine link is a <strong>sealed, end-to-end encrypted WebRTC DataChannel</strong>. No company server sits in the data path.</li>
+      <li>Speech is synthesized and transcribed <strong>in-process</strong> by sherpa-onnx (kokoro for text to speech, whisper for speech to text). No cloud speech API, and no audio leaves your machine.</li>
+      <li>Everything is <strong>four Bun/TypeScript services and a PWA</strong>, running on your own hardware.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <p><a href="https://github.com/CallYourCode/CallYourCode">github.com/CallYourCode/CallYourCode</a></p>
+    <p class="meta">Runs on Bun.</p>
+  </footer>
+</main>
+
+<script>
+  (function () {
+    var btn = document.getElementById("copy-btn");
+    var cmd = "curl -fsSL https://callyourcode.com/install.sh | sh";
+    btn.addEventListener("click", function () {
+      function done() {
+        var prev = btn.textContent;
+        btn.textContent = "copied";
+        setTimeout(function () { btn.textContent = prev; }, 1600);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(cmd).then(done, fallback);
+      } else {
+        fallback();
+      }
+      function fallback() {
+        var ta = document.createElement("textarea");
+        ta.value = cmd;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "absolute";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+    });
+  })();
+</script>
+</body>
+</html>

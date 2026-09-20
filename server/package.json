@@ -1,0 +1,14 @@
+{
+  "name": "cyc-app-server",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run src/bootstrap/server.ts",
+    "test": "bun test",
+    "typecheck": "../engine/agent-engine/node_modules/.bin/tsc -p tsconfig.check.json --noEmit"
+  },
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}

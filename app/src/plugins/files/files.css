@@ -1,0 +1,183 @@
+@charset "UTF-8";
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    'Helvetica Neue',
+    Ubuntu,
+    Arial,
+    sans-serif;
+}
+
+#cyc-app {
+  position: relative;
+  height: 100%;
+}
+
+#cyc-stage {
+  position: absolute;
+  inset: 0;
+}
+
+
+:where(#cyc-app),
+:where(#cyc-app) :where(*) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--cyc-overflow) transparent;
+}
+
+:where(#cyc-app)::-webkit-scrollbar,
+:where(#cyc-app) ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+:where(#cyc-app)::-webkit-scrollbar-track,
+:where(#cyc-app)::-webkit-scrollbar-track-piece,
+:where(#cyc-app)::-webkit-scrollbar-corner,
+:where(#cyc-app) ::-webkit-scrollbar-track,
+:where(#cyc-app) ::-webkit-scrollbar-track-piece,
+:where(#cyc-app) ::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+:where(#cyc-app)::-webkit-scrollbar-button,
+:where(#cyc-app) ::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+:where(#cyc-app)::-webkit-scrollbar-thumb,
+:where(#cyc-app) ::-webkit-scrollbar-thumb {
+  background: var(--cyc-overflow);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 10px;
+}
+
+:where(#cyc-app)::-webkit-scrollbar-thumb:hover,
+:where(#cyc-app) ::-webkit-scrollbar-thumb:hover {
+  background: var(--cyc-overflow-hover);
+  background-clip: padding-box;
+}
+
+:where(#cyc-app)::-webkit-scrollbar-thumb:active,
+:where(#cyc-app) ::-webkit-scrollbar-thumb:active {
+  background: var(--cyc-overflow-active);
+  background-clip: padding-box;
+}
+
+
+#cyc-app .cyc-fx-twist svg {
+  transition: transform 0.12s ease;
+}
+
+#cyc-app .cyc-fx-twist.cyc-fx-twist-open svg {
+  transform: rotate(90deg);
+}
+
+/* Residual: browser-owned tab-strip scrollbar. */
+#cyc-app .cyc-fx-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+/* Code viewer geometry: `--fx-line-h` from the font step, `--fx-num-w` from the line count. */
+#cyc-app .cyc-fx-code-wrap {
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+  padding: 0.5rem 0;
+  --fx-line-h: 18px;
+  --fx-num-w: 3ch;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+  line-height: var(--fx-line-h);
+  white-space: normal;
+  background: none;
+}
+
+#cyc-app .cyc-fx-line {
+  display: flex;
+  align-items: stretch;
+  min-height: var(--fx-line-h);
+}
+
+#cyc-app .cyc-fx-num {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  box-sizing: content-box;
+  width: var(--fx-num-w);
+  padding: 0 0.5rem 0 0.75rem;
+  text-align: right;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#cyc-app .cyc-fx-gline {
+  position: sticky;
+  left: calc(var(--fx-num-w) + 1.25rem);
+  z-index: 1;
+  flex: 0 0 0.5rem;
+  box-sizing: border-box;
+  align-self: stretch;
+  border-left: 3px solid transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#cyc-app .cyc-fx-ln {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0 0.75rem 0 0.5rem;
+  font: inherit;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  background: none;
+  color: inherit;
+}
+
+/* Residual: the word-wrap reflow. A state (`.cyc-fx-wrapped`) toggled on the pane
+   that reflows its descendant code-wrap and lines -- a descendant relationship. */
+#cyc-app .cyc-fx-wrapped .cyc-fx-code-wrap {
+  width: auto;
+}
+
+#cyc-app .cyc-fx-wrapped .cyc-fx-ln {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+/* Residual: text-selection allowances. Descendant (`.cyc-fx *`) relationships:
+   the explorer's text is selectable, its controls and gutters are not. */
+#cyc-app .cyc-fx,
+#cyc-app .cyc-fx * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#cyc-app .cyc-fx button,
+#cyc-app .cyc-fx .cyc-fx-num,
+#cyc-app .cyc-fx .cyc-fx-twist,
+#cyc-app .cyc-fx .cyc-fx-icon,
+#cyc-app .cyc-fx .cyc-fx-icon-seti,
+#cyc-app .cyc-fx .cyc-fx-vbtn,
+#cyc-app .cyc-fx .cyc-fx-vbtn-wrap {
+  user-select: none;
+  -webkit-user-select: none;
+}

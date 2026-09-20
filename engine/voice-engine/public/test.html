@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>voice-engine test bench</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px/1.5 ui-monospace, Menlo, monospace; background:#111; color:#ddd;
+         max-width: 780px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.1rem; } h2 { font-size: .95rem; margin: 1.5rem 0 .5rem; color:#9ad; }
+  section { border:1px solid #333; border-radius:8px; padding: .75rem 1rem; margin: .75rem 0; }
+  button { font:inherit; background:#2a4d69; color:#fff; border:0; border-radius:6px;
+           padding:.4rem .9rem; margin-right:.5rem; cursor:pointer; }
+  button:disabled { opacity:.4; cursor:default; }
+  button.rec { background:#a33; }
+  input[type=text] { font:inherit; background:#000; color:#ddd; border:1px solid #444;
+                     border-radius:6px; padding:.35rem .5rem; width: 60%; }
+  .ok { color:#7c7; } .bad { color:#e77; } .dim { color:#888; }
+  #partial { min-height:2.5rem; background:#000; border-radius:6px; padding:.5rem .75rem;
+             margin:.5rem 0; white-space:pre-wrap; }
+  #partial .draft { color:#9ad; }
+  #meter { height:6px; background:#222; border-radius:3px; overflow:hidden; margin:.5rem 0; }
+  #meter > div { height:100%; width:0; background:#4ec97b; transition:width 80ms linear; }
+  #log { max-height: 14rem; overflow-y:auto; background:#000; border-radius:6px;
+         padding:.5rem .75rem; font-size:12px; }
+  table { border-collapse: collapse; } td { padding: .1rem .75rem .1rem 0; }
+</style>
+</head>
+<body>
+<h1>voice-engine test bench <span class="dim">(:10102, kept for isolation testing)</span></h1>
+<!-- The AEC reference: TTS must play through an <audio> element (findings #1) -->
+<audio id="tts" preload="auto"></audio>
+
+<section>
+  <h2>health</h2>
+  <table>
+    <tr><td>engine</td><td id="hEngine" class="dim">…</td></tr>
+    <tr><td>stream</td><td id="hStream" class="dim">…</td></tr>
+    <tr><td>batch</td><td id="hBatch" class="dim">…</td></tr>
+    <tr><td>tts</td><td id="hTts" class="dim">…</td></tr>
+    <tr><td>load</td><td id="hLoad" class="dim">…</td></tr>
+  </table>
+  <button id="btnHealth">re-check</button>
+</section>
+
+<section>
+  <h2>streaming stt (/stt-stream → stt/ parakeet)</h2>
+  <div>mic level <div id="meter"><div></div></div></div>
+  <button id="btnStream">start talking</button>
+  <span id="streamStats" class="dim"></span>
+  <div id="partial"><span class="dim">committed text appears white, the live draft blue…</span></div>
+</section>
+
+<section>
+  <h2>batch stt (POST /stt → whisper.cpp turbo)</h2>
+  <button id="btnBatch">hold to record</button>
+  <span id="batchStats" class="dim"></span>
+  <div id="batchOut" class="dim"></div>
+</section>
+
+<section>
+  <h2>tts (POST /tts → kokoro → &lt;audio&gt;)</h2>
+  <input type="text" id="ttsText" value="The voice engine test bench is speaking.">
+  <button id="btnTts">speak</button>
+  <span id="ttsStats" class="dim"></span>
+</section>
+
+<section>
+  <h2>echo measurement <span class="dim">(stay silent: plays a long sentence, logs what the mic hears)</span></h2>
+  <button id="btnEcho">measure echo</button>
+  <div id="echoOut" class="dim"></div>
+</section>
+
+<section>
+  <h2>log</h2>
+  <div id="log"></div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const now = () => performance.now();
+function log(msg, cls) {
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = `${new Date().toTimeString().slice(0, 8)}  ${msg}`;
+  $('log').prepend(d);
+}
+
+// ---------------------------------------------------------------- health
+async function health() {
+  try {
+    const r = await fetch('/health');
+    const j = await r.json();
+    const c = j.capabilities ?? {};
+    const fmt = (x, extra) => {
+      const up = x && (x.up !== false);
+      return { text: up ? extra(x) : 'DOWN', cls: up ? 'ok' : 'bad' };
+    };
+    $('hEngine').textContent = 'up'; $('hEngine').className = 'ok';
+    const s = fmt(c.stream, (x) => `${x.engine ?? '?'} ${x.model ?? ''} rtf=${x.rtf ?? '?'} streams=${x.active_streams ?? 0}`);
+    $('hStream').textContent = s.text; $('hStream').className = s.cls;
+    const b = fmt(c.batch, (x) => `${x.engine} ${x.model} rtf=${x.rtf ?? 'unmeasured'} (n=${x.measured_n})`);
+    $('hBatch').textContent = b.text; $('hBatch').className = b.cls;
+    const t = fmt(c.tts, (x) => `${x.engine} ${x.voice} rtf=${x.rtf ?? 'unmeasured'} (n=${x.measured_n})`);
+    $('hTts').textContent = t.text; $('hTts').className = t.cls;
+    $('hLoad').textContent = `${j.load?.active_streams ?? 0} active streams`; $('hLoad').className = '';
+  } catch (e) {
+    $('hEngine').textContent = 'DOWN: ' + e; $('hEngine').className = 'bad';
+  }
+}
+$('btnHealth').onclick = health;
+health();
+
+// ------------------------------------------------------------- mic (16k, AEC)
+// Same constraints as the product: this is what puts Chrome on the AEC path.
+let micCtx = null, micStream = null, micNode = null, onPcm = null;
+async function ensureMic() {
+  if (micCtx) return;
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: {
+    echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+    channelCount: 1,
+  }});
+  micCtx = new AudioContext({ sampleRate: 16000 });
+  const src = micCtx.createMediaStreamSource(micStream);
+  micNode = micCtx.createScriptProcessor(4096, 1, 1);
+  micNode.onaudioprocess = (e) => {
+    const pcm = e.inputBuffer.getChannelData(0);
+    let sum = 0; for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
+    const db = 20 * Math.log10(Math.sqrt(sum / pcm.length) + 1e-10);
+    $('meter').firstElementChild.style.width = Math.max(0, Math.min(100, (db + 70) * 1.8)) + '%';
+    if (onPcm) onPcm(new Float32Array(pcm));
+  };
+  src.connect(micNode); micNode.connect(micCtx.destination);
+  log(`mic up (ctx ${micCtx.sampleRate} Hz, AEC on)`);
+}
+
+// ------------------------------------------------------------- streaming stt
+let ws = null, t0 = 0, tFirst = 0, tStop = 0;
+$('btnStream').onclick = async () => {
+  if (ws) {  // stop
+    tStop = now();
+    ws.send(JSON.stringify({ t: 'stop' }));
+    onPcm = null;
+    $('btnStream').textContent = 'finalizing…'; $('btnStream').disabled = true;
+    return;
+  }
+  await ensureMic();
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/stt-stream`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ t: 'start', sampleRate: 16000 }));
+    t0 = now(); tFirst = 0;
+    onPcm = (pcm) => { if (ws && ws.readyState === 1) ws.send(pcm.buffer); };
+    $('btnStream').textContent = 'stop (finalize)'; $('btnStream').classList.add('rec');
+    $('partial').textContent = ''; $('streamStats').textContent = '';
+    log('stream started');
+  };
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.t === 'partial') {
+      if (!tFirst) {
+        tFirst = now();
+        $('streamStats').textContent = `first partial: ${((tFirst - t0) / 1000).toFixed(2)}s`;
+      }
+      $('partial').innerHTML = '';
+      const span = document.createElement('span'); span.className = 'draft';
+      span.textContent = m.text; $('partial').append(span);
+    }
+    if (m.t === 'final') {
+      $('partial').textContent = m.text || '(empty)';
+      $('streamStats').textContent += `  ·  finalize: ${((now() - tStop) / 1000).toFixed(2)}s`;
+      log(`final: "${m.text}"`, 'ok');
+      cleanupStream();
+    }
+    if (m.t === 'error') { log('stream error: ' + m.message, 'bad'); cleanupStream(); }
+  };
+  ws.onclose = () => { if (ws) cleanupStream(); };
+  ws.onerror = () => log('stream ws error', 'bad');
+};
+function cleanupStream() {
+  ws = null; onPcm = null;
+  const b = $('btnStream');
+  b.textContent = 'start talking'; b.classList.remove('rec'); b.disabled = false;
+}
+
+// ------------------------------------------------------------- batch stt
+let rec = null, chunks = [];
+$('btnBatch').onmousedown = async () => {
+  await ensureMic();
+  chunks = [];
+  rec = new MediaRecorder(micStream);
+  rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+  rec.start();
+  $('btnBatch').classList.add('rec'); $('btnBatch').textContent = 'recording… release to send';
+};
+$('btnBatch').onmouseup = async () => {
+  if (!rec) return;
+  const r = rec; rec = null;
+  $('btnBatch').classList.remove('rec'); $('btnBatch').textContent = 'hold to record';
+  await new Promise((res) => { r.onstop = res; r.stop(); });
+  const blob = new Blob(chunks, { type: r.mimeType });
+  const t = now();
+  const resp = await fetch('/stt', { method: 'POST', headers: { 'Content-Type': blob.type }, body: blob });
+  const j = await resp.json();
+  $('batchStats').textContent = `${((now() - t) / 1000).toFixed(2)}s`;
+  $('batchOut').textContent = j.text || JSON.stringify(j);
+  $('batchOut').className = j.text ? '' : 'bad';
+  log(`batch: "${j.text ?? ''}"`);
+};
+
+// ------------------------------------------------------------- tts
+$('btnTts').onclick = async () => {
+  const t = now();
+  const resp = await fetch('/tts', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: $('ttsText').value }),
+  });
+  if (!resp.ok) { log('tts failed: HTTP ' + resp.status, 'bad'); return; }
+  const url = URL.createObjectURL(await resp.blob());
+  $('ttsStats').textContent = `synth: ${((now() - t) / 1000).toFixed(2)}s`;
+  const a = $('tts'); a.src = url; a.play();
+  log('tts playing');
+};
+</script>
+</body>
+</html>

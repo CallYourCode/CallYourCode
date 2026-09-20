@@ -1,0 +1,29 @@
+# Installed dependencies and package-manager state
+node_modules/
+yarn.lock
+
+# Generated application output (dist/ is checked in: the installer serves it
+# so a fresh clone never has to build the app)
+stats.html
+coverage/
+
+# Local configuration
+.env.local
+
+# Playwright output
+/test-results/
+/playwright-report/
+/blob-report/
+
+# Editor and platform files
+.vscode/
+.idea/
+**/.DS_Store
+__pycache__/
+
+# Local scratch space
+tmp/
+ignore/
+
+# Account-capture data must remain local
+src/data/local.json

@@ -1,0 +1,5 @@
+[install]
+# Supply-chain cooldown: never install a version published less than 14 days
+# ago (seconds). Blunts freshly-compromised-package attacks before they are
+# caught + yanked.
+minimumReleaseAge = 1209600

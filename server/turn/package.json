@@ -1,0 +1,9 @@
+{
+  "name": "callyourcode-turn",
+  "private": true,
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "test": "bun test"
+  },
+  "dependencies": { "turn-server": "0.6.6" }
+}

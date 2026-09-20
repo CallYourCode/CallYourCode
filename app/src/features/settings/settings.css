@@ -1,0 +1,90 @@
+/* Field focus ring is an outline on the input itself. Grouped by
+   state: resting ring → focus reveal → autofill readability. */
+.cyc-field-input {
+  outline: 2px solid transparent;
+  outline-offset: -1px;
+}
+
+.cyc-field-input:focus {
+  border-color: var(--cyc-accent);
+  outline-color: var(--cyc-accent);
+}
+
+.cyc-field-input:-webkit-autofill {
+  -webkit-text-fill-color: var(--cyc-text);
+  caret-color: var(--cyc-accent);
+  transition: background-color 9999s step-end;
+}
+
+::placeholder {
+  color: var(--cyc-text-muted);
+  opacity: 0.72;
+}
+
+.cyc-account-body .cyc-list-row.cyc-list-row-busy {
+  opacity: 0.55;
+  pointer-events: none;
+}
+.cyc-sheet.cyc-bits .cyc-menu-item {
+  flex: 0 0 auto;
+  height: auto;
+  min-height: 3.5rem;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+}
+
+.cyc-bits .cyc-menu-item-text {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.cyc-bits .cyc-menu-item-text {
+  min-width: 0;
+  white-space: normal;
+  line-height: 1.3;
+}
+
+.cyc-replylevel-range {
+  flex: 1 1 auto;
+  min-width: 0;
+  --cyc-steprange-idle: rgba(127, 127, 127, 0.32);
+  /* Stops stay visible on the faded rail: a solid darker dot per step, and a
+   * dot size that clears the rail height so each step reads at a glance. */
+  --cyc-steprange-stop: rgba(127, 127, 127, 0.7);
+  --cyc-steprange-dot: 0.5rem;
+  padding: 1.875rem 0.875rem 1.375rem;
+}
+/* No notch transitions: the label sits inside the notch button, so any size
+ * or transform animation zoomed and lifted the text (simple-slider decision,
+ * 2026-09-06). The tag anchors to the notch CENTER so the grip swell cannot
+ * move it. */
+.cyc-replylevel-range .cyc-steprange-tag {
+  bottom: calc(50% + 0.95rem);
+  font-size: 0.6875rem;
+  line-height: 1;
+  color: var(--cyc-text-muted);
+}
+.cyc-replylevel-range .cyc-steprange-notch.cyc-replylevel-on .cyc-steprange-tag {
+  color: var(--cyc-accent);
+  font-weight: 600;
+}
+
+.cyc-replylevel-unknown .cyc-replylevel-scale {
+  opacity: 0.5;
+}
+
+.cyc-replylevel-dial[data-dial='complexity'] .cyc-steprange-tag {
+  width: 3.5rem;
+  white-space: normal;
+  font-size: 0.5625rem;
+  line-height: 1.15;
+  bottom: calc(50% + 0.7rem);
+}
+
+html body #cyc-left-pane .cyc-hints {
+  margin-inline: 0.5rem !important;
+}
+
+html body .cyc-hints {
+  border-radius: 6px !important;
+}

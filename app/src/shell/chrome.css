@@ -1,0 +1,273 @@
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/assets/fonts/inter-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/assets/fonts/inter-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('/assets/fonts/jbmono-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('/assets/fonts/jbmono-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+@font-face {
+  font-family: 'CYC Term Symbols';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/assets/fonts/cyc-term-symbols.woff2') format('woff2');
+  unicode-range:
+    U+2316, U+2318, U+231A-231B, U+2324-2328, U+232B, U+237B, U+237D-237F, U+2394, U+23CE-23CF,
+    U+23E9-23EA, U+23ED-23EF, U+23F1-23FF, U+25FB-25FE, U+26A0-26A1, U+2757, U+2B1B-2B1C, U+2B50,
+    U+2B55;
+}
+@font-face {
+  font-family: 'seti';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('/assets/fonts/seti.woff') format('woff');
+  unicode-range: U+E000-F8FF;
+}
+
+/* Line-height anchor used by message chrome. */
+:root {
+  --cyc-line-height: 1.3;
+}
+
+/* Selection tint; the inline-code / code override wins by higher specificity.
+   Selected text keeps its own ink (inherit); only the highlight fill is themed. */
+#cyc-app ::selection {
+  background: rgba(var(--cyc-accent-rgb), 0.4);
+  color: inherit;
+}
+#cyc-app .cyc-msg-sent ::selection {
+  background: var(--cyc-bubble-out-selection);
+}
+#cyc-app .cyc-inline-code::selection,
+#cyc-app code::selection {
+  color: var(--cyc-text);
+}
+@media only screen and (max-width: 550px) {
+  :root {
+    --cyc-aside-pane-width: 100vw;
+  }
+}
+/* Neutral chrome inks that survive as variables because each forks day/night:
+   the scrollbar tint and the session-list mute/quiet icon ink (read by chatRow's
+   MUTE_ICON_UTILS). The placeholder, message-placeholder, warning and badge-text
+   inks are constants inlined at their consumers. */
+:root {
+  --cyc-overflowbar-color: rgba(28, 32, 40, 0.24);
+  --cyc-session-quiet-color: #79808f;
+}
+html[data-theme='dark'] {
+  --cyc-overflowbar-color: rgba(228, 232, 240, 0.24);
+  --cyc-session-quiet-color: var(--cyc-text-muted);
+}
+html[data-theme='dark'] .cyc-segstrip-scroll {
+  box-shadow: 0px 2px 6px 0px rgba(0, 0, 0, 0.18);
+}
+html,
+body {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+html {
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+/* Editable fields opt back into selection through the body's user-select:none.
+   A zero-specificity :where() keeps this a producer default that any explicit
+   selection rule can still override. */
+:where(input, textarea) {
+  user-select: text;
+}
+body {
+  background-color: var(--cyc-background-color);
+  color: var(--cyc-text);
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+:root {
+  --cyc-link-color: var(--cyc-accent);
+}
+a {
+  color: var(--cyc-link-color);
+}
+
+:root {
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+}
+button,
+select,
+input,
+textarea,
+optgroup {
+  font-family: inherit;
+}
+/* Mono surfaces render in the product monospace face. */
+code,
+kbd,
+samp,
+pre {
+  font-family: 'JetBrains Mono', monospace;
+}
+/* Flat press feedback: CYC paints its own pressed states, so the mobile grey tap
+   flash is cleared on every interactive surface. */
+a,
+div,
+button,
+select,
+input,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+/* Headings follow a deliberately modest document scale. */
+:is(h1, h2, h3, h4, h5, h6) {
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+h4 {
+  font-size: 1.5rem;
+  margin: 1.25rem 0 0.5rem;
+}
+input,
+[contenteditable='true'] {
+  caret-color: var(--cyc-accent);
+  color: var(--cyc-text);
+  background-color: transparent;
+}
+
+textarea,
+input {
+  appearance: none;
+  -webkit-appearance: none;
+  font-size: inherit;
+}
+.cyc-danger {
+  color: var(--cyc-danger) !important;
+}
+.cyc-emphasis {
+  color: var(--cyc-accent) !important;
+}
+.cyc-emphasis .cyc-menu-item-icon,
+.cyc-danger .cyc-menu-item-icon {
+  color: inherit !important;
+}
+
+
+.cyc-menu-context {
+  z-index: 20 !important;
+  right: auto !important;
+  bottom: auto !important;
+  inline-size: auto !important;
+  max-inline-size: calc(100vw - 1rem);
+}
+
+.cyc-loader-inline {
+  position: absolute;
+  inset: 0;
+  width: 50px;
+  height: 50px;
+  margin: auto;
+}
+b {
+  font-weight: 500;
+}
+
+.cyc-sticky-sentinel {
+  position: absolute;
+  inset-inline: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.cyc-tile {
+  height: 0;
+  padding-bottom: 100%;
+  position: relative;
+  cursor: pointer;
+}
+.cyc-grid-media {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.cyc-still {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+.cyc-icon {
+  pointer-events: none;
+}
+html,
+body,
+#cyc-app {
+  height: 100dvh;
+}
+
+:root {
+  --cyc-safe-top: env(safe-area-inset-top, 0px);
+  --cyc-safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+:root {
+  --cyc-service-bg: rgba(0, 0, 0, 0.028);
+  --cyc-service-fg: rgba(20, 20, 22, 0.72);
+}
+html[data-theme='dark'] {
+  --cyc-service-bg: rgba(255, 255, 255, 0.035);
+  --cyc-service-fg: rgba(255, 255, 255, 0.6);
+}

@@ -1,0 +1,18 @@
+# ONE [test] preload, and it is the home guard only. It used to install
+# testpreload.ts (the WebSocket -> DataChannel TestClient swap) into EVERY bun
+# test process in this package, so a pure unit test about cron arithmetic loaded
+# node-datachannel and swapped a global. The specs that need the real transport
+# are the ones under e2e/, and `bun run test:e2e` passes --preload for them alone.
+#
+# homeguard.ts points HOME, the XDG roots and CYC_DATA_DIR at a temp dir of the
+# test process before any module reads them, so no test can reach the user's
+# real ~/.callyourcode (defect A, 2026-09-02). It imports node:fs and node:os
+# and nothing of the engine. homeguard.test.ts is the tripwire.
+[test]
+preload = ["./src/test-utils/homeguard.ts"]
+
+[install]
+# Supply-chain cooldown: never install a version published less than 14 days
+# ago (seconds). Blunts freshly-compromised-package attacks before they are
+# caught + yanked.
+minimumReleaseAge = 1209600

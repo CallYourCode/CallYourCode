@@ -1,0 +1,22 @@
+.notyf {
+  align-items: center;
+  justify-content: center;
+}
+.notyf__toast.cyc-notyf {
+  max-width: min(30rem, calc(100vw - 2rem));
+  padding: 0;
+  border-radius: 1rem;
+  box-shadow: none;
+}
+.notyf__toast.cyc-notyf .notyf__wrapper {
+  padding: 0.5rem 1rem;
+}
+.notyf__toast.cyc-notyf .notyf__message {
+  font-size: 0.875rem;
+  line-height: 1.25;
+  opacity: 1;
+  animation: none;
+}
+.notyf__toast.cyc-notyf .notyf__icon {
+  display: none;
+}

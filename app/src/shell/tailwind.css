@@ -1,0 +1,12 @@
+@import 'tailwindcss';
+
+@theme {
+  --breakpoint-tab: 34.4375rem;
+  --breakpoint-desk: 56.25rem;
+}
+
+@custom-variant fine {
+  html[data-pointer='fine'] & {
+    @slot;
+  }
+}

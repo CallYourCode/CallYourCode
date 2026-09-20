@@ -1,0 +1,330 @@
+<!doctype html>
+<!--
+  Archetype: QUESTION ROUND. Several decisions asked at once, answered in one
+  submit. Choice chips, a slider, a multi-select, free text, a progress bar
+  that fills as questions get answered.
+  cyc APIs: cyc.load() restores a draft, cyc.save() keeps it (debounced),
+  cyc.submit() sends one structured payload, cyc.close() ends the round.
+  Works standalone too: without window.cyc it runs in preview mode.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sync v2 review round</title>
+<style>
+  /* Theme: the viewer injects --cyc-* variables and sets data-cyc-theme on
+     <html>. Use the variables with per-theme fallbacks so the page also looks
+     right opened standalone. */
+  :root {
+    --bg: var(--cyc-bg, #f4f4f5); --surface: var(--cyc-surface, #ffffff);
+    --text: var(--cyc-text, #111114); --muted: var(--cyc-muted, #707579);
+    --accent: var(--cyc-accent, #3390ec); --border: var(--cyc-border, #dfe1e5);
+  }
+  html[data-cyc-theme="dark"] {
+    --bg: var(--cyc-bg, #181818); --surface: var(--cyc-surface, #212121);
+    --text: var(--cyc-text, #f2f2f5); --muted: var(--cyc-muted, #aaaaaa);
+    --accent: var(--cyc-accent, #8774e1); --border: var(--cyc-border, #3a3a3c);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 0 0 92px; /* room for the fixed action bar */
+  }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 14px 14px 0; }
+
+  header { padding: 2px 0 10px; }
+  h1 { font-size: 20px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; margin: 3px 0 0; }
+
+  /* progress: sticky, so the count stays visible while scrolling the round */
+  .progress {
+    position: sticky; top: 0; z-index: 5;
+    background: var(--bg); padding: 8px 0 10px;
+  }
+  .ptext { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .ptext b { color: var(--text); }
+  .pbar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .pfill { height: 100%; width: 0%; border-radius: 3px; background: var(--accent); transition: width .25s; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px; margin: 0 0 14px;
+  }
+  .qnum { color: var(--accent); font-weight: 700; font-size: 13px; }
+  .card h2 { font-size: 16px; margin: 2px 0 4px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+
+  /* single-choice and multi-select share the chip look; a selected single
+     choice fills, a selected multi ticks */
+  .opts { display: flex; flex-direction: column; gap: 8px; }
+  .opt {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    min-height: 48px; padding: 10px 12px; text-align: left;
+    background: var(--bg); color: var(--text); font: inherit;
+    border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
+  }
+  .opt .mark {
+    flex: 0 0 22px; height: 22px; border-radius: 50%;
+    border: 2px solid var(--border); display: flex; align-items: center;
+    justify-content: center; font-size: 13px; color: transparent;
+  }
+  .opt.square .mark { border-radius: 6px; }
+  .opt[aria-pressed="true"] { border-color: var(--accent); }
+  .opt[aria-pressed="true"] .mark {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
+  .opt .lab { flex: 1; }
+  .opt .why { display: block; color: var(--muted); font-size: 12.5px; }
+
+  /* slider */
+  .slider-row { display: flex; align-items: center; gap: 12px; }
+  input[type="range"] { flex: 1; accent-color: var(--accent); min-height: 44px; }
+  .sval {
+    flex: 0 0 84px; text-align: center; font-weight: 700; font-size: 15px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 4px;
+  }
+  .sticks { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  textarea {
+    width: 100%; min-height: 84px; resize: vertical;
+    background: var(--bg); color: var(--text); font: inherit; font-size: 15px;
+    border: 1px solid var(--border); border-radius: 10px; padding: 10px;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+
+  .draft { height: 16px; text-align: right; color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+  /* action bar */
+  .bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    background: var(--surface); border-top: 1px solid var(--border);
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+  }
+  .bar-inner { max-width: 640px; margin: 0 auto; display: flex; gap: 10px; align-items: center; }
+  .status { flex: 1; font-size: 12.5px; color: var(--muted); }
+  .bar button {
+    min-height: 48px; border: none; border-radius: 10px; font: inherit;
+    font-size: 16px; font-weight: 600; cursor: pointer; padding: 0 18px;
+  }
+  #later { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+  #send { background: var(--accent); color: #fff; flex: 0 0 auto; }
+  #send:disabled { opacity: .55; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Sync v2 review round</h1>
+    <p class="sub">Five questions before the build starts. Drafts save as you go; one submit sends the lot.</p>
+  </header>
+
+  <div class="progress">
+    <div class="ptext"><b id="done-n">0</b> of 5 answered</div>
+    <div class="pbar"><div class="pfill" id="pfill"></div></div>
+  </div>
+
+  <section class="card" data-q="conflict">
+    <div class="qnum">1 / 5</div>
+    <h2>Default conflict strategy</h2>
+    <p class="hint">When the same note changed on two devices while offline.</p>
+    <div class="opts" role="radiogroup">
+      <button class="opt" data-v="last-write-wins"><span class="mark">●</span>
+        <span class="lab">Last write wins<span class="why">Simplest; silently drops the older edit.</span></span></button>
+      <button class="opt" data-v="three-way-merge"><span class="mark">●</span>
+        <span class="lab">Three-way merge<span class="why">Keeps both edits when they touch different lines.</span></span></button>
+      <button class="opt" data-v="ask-every-time"><span class="mark">●</span>
+        <span class="lab">Ask every time<span class="why">Safest, but a dialog per conflict.</span></span></button>
+    </div>
+  </section>
+
+  <section class="card" data-q="offline">
+    <div class="qnum">2 / 5</div>
+    <h2>Offline window</h2>
+    <p class="hint">How long a device may keep editing before it must re-sync.</p>
+    <div class="slider-row">
+      <input type="range" id="offline-range" min="0" max="72" step="4" value="24" aria-label="offline hours">
+      <div class="sval" id="offline-val">24 h</div>
+    </div>
+    <div class="sticks"><span>0 h</span><span>24 h</span><span>48 h</span><span>72 h</span></div>
+  </section>
+
+  <section class="card" data-q="platforms">
+    <div class="qnum">3 / 5</div>
+    <h2>Platforms in the first release</h2>
+    <p class="hint">Pick every one that must ship on day one.</p>
+    <div class="opts" id="platforms">
+      <button class="opt square" data-v="android"><span class="mark">✓</span><span class="lab">Android</span></button>
+      <button class="opt square" data-v="iphone"><span class="mark">✓</span><span class="lab">iPhone</span></button>
+      <button class="opt square" data-v="ipad"><span class="mark">✓</span><span class="lab">iPad</span></button>
+      <button class="opt square" data-v="web"><span class="mark">✓</span><span class="lab">Web</span></button>
+      <button class="opt square" data-v="desktop"><span class="mark">✓</span><span class="lab">Desktop</span></button>
+    </div>
+  </section>
+
+  <section class="card" data-q="importer">
+    <div class="qnum">4 / 5</div>
+    <h2>The v1 import tool</h2>
+    <p class="hint">It still works but nobody has touched the code in a year.</p>
+    <div class="opts" role="radiogroup">
+      <button class="opt" data-v="keep"><span class="mark">●</span><span class="lab">Keep as is</span></button>
+      <button class="opt" data-v="rewrite"><span class="mark">●</span><span class="lab">Rewrite on the v2 format</span></button>
+      <button class="opt" data-v="drop"><span class="mark">●</span><span class="lab">Drop it<span class="why">v1 users export by hand.</span></span></button>
+    </div>
+  </section>
+
+  <section class="card" data-q="notes">
+    <div class="qnum">5 / 5</div>
+    <h2>Anything the plan misses?</h2>
+    <p class="hint">Free text; empty means the plan reads complete.</p>
+    <textarea id="notes" placeholder="your take..."></textarea>
+    <div class="draft" id="draft"></div>
+  </section>
+</div>
+
+<div class="bar"><div class="bar-inner">
+  <div class="status" id="status"></div>
+  <button id="later">Later</button>
+  <button id="send">Submit &amp; close</button>
+</div></div>
+
+<script>
+  'use strict';
+  /* Feature-detect the bridge: inside the app window.cyc exists before this
+     script runs; standalone (a browser tab) it does not, and the page still
+     works for previewing. */
+  const inApp = typeof window.cyc !== 'undefined';
+  const bridge = inApp ? window.cyc : {
+    load:   async () => ({ ok: true, saved: false, data: null }),
+    save:   async () => ({ ok: false, message: 'preview mode' }),
+    submit: async () => ({ ok: false, message: 'preview mode: not inside the app, nothing was sent' }),
+    close:  () => {},
+  };
+
+  // ---- state ---------------------------------------------------------------
+  const state = {
+    conflict: null,          // one of the data-v values
+    offlineHours: 24,        // slider
+    offlineTouched: false,   // counts as answered only once he moved it
+    platforms: [],           // multi-select
+    importer: null,
+    notes: '',
+  };
+
+  const $ = (s, el) => (el || document).querySelector(s);
+  const $$ = (s, el) => [...(el || document).querySelectorAll(s)];
+
+  // ---- wiring --------------------------------------------------------------
+  function wireSingle(qKey) {
+    const card = $(`[data-q="${qKey}"]`);
+    $$('.opt', card).forEach(btn => btn.addEventListener('click', () => {
+      state[qKey === 'conflict' ? 'conflict' : 'importer'] = btn.dataset.v;
+      paint(); scheduleSave();
+    }));
+  }
+  wireSingle('conflict');
+  wireSingle('importer');
+
+  $$('#platforms .opt').forEach(btn => btn.addEventListener('click', () => {
+    const v = btn.dataset.v;
+    const i = state.platforms.indexOf(v);
+    if (i >= 0) state.platforms.splice(i, 1); else state.platforms.push(v);
+    paint(); scheduleSave();
+  }));
+
+  const range = $('#offline-range');
+  range.addEventListener('input', () => {
+    state.offlineHours = Number(range.value);
+    state.offlineTouched = true;
+    paint(); scheduleSave();
+  });
+
+  $('#notes').addEventListener('input', () => {
+    state.notes = $('#notes').value;
+    paint(); scheduleSave();
+  });
+
+  // ---- paint ---------------------------------------------------------------
+  function answered() {
+    return [
+      state.conflict !== null,
+      state.offlineTouched,
+      state.platforms.length > 0,
+      state.importer !== null,
+      state.notes.trim().length > 0,
+    ].filter(Boolean).length;
+  }
+
+  function paint() {
+    const mark = (card, on) => $$('.opt', card).forEach(b =>
+      b.setAttribute('aria-pressed', String(on(b.dataset.v))));
+    mark($('[data-q="conflict"]'), v => v === state.conflict);
+    mark($('[data-q="importer"]'), v => v === state.importer);
+    mark($('#platforms'), v => state.platforms.includes(v));
+    range.value = String(state.offlineHours);
+    $('#offline-val').textContent = state.offlineHours + ' h';
+    if ($('#notes').value !== state.notes) $('#notes').value = state.notes;
+    const n = answered();
+    $('#done-n').textContent = String(n);
+    $('#pfill').style.width = (n / 5 * 100) + '%';
+  }
+
+  // ---- draft persistence ---------------------------------------------------
+  let saveTimer = null;
+  let loadFailed = false; // never save over data we could not read
+  function scheduleSave() {
+    if (loadFailed) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      const r = await bridge.save(state);
+      $('#draft').textContent = r.ok ? 'draft saved' : (inApp ? 'draft not saved' : '');
+    }, 800);
+  }
+
+  async function restore() {
+    const r = await bridge.load();
+    if (!r.ok) {
+      loadFailed = true;
+      $('#status').textContent = 'Could not read the saved draft; saving is off so it is not overwritten.';
+      return;
+    }
+    if (r.saved && r.data && typeof r.data === 'object') Object.assign(state, r.data);
+    if (!inApp) $('#status').textContent = 'Preview mode: not connected to the app.';
+    paint();
+  }
+
+  // ---- submit --------------------------------------------------------------
+  $('#later').addEventListener('click', () => bridge.close());
+  $('#send').addEventListener('click', async () => {
+    const btn = $('#send');
+    btn.disabled = true;
+    const payload = {
+      kind: 'sync-v2-review-round',
+      answers: {
+        conflictStrategy: state.conflict,
+        offlineWindowHours: state.offlineTouched ? state.offlineHours : null,
+        firstReleasePlatforms: state.platforms,
+        v1Importer: state.importer,
+        notes: state.notes.trim() || null,
+      },
+      answeredCount: answered(),
+    };
+    const r = await bridge.submit({ label: `Sync v2 answers (${answered()}/5)`, body: payload });
+    if (r.ok) {
+      $('#status').textContent = 'Submitted. Closing…';
+      bridge.close();
+    } else {
+      // a refusal is shown, never swallowed: the user should know nothing left
+      $('#status').textContent = 'Submit failed: ' + (r.message || 'unknown');
+      btn.disabled = false;
+    }
+  });
+
+  paint();
+  restore();
+</script>
+</body>
+</html>

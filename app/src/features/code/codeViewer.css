@@ -1,0 +1,89 @@
+/* Header tint follows message --cyc-accent (outgoing rows override it). */
+.cyc-src-head {
+  background-color: rgba(var(--cyc-accent-rgb), 0.2);
+  color: var(--cyc-accent);
+}
+
+/* The fullscreen viewer shows a thin visible scrollbar: it re-exposes the
+   scrollbar the conversation code hides in pan flow, scoped to `.cyc-code-viewer`
+   and keyed off the same data-cyc-code-flow=pan state the block carries there. */
+#cyc-app .cyc-code-viewer .cyc-code-frame[data-cyc-code-flow='pan'] .cyc-src-body {
+  scrollbar-width: thin;
+}
+#cyc-app .cyc-code-viewer .cyc-code-frame[data-cyc-code-flow='pan'] .cyc-src-body::-webkit-scrollbar {
+  display: block;
+  width: 0.5rem;
+  height: 0.5rem;
+}
+#cyc-app .cyc-code-viewer .cyc-code-frame[data-cyc-code-flow='pan'] .cyc-src-body::-webkit-scrollbar-thumb {
+  background: var(--cyc-text-muted);
+  border-radius: 0.25rem;
+}
+
+
+.cyc-snippet-table-box {
+  margin: 0.25rem 0;
+}
+
+.cyc-snippet-table-bar {
+  display: flex;
+  justify-content: flex-end;
+  line-height: 0;
+  margin-bottom: 0.125rem;
+}
+
+.cyc-snippet-table-toggle-wrap,
+.cyc-snippet-table-fullscreen {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: all;
+  cursor: pointer;
+  padding: 0.1875rem;
+  border-radius: 50%;
+  color: var(--cyc-text-muted);
+  font-size: 1.125rem;
+  line-height: 1;
+}
+
+.cyc-snippet-table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.cyc-snippet-table {
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  max-width: none;
+}
+
+.cyc-snippet-table-wrap.cyc-overflower .cyc-snippet-table {
+  width: max-content;
+}
+
+.cyc-snippet-table-wrap:not(.cyc-overflower) .cyc-snippet-table {
+  width: 100%;
+}
+
+.cyc-snippet-table th,
+.cyc-snippet-table td {
+  padding: 0.1875rem 0.5rem;
+  border: 1px solid var(--cyc-border-color);
+  text-align: start;
+  vertical-align: top;
+  white-space: pre-wrap;
+  min-width: 3.5rem;
+  max-width: 20rem;
+}
+
+.cyc-snippet-table-wrap:not(.cyc-overflower) .cyc-snippet-table :is(th, td) {
+  min-width: 0;
+  max-width: none;
+  overflow-wrap: anywhere;
+}
+
+.cyc-snippet-table th {
+  font-weight: 600;
+  background-color: var(--cyc-text-muted-tint);
+}

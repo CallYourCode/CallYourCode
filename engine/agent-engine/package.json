@@ -1,0 +1,27 @@
+{
+  "name": "agent-engine",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run src/runtime/server.ts",
+    "test": "bun test --parallel src/runtime/*.test.ts src/sessions/*.test.ts src/readers/*.test.ts src/chat/*.test.ts src/voice/*.test.ts src/security/*.test.ts src/transport/*.test.ts src/terminal/*.test.ts src/storage/*.test.ts src/routes/*.test.ts src/adapters/*.test.ts src/plugins/*.test.ts src/plugins/platform/*.test.ts src/plugins/crons/*.test.ts src/plugins/git/*.test.ts src/plugins/files/*.test.ts src/test-utils/*.test.ts src/plugins/*/*.test.ts",
+    "test:e2e": "bun test --preload ./src/e2e/testpreload.ts src/e2e/",
+    "typecheck": "./node_modules/.bin/tsc -p tsconfig.check.json --noEmit && ./node_modules/.bin/tsc -p tsconfig.tests.json --noEmit",
+    "pair-key": "bun run src/security/pairkey.ts"
+  },
+  "dependencies": {
+    "@inquirer/core": "^11.2.1",
+    "werift": "0.24.4",
+    "opusscript": "^0.1.1",
+    "qrcode-terminal": "^0.12.0",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "bun-types": "1.2.0",
+    "typescript": "5.7.3"
+  },
+  "patchedDependencies": {
+    "werift@0.24.4": "patches/werift@0.24.4.patch"
+  }
+}

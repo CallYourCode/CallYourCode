@@ -1,0 +1,128 @@
+
+.cyc-rec-level.is-ahead {
+  opacity: 0.4;
+}
+.cyc-rec-strip.is-scrubbable {
+  cursor: pointer;
+}
+
+
+
+
+@keyframes cyc-rec-dot-ring {
+  0% {
+    transform: scale(0.86);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--cyc-danger) 55%, transparent);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 7px color-mix(in srgb, var(--cyc-danger) 0%, transparent);
+  }
+  100% {
+    transform: scale(0.86);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--cyc-danger) 0%, transparent);
+  }
+}
+@keyframes cycRecPulse {
+  0% {
+    transform: scale(0.96);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.22);
+    opacity: 0.3;
+  }
+  100% {
+    transform: scale(0.96);
+    opacity: 0.7;
+  }
+}
+
+@keyframes cyc-drop-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--cyc-accent) 34%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 12px color-mix(in srgb, var(--cyc-accent) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--cyc-accent) 0%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cyc-drop-ring {
+    animation: none !important;
+  }
+}
+@keyframes cyc-slide-nudge {
+  50% {
+    transform: translateX(-4px);
+  }
+}
+
+/* Send/record glyph pop. Off under reduced motion. */
+@keyframes cyc-send-swap {
+  0% {
+    transform: scale(0.7);
+    opacity: 0.35;
+  }
+  60% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.cyc-send-glyph.cyc-swapping {
+  animation: cyc-send-swap 0.28s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cyc-send-glyph.cyc-swapping {
+    animation: none;
+  }
+}
+
+/* Tall+wide: composer tracks the chat column. Short: drop target shrinks. */
+@media only screen and (min-width: 720px) and (min-height: 520px) {
+  .cyc-composer-main {
+    max-width: var(--cyc-chat-width) !important;
+  }
+}
+@media only screen and (max-height: 560px) {
+  .cyc-drop-glyph {
+    display: none;
+  }
+  .cyc-drop-title {
+    margin-top: 0 !important;
+  }
+}
+
+/* Residual: the shared multipart message-text builder -- one message kind among
+   many, owned by the chat lane, not the composer. */
+.cyc-message.cyc-multipart .cyc-message-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.cyc-message.cyc-multipart cyc-voice-card.cyc-clip {
+  width: 100%;
+}
+
+
+
+
+
+
+@media (max-width: 550px) {
+  #cyc-thread-pane .cyc-thread {
+    --cyc-composer-floor: 1.5rem;
+  }
+  html,
+  body,
+  #cyc-app {
+    background-color: var(--cyc-surface);
+  }
+}

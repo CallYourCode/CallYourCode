@@ -1,0 +1,6 @@
+{"t":"m","id":"w1:p1","role":"user","text":"hello there","ts":1756300000000,"seq":0}
+{"t":"m","id":"w1:p1","role":"claude","text":"Hi. What are we building?","ts":1756300001000,"seq":1,"key":"k-1"}
+{"t":"m","id":"w1:p1","role":"user","text":"a per-agent log","ts":1756300002000,"seq":2,"queued":true}
+{"t":"e","ev":"patch","mts":1756300002000,"del":["queued"]}
+{"t":"m","id":"w1:p1","role":"claude","text":"On it.","ts":1756300003000,"seq":3,"key":"k-2"}
+{"t":"m","id":"w1:p1","role":"user","text":"thanks","ts":1756300004000,"seq":4,"kind":"voice","msgId":"a-1"}

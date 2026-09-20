@@ -1,0 +1,77 @@
+
+.cyc-tick-toggle.cyc-toggle-standalone {
+  pointer-events: all;
+}
+
+
+.cyc-plugincard-placeholder {
+  min-height: 2.5rem;
+  display: flex;
+  align-items: center;
+  color: var(--cyc-text-muted);
+}
+
+/* Structural adjacency machine: a shown placeholder hides the frame staged after it. */
+.cyc-plugincard-placeholder + .cyc-plugincard-frame {
+  visibility: hidden;
+}
+
+/* Refresh-spin state machine: drives the shared cyc-spin keyframe on the glyph child
+   (> * combinator) while the check is in flight. Runs `reverse` so the reset/refresh
+   glyph spins counter-clockwise (the way its arrow points); cyc-spin itself stays
+   clockwise for the loading spinners that share it. */
+.cyc-plugincard-refresh.cyc-plugincard-refreshing {
+  opacity: 0.6;
+  > * {
+    animation: cyc-spin 0.8s linear infinite reverse;
+  }
+}
+
+/* Usage-flash keyframe machine, toggled by pluginCard.ts flash(). */
+.cyc-plugincard-flash {
+  animation: cyc-usage-flash 4s ease-in-out 1;
+}
+
+/* Side-dock slide machine: CSS-var geometry (--cyc-aside-pane-width, --cyc-pane-gap)
+   driven off/on-screen transforms with the side-panel reveal/settle timings. */
+.cyc-plugin-panel.is-side {
+  inset: auto;
+  inset-inline-end: var(--cyc-pane-gap);
+  inset-block: var(--cyc-pane-gap);
+  width: var(--cyc-aside-pane-width);
+  max-width: 100%;
+  background: var(--cyc-surface);
+
+  transform: translate3d(calc(var(--cyc-aside-pane-width) + var(--cyc-pane-gap)), 0, 0);
+  transition: transform 0.25s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.cyc-plugin-panel.is-side.is-open {
+  transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+  transform: translateZ(0);
+}
+
+/* Responsive machine: tighter card inline margin on phone widths. */
+@media (max-width: 550px) {
+  .cyc-plugincard {
+    margin-inline: 0.25rem;
+  }
+}
+
+@keyframes cyc-usage-flash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(229, 57, 53, 0);
+  }
+  15%,
+  60% {
+    box-shadow:
+      0 0 0 2px rgba(229, 57, 53, 0.9),
+      0 0 16px 2px rgba(229, 57, 53, 0.45);
+  }
+}
+
+/* Shell radius machine: the shared `html body .cyc-… { border-radius: 6px! }`
+   override extended to the card (CSS-var input, shell lane). */
+html body .cyc-plugincard {
+  border-radius: 6px !important;
+}

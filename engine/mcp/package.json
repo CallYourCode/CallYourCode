@@ -1,0 +1,19 @@
+{
+  "name": "callyourcode-mcp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun install --no-summary && bun src/server.ts",
+    "test": "bun test src/*.test.ts",
+    "typecheck": "tsc --noEmit --module nodenext --moduleResolution nodenext --target esnext src/server.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
+}
