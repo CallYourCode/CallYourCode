@@ -22,6 +22,7 @@
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+img { height: auto; }
 html, body {
   margin: 0;
   background: var(--ground);
@@ -59,11 +60,11 @@ a:hover { text-decoration: underline; }
 }
 .btn-login {
   margin-left: auto; flex: none;
-  border: 1px solid var(--copper); background: transparent; color: var(--copper);
-  border-radius: 8px; padding: 8px 18px; cursor: pointer;
-  font-family: "IBM Plex Sans", system-ui, sans-serif; font-size: 14px; font-weight: 600;
+  border: 0; background: transparent; color: var(--muted);
+  padding: 6px 10px; border-radius: 6px; cursor: pointer;
+  font-family: "IBM Plex Sans", system-ui, sans-serif; font-size: 14px;
 }
-.btn-login:hover { background: var(--copper); color: var(--copper-ink); }
+.btn-login:hover { color: var(--ink); }
 
 /* type */
 .eyebrow { margin: 0 0 8px; font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--copper); letter-spacing: .02em; }
@@ -271,4 +272,4 @@ article[hidden] { display: none; }
 }
 
 /* darker CTA band in dark mode */
-:root[data-theme="dark"] .cta .band { background: #8a5628; }
+:root[data-theme="dark"] .cta .band { background: #4a3016; }
