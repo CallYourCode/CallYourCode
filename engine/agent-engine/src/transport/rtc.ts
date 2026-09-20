@@ -204,7 +204,17 @@ export async function onRtcOffer(
   onPipe: (pipe: Pipe) => void,
 ): Promise<RtcAttempt> {
   const { reachedAddr, advertiseAll } = opts;
-  const pc = new werift.RTCPeerConnection({ iceServers: weriftIceServers(opts.iceServers) });
+  // werift gathers host candidates only on real interfaces, never loopback, so a
+  // same-machine browser (page + engine on one box) had no 127.0.0.1 candidate to
+  // use and had to reach the engine on its LAN IP. On macOS that path is gated by
+  // the Local Network permission, so a browser without it could not connect and
+  // pairing silently never happened. Advertising loopback gives same-machine
+  // pairing a stable, permission-free candidate; the advertise allowlist below
+  // already permits LOOPBACK, and cross-machine still uses reachedAddr/relay.
+  const pc = new werift.RTCPeerConnection({
+    iceServers: weriftIceServers(opts.iceServers),
+    iceAdditionalHostAddresses: [LOOPBACK],
+  });
   const attempt: RtcAttempt = { id: offer.id, pc, pipe: null, timer: null, closed: false, track: null, onAudioTrack: null };
 
   /* Mint the pipe for an OPEN channel, exactly once. The attempt.pipe guard
