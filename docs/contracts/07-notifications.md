@@ -60,6 +60,24 @@ one dismiss push).
 Notify only when NOT watched, where "watched" requires proof of life (a frame
 proves the page's JS ran; a stale `visible` claim does not), a 10s batch
 window, and a ten-minute ceiling for a chat that stays unread.
+```mermaid
+sequenceDiagram
+  participant E as Engine
+  participant S as Server
+  participant W as Service worker
+  Note over E: reply lands, chat not watched (proof of life required)
+  E->>E: seal the real preview under deriveSessionKey(gen, sessionId)
+  E->>S: /push/notify {generic title and body, kid, enc} (Bearer cyt_)
+  Note over S: enc present: visible fields FORCED generic,<br/>re-windowed on the server clock, rate-capped, merged across engines
+  S->>W: Web Push (VAPID)
+  W->>W: derive the key for kid from cyc-keys and open enc
+  alt seal opens
+    W-->>W: real preview on the lock screen
+  else no key or failed open
+    W-->>W: generic "New message", never nothing
+  end
+```
+
 
 ## Failure semantics
 

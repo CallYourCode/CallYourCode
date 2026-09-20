@@ -70,6 +70,30 @@ engine's own `/test.html` cannot.
 3. **Agent speech** is synthesized engine-side (`voice/tts.ts`) and delivered
    as a `say` clip the app fetches at `/audio/<msgId>.mp3` over the sealed
    tunnel, voice-first ordering handled app-side.
+```mermaid
+sequenceDiagram
+  participant A as App
+  participant E as Agent engine
+  participant V as Voice engine (loopback)
+  Note over A,E: live mic, every frame sealed (contract 02)
+  A->>E: stt-open {id, sampleRate}
+  E->>V: WS /stt-stream {t:"start"}
+  loop while speaking
+    A->>E: stt-b (PCM)
+    E->>V: binary f32le PCM
+    V-->>E: {t:"partial", text, committed}
+    E-->>A: stt-partial {id, text, committed}
+  end
+  A->>E: stt-close {id}
+  E->>V: {t:"stop"}
+  V-->>E: {t:"final", text, corrections, dropped}
+  E-->>A: stt-final {id, text}
+  Note over A,E: agent speech
+  E->>V: POST /tts {text, voice}
+  V-->>E: audio clip
+  E-->>A: say, clip fetched at /audio/(msgId).mp3 over the sealed tunnel
+```
+
 
 ## Voice readiness frame
 

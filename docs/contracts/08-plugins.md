@@ -8,6 +8,15 @@ the shipped spec as five declarable members (card, composer, panel, action,
 tui). Engines declare; the app renders. Plugins declare NO app settings:
 config happens by talking to the agent or in the plugin's own panel. This is
 the community contribution surface, so its caps are enforced, not advisory.
+```mermaid
+flowchart LR
+  P[Plugin module] -->|declares surfaces| REG[Engine registry]
+  REG -->|"plugins frame: decls only,<br/>functions never cross the wire"| A[App]
+  A -->|renders| UI["card / composer widget /<br/>toolbar panel, action, tui"]
+  UI -->|"cyc.call(op), validated against<br/>the declared ops first"| T["sealed tunnel<br/>/plugin/(id)/rpc/(op)"]
+  T --> REG
+```
+
 
 ## Parties and transport
 

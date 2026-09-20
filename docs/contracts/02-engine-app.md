@@ -69,6 +69,19 @@ see it and a client that missed the live `dequeued` frame reconciles the
 strip against this list on every open. A page's seq axis may be SPARSE, so
 the back-pager steps one page down per probe regardless of what a page
 admits, and an empty sealed page never wedges it.
+```mermaid
+sequenceDiagram
+  participant A as App
+  participant E as Engine
+  A->>E: attach {id, have:{tailPage, tailVersion}}
+  alt have matches the engine tail
+    E-->>A: attach-ok {pages: [], queued} (metadata only, nothing replayed)
+  else stale or cold
+    E-->>A: attach-ok {pages: tail, queued}
+    A->>E: tunneled GET /session/(id)/page/(n) for older pages
+  end
+```
+
 
 ### Delivery guarantees (PRODUCT.md section 5)
 
@@ -92,6 +105,25 @@ often lands mid-type. The post-enter strand check (`adapters/mux-adapter.ts`)
 re-reads after a settle before believing a stranded verdict: a busy TUI can
 repaint its input box empty slower than the confirm window, and a single read
 would false-strand a delivered message and drive a doubling retry.
+```mermaid
+sequenceDiagram
+  participant A as App
+  participant E as Engine
+  participant P as Pane (mux adapter)
+  A->>E: utterance {id, cid, text}
+  E-->>A: ack {cid} (before delivery work)
+  Note over E: consumption listener pre-armed
+  E->>P: keystrokes (or direct input)
+  alt pane busy
+    E-->>A: row marked queued
+    P-->>E: transcript shows the user record (consumed)
+    E-->>A: dequeued (strip lifted)
+  else delivery refused
+    E-->>A: send-failed {cid, reason} (cid stays retriable)
+  end
+  Note over A: ack deadline reached with no ack:<br/>redeliver the SAME cid, row stays pending, never failed
+```
+
 
 ### Tunneled HTTP
 

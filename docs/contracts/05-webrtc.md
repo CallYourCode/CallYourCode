@@ -34,6 +34,25 @@ Label `cyc`, `negotiated: true, id: 0, ordered: true`, created by BOTH ends;
 the engine also accepts an in-band (DCEP) `cyc` channel. The pipe is minted
 exactly once per attempt when the channel opens. Timeouts: 10s on both ends
 (`DIAL_MS` / `RTC_OPEN_MS`); `rtc-fail {reason:"timeout"}` closes the attempt.
+```mermaid
+sequenceDiagram
+  participant A as App (dialer)
+  participant R as Relay (blind)
+  participant E as Engine (answerer)
+  A->>R: rtc-offer {id, sdp}
+  R->>E: forwarded verbatim
+  E->>R: rtc-answer {id, sdp} (before any candidate)
+  R->>A: forwarded verbatim
+  loop candidates trickle, both directions
+    A->>R: rtc-cand {id, cand} (null = end)
+    R->>E: forwarded
+    E->>R: rtc-cand {id, cand}
+    R->>A: forwarded
+  end
+  Note over A,E: DataChannel "cyc" opens (negotiated, id 0, ordered)<br/>the app closes the signaling WS (1000 "upgraded")
+  Note over A,E: 10s timeout both ends, rtc-fail {reason} fails the attempt
+```
+
 
 ## Candidate policy (`rtc.ts` header)
 

@@ -47,6 +47,17 @@ being old; nothing is failed for a transient reason (a 5xx, 408, 429, or
 unreachable engine keeps the row queued). ONLY a definitive engine answer (any
 other 4xx, or an explicit nack) fails an intent, and then the local apply is
 reverted and the row shows red + retry.
+```mermaid
+flowchart LR
+  ACT[User action] --> I["Intent written<br/>(memory + IndexedDB)"]
+  I --> LOCAL[Applied locally at once]
+  I --> Q[Queued FIFO per engine]
+  Q -->|engine reachable| F[Inflight]
+  F -->|engine ack| DONE[Done]
+  F -->|"transient: 5xx, 408, 429,<br/>unreachable"| Q
+  F -->|definitive refusal| FAIL["Failed: local apply reverted,<br/>red row + tap to retry"]
+```
+
 
 ## Recordings
 

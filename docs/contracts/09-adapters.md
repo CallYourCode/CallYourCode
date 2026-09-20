@@ -7,6 +7,15 @@ pi are equal citizens) and any mux (tmux default, herdr opt-in). Harness logic
 lives in the harness reader, mux logic in the mux adapter, core bothers with
 neither: no "if claude" branch in core, core never knows the word "pane".
 Adding a harness is adding a reader; adding a mux is adding an adapter.
+```mermaid
+flowchart LR
+  CORE[Engine core] -->|MultiplexerAdapter| MUX["Mux adapter<br/>(tmux / herdr)"]
+  CORE -->|READERS table| R["HarnessReaders<br/>claude, codex, opencode, pi"]
+  MUX --> PANES[Panes]
+  R -.->|"declare capabilities, launch,<br/>quit ladder, input method"| CORE
+  MUX -.->|"handles are mux-opaque,<br/>core never parses a pane id"| CORE
+```
+
 
 ## Parties and transport
 

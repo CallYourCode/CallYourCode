@@ -40,6 +40,19 @@ device key: `r-challenge {nonce}` -> `r-auth {spki, sig}` -> `r-ok` or
 `r-reject` (`app/src/engine/rtc.ts wsSignal`; the ENGINE verifies, the relay
 stays blind). Then rtc-offer/answer/cand/fail flow verbatim as opaque strings
 (contract 05).
+```mermaid
+sequenceDiagram
+  participant A as App
+  participant S as Server (relay)
+  A->>S: WS /device?engine=(engineId)
+  S->>A: r-challenge {nonce}
+  A->>S: r-auth {spki, sig}
+  Note over S: proof forwarded, the ENGINE verifies (contract 03)
+  S-->>A: r-ok (or r-reject)
+  A->>S: rtc-offer / rtc-cand (opaque strings)
+  S-->>A: rtc-answer / rtc-cand (opaque strings)
+```
+
 
 ## Push, device side (`routes/push.ts`)
 

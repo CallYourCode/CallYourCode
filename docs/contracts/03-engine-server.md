@@ -65,6 +65,25 @@ The engine, not the relay, verifies the device-key dial proof carried in
 devices always admitted, unknown keys through a pairing lane, revoked
 refused). A conn dying before the DataChannel opened tears the attempt down;
 after, the pipe stands alone, so chats survive server restarts.
+```mermaid
+sequenceDiagram
+  participant E as Engine
+  participant S as App server
+  participant D as Device
+  E->>S: POST /engines/enroll {engineId, pubkey, ts, sig}
+  S-->>E: cyt_ token (opaque)
+  loop boot + heartbeat
+    E->>S: POST /engines/announce (Bearer cyt_)
+  end
+  E->>S: ONE outbound WS to /engine
+  D->>S: dial (contract 04)
+  S->>E: r-open {c, rtc, auth}
+  Note over E: the ENGINE verifies the device key proof, the relay stays blind
+  S->>E: r {c, f} signaling, forwarded verbatim
+  E-->>S: r answers, r-accept / r-reject
+  Note over D,E: DataChannel opens, the pipe stands alone,<br/>chats survive server restarts
+```
+
 
 ## Settings poll
 
