@@ -390,6 +390,59 @@ export async function runCloudOnboard(facts: PairFacts, base = cloudBaseUrl()): 
   printCloud(facts.key, pairingUrl(base, facts.key, facts.engineId));
 }
 
+/** The tailnet https base for the LOCAL pairing link, or null for the plain
+ *  localhost link. When tailscale runs on this machine, `tailscale serve` puts
+ *  the app on https://<machine>.<tailnet>.ts.net with a real certificate,
+ *  which the phone wants anyway: PWA install, the mic and the service worker
+ *  all need a secure context, and localhost is not one from another device.
+ *  Every refusal is a silent null and the plain link stands:
+ *  - CYC_DATA_DIR set: a scoped instance (a test, a dev run) does not own the
+ *    machine's tailnet and must never rewrite its serve config.
+ *  - base not loopback: an operator already chose an address; respect it.
+ *  - no tailscale binary, daemon not Running, no DNS name.
+ *  - `tailscale serve status` shows a config that is NOT ours: never clobber
+ *    something the user serves already.
+ *  - the serve command itself refusing (an old CLI without --bg, missing
+ *    operator rights). */
+export async function tailnetServeBase(
+  base: string,
+  run: (cmd: string[]) => Promise<{ code: number; out: string }> = runOut,
+): Promise<string | null> {
+  if (process.env.CYC_DATA_DIR) return null;
+  let u: URL;
+  try { u = new URL(base); } catch { return null; }
+  if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") return null;
+  if (!u.port) return null;
+  const st = await run(["tailscale", "status", "--json"]);
+  if (st.code !== 0) return null;
+  let dns = "";
+  try {
+    const j = JSON.parse(st.out) as { BackendState?: string; Self?: { DNSName?: string } };
+    if (j?.BackendState !== "Running") return null;
+    dns = (j?.Self?.DNSName ?? "").replace(/\.+$/, "");
+  } catch {
+    return null;
+  }
+  if (!dns) return null;
+  const existing = await run(["tailscale", "serve", "status"]);
+  if (existing.code === 0 && existing.out.trim() && !existing.out.includes(`127.0.0.1:${u.port}`)) {
+    return null;
+  }
+  const served = await run(["tailscale", "serve", "--bg", u.port]);
+  if (served.code !== 0) return null;
+  return `https://${dns}`;
+}
+
+async function runOut(cmd: string[]): Promise<{ code: number; out: string }> {
+  try {
+    const p = Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const out = await new Response(p.stdout).text();
+    return { code: await p.exited, out };
+  } catch {
+    return { code: -1, out: "" };
+  }
+}
+
 /** Bounce the installed engine service so a fresh enrollment takes effect.
  *  The names are the installer's own (scripts/install.sh): a systemd user
  *  unit on Linux, a LaunchAgent on macOS. Two refusals matter:
@@ -432,8 +485,17 @@ async function runChooser(): Promise<void> {
   } else {
     /* Local onboarding is engine-initiated too: open the pairing page (key in
      * the #fragment, so it never leaves this machine) in the local browser
-     * when one exists; the printed link and key are the same either way. */
-    const url = pairingUrl(localAppUrl(base), facts.key, facts.engineId);
+     * when one exists; the printed link and key are the same either way.
+     * With tailscale running, the app goes on the tailnet over https first
+     * (tailnetServeBase), so the printed link works from the PHONE and gets
+     * a QR; without it, the plain localhost link as always. */
+    const tail = await tailnetServeBase(base);
+    const url = pairingUrl(tail ?? localAppUrl(base), facts.key, facts.engineId);
+    if (tail) {
+      console.log("tailscale found: the app is served on your tailnet over https.");
+      console.log("Open this on your phone (same tailnet), or scan:");
+      console.log(renderQr(url));
+    }
     if (openInBrowser(url)) console.log("Opening the pairing page in your browser...");
     printLocal(facts.key, url);
   }

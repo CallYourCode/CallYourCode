@@ -26,6 +26,7 @@ import {
   localAppUrl,
   renderQr,
   restartEngineService,
+  tailnetServeBase,
   CLOUD_APP_URL,
   DEFAULT_APP_URL,
 } from "./pairkey";
@@ -650,4 +651,72 @@ test("restartEngineService bounces the installer's own unit, and a refusal is fa
     if (prior === undefined) delete process.env.CYC_DATA_DIR;
     else process.env.CYC_DATA_DIR = prior;
   }
+});
+
+/* --------------------------------------------- the tailnet-served Local link.
+ * Pair Local + tailscale running: the app goes on the tailnet over https and
+ * the link points there (a phone needs the secure context anyway). The rules
+ * proven: scoped instances and non-loopback bases never run a command, an
+ * existing foreign serve config is never clobbered, and every refusal falls
+ * back to null (the plain localhost link). */
+
+const TS_PORT = new URL(DEFAULT_APP_URL).port;
+const TS_RUNNING = JSON.stringify({ BackendState: "Running", Self: { DNSName: "box.tail42.ts.net." } });
+
+test("tailnetServeBase: scoped instance or a non-loopback base refuses before any command", async () => {
+  const calls: string[][] = [];
+  const run = async (cmd: string[]) => { calls.push(cmd); return { code: 0, out: "" }; };
+
+  const prior = process.env.CYC_DATA_DIR;
+  process.env.CYC_DATA_DIR = "/tmp/scoped";
+  try {
+    expect(await tailnetServeBase(DEFAULT_APP_URL, run)).toBeNull();
+  } finally {
+    if (prior === undefined) delete process.env.CYC_DATA_DIR;
+    else process.env.CYC_DATA_DIR = prior;
+  }
+  expect(await tailnetServeBase("https://app.example.test", run)).toBeNull();
+  expect(calls).toHaveLength(0);
+});
+
+test("tailnetServeBase serves the app port and answers the https tailnet base", async () => {
+  const calls: string[][] = [];
+  const run = async (cmd: string[]) => {
+    calls.push(cmd);
+    if (cmd[1] === "status") return { code: 0, out: TS_RUNNING };
+    if (cmd[1] === "serve" && cmd[2] === "status") return { code: 0, out: "" };
+    return { code: 0, out: "" };
+  };
+  expect(await tailnetServeBase(DEFAULT_APP_URL, run)).toBe("https://box.tail42.ts.net");
+  expect(calls.map((c) => c.join(" "))).toEqual([
+    "tailscale status --json",
+    "tailscale serve status",
+    `tailscale serve --bg ${TS_PORT}`,
+  ]);
+});
+
+test("tailnetServeBase: a foreign serve config, a stopped daemon, or a refused serve all fall back", async () => {
+  // an existing serve pointing somewhere else: never clobbered
+  const foreign = async (cmd: string[]) => {
+    if (cmd[1] === "status") return { code: 0, out: TS_RUNNING };
+    if (cmd[1] === "serve" && cmd[2] === "status") return { code: 0, out: "https://box.tail42.ts.net/ proxy http://127.0.0.1:8443" };
+    return { code: 0, out: "" };
+  };
+  expect(await tailnetServeBase(DEFAULT_APP_URL, foreign)).toBeNull();
+
+  // daemon present but not Running
+  const stopped = async (cmd: string[]) =>
+    cmd[1] === "status" ? { code: 0, out: JSON.stringify({ BackendState: "NeedsLogin" }) } : { code: 0, out: "" };
+  expect(await tailnetServeBase(DEFAULT_APP_URL, stopped)).toBeNull();
+
+  // the serve command itself refusing (old CLI, missing operator rights)
+  const refusing = async (cmd: string[]) => {
+    if (cmd[1] === "status") return { code: 0, out: TS_RUNNING };
+    if (cmd[1] === "serve" && cmd[2] === "status") return { code: 0, out: "" };
+    return { code: 1, out: "" };
+  };
+  expect(await tailnetServeBase(DEFAULT_APP_URL, refusing)).toBeNull();
+
+  // no tailscale binary at all
+  expect(await tailnetServeBase(DEFAULT_APP_URL, async () => ({ code: -1, out: "" }))).toBeNull();
 });
