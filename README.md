@@ -20,7 +20,14 @@ again and tell me what broke," and the agent keeps going. The whole loop runs
 on your own hardware over your own network.
 
 <p align="center">
-  <img src="docs/media/phone.png" alt="A conversation with a Claude Code agent on the phone: a spoken question, a written reply, and a voice note back." width="420">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/terminal-dark.webp">
+    <img src="docs/media/terminal.webp" alt="A tmux pane running Claude Code: the phone's message arrives as terminal input and the agent replies through cyc" width="560">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/phone-dark.webp">
+    <img src="docs/media/phone.webp" alt="The same conversation as a chat on the phone: a written reply and a voice note back" width="190">
+  </picture>
 </p>
 
 ## Why it is different
@@ -91,7 +98,7 @@ chats, photos, voice notes, shown documents. The app cold-starts offline.
 Every user action applies locally the instant it happens, is stored durably,
 and drains to the engine when it is reachable. Sends show instantly and retry
 with the same identity until acknowledged; a genuinely failed delivery is
-shown honestly (red row, tap to retry), never silently lost. Losing user
+shown plainly (red row, tap to retry), never silently lost. Losing user
 input is the cardinal sin.
 
 **Chat-app-grade feel.** Scrolling follows the finger. Unread markers and
@@ -113,15 +120,25 @@ declarative composer widget, a toolbar entry opening a sandboxed panel).
 Engines declare, the app renders. This is also the community contribution
 surface, with enforced caps rather than advisory ones.
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/plug-crons-dark.webp">
+    <img src="docs/media/plug-crons.webp" alt="The Crons panel beside a conversation: two recurring schedules with toggles and next-run times." width="720">
+  </picture>
+</p>
+
 One roster, every agent on the machine: Claude Code, Codex, OpenCode and Pi,
 each with its model, its crons, its git and files pages, and a TUI view.
 
-<img src="docs/media/laptop.png" alt="The CallYourCode app on a laptop: a roster of Claude Code, Codex, OpenCode and Pi agents, one conversation open.">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/laptop-dark.webp">
+  <img src="docs/media/laptop.webp" alt="The CallYourCode app on a laptop: a roster of Claude Code, Codex, OpenCode and Pi agents, one conversation open.">
+</picture>
 
-And the same conversation, in the pane where the agent actually runs:
+And the real pane itself is one tap away, live inside the app:
 
 <p align="center">
-  <img src="docs/media/terminal.png" alt="The same exchange inside the agent's tmux pane: the message arrives as terminal input, the agent replies through cyc." width="720">
+  <img src="docs/media/plug-terminal.webp" alt="The TUI view: the agent's actual Claude Code pane, live inside the app." width="720">
 </p>
 
 ## Get started in two minutes
