@@ -3,7 +3,9 @@ type ClerkJS = {
   load(opts?: Record<string, unknown>): Promise<unknown>;
   loaded?: boolean;
   session?: ClerkSession | null;
+  user?: unknown;
   mountSignIn?(el: HTMLElement, opts?: Record<string, unknown>): void;
+  handleRedirectCallback?(opts?: Record<string, unknown>): Promise<unknown>;
   addListener?(cb: (payload: {user?: unknown; session?: unknown}) => void): () => void;
 };
 
@@ -131,20 +133,49 @@ function buildGate(): {overlay: HTMLElement; mount: HTMLElement} {
   return {overlay, mount};
 }
 
-export async function showSignIn(): Promise<void> {
+/** True when the current URL is Clerk finishing an OAuth/redirect flow. */
+function isClerkCallbackUrl(): boolean {
+  const s = location.search + location.hash;
+  return (
+    /sso-callback/.test(location.hash) ||
+    /(__clerk_handshake|__clerk_status|__clerk_ticket|__clerk_db_jwt|__clerk_help)/.test(s)
+  );
+}
+
+export async function showSignIn(pre?: ClerkJS | null): Promise<void> {
   if (gateEl) return;
-  const clerk = await loadClerk();
+  const clerk = pre ?? (await loadClerk());
+  // Already signed in (e.g. returned from OAuth): never raise the gate.
+  if (clerk?.session) return;
   const {overlay, mount} = buildGate();
   gateEl = overlay;
-  if (clerk?.mountSignIn) {
-    try {
-      clerk.mountSignIn(mount);
-
-      clerk.addListener?.((p) => {
-        if (p.user || p.session) hideSignIn();
-      });
-    } catch {}
-  }
+  if (!clerk?.mountSignIn) return;
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    hideSignIn();
+    // Boot the app fresh, now signed in, so it loads the owner's engines.
+    location.replace('/');
+  };
+  try {
+    clerk.mountSignIn(mount, {fallbackRedirectUrl: '/', forceRedirectUrl: '/'});
+    clerk.addListener?.((p) => {
+      if (p.user || p.session) finish();
+    });
+    // Fallback: the listener can miss the edge if the session lands as we attach.
+    const started = Date.now();
+    const iv = setInterval(() => {
+      if (done || !gateEl || Date.now() - started > 180000) {
+        clearInterval(iv);
+        return;
+      }
+      if (clerk.session) {
+        clearInterval(iv);
+        finish();
+      }
+    }, 500);
+  } catch {}
 }
 
 export function hideSignIn(): void {
@@ -157,7 +188,26 @@ export function hideSignIn(): void {
 export async function ensureSessionOrGate(): Promise<void> {
   if (bootCheckStarted) return;
   bootCheckStarted = true;
-  const token = await getSessionToken();
-
-  if (!token && publishableKey) await showSignIn();
+  const clerk = await loadClerk();
+  if (!clerk) return;
+  // Complete an OAuth/redirect handshake if we came back on the callback URL.
+  if (isClerkCallbackUrl() && typeof clerk.handleRedirectCallback === 'function') {
+    try {
+      await clerk.handleRedirectCallback({});
+    } catch {}
+  }
+  if (clerk.session) {
+    // Signed in. If we are still sitting on the callback URL, boot the app clean.
+    if (isClerkCallbackUrl()) location.replace('/');
+    else hideSignIn();
+    return;
+  }
+  // Not signed in. A leftover callback hash confuses the mounted SignIn, so clear
+  // it before raising the gate.
+  if (isClerkCallbackUrl()) {
+    try {
+      history.replaceState(history.state, '', location.pathname + location.search);
+    } catch {}
+  }
+  await showSignIn(clerk);
 }
