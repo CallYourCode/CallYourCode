@@ -78,12 +78,13 @@ async function loadClerk(): Promise<ClerkJS | null> {
     if (!api) return null;
     try {
       await loadScript(`${api}/npm/@clerk/clerk-js@${CLERK_JS_VERSION}/dist/clerk.browser.js`, publishableKey);
-      // The data attribute makes the script construct window.Clerk itself, but it
-      // may appear a tick after onload; wait briefly for it.
-      for (let i = 0; i < 40 && !window.Clerk; i++) await new Promise((r) => setTimeout(r, 50));
-      if (!window.Clerk) return null;
-      if (!window.Clerk.loaded) await window.Clerk.load();
-      return window.Clerk;
+      // The data-clerk-publishable-key attribute makes the script construct AND
+      // auto-load window.Clerk itself. Do NOT call load() ourselves: a second
+      // load() races the auto-load and throws, which would leave this cached
+      // promise null and the sign-in unmounted. Just wait for `loaded`.
+      for (let i = 0; i < 120 && !(window.Clerk && window.Clerk.loaded); i++)
+        await new Promise((r) => setTimeout(r, 50));
+      return window.Clerk && window.Clerk.loaded ? window.Clerk : null;
     } catch {
       return null;
     }
