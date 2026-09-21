@@ -4,10 +4,9 @@ type ClerkJS = {
   loaded?: boolean;
   user?: unknown;
   session?: ClerkSession | null;
-  mountSignIn?(el: HTMLElement, opts?: Record<string, unknown>): void;
+  redirectToSignIn?(opts?: Record<string, unknown>): Promise<unknown> | void;
   handleRedirectCallback?(opts?: Record<string, unknown>): Promise<unknown>;
   signOut?(opts?: Record<string, unknown>): Promise<unknown>;
-  addListener?(cb: (payload: {user?: unknown; session?: unknown}) => void): () => void;
 };
 
 declare global {
@@ -19,8 +18,6 @@ declare global {
 
 let publishableKey: string | null = null;
 let clerkPromise: Promise<ClerkJS | null> | null = null;
-let gateEl: HTMLElement | null = null;
-let gatePoll: ReturnType<typeof setInterval> | null = null;
 let bootCheckStarted = false;
 
 function fakeToken(): (() => string | null | Promise<string | null>) | null {
@@ -118,7 +115,7 @@ async function loadClerk(): Promise<ClerkJS | null> {
     // load() ourselves inside its OWN try/catch: the data-attribute auto-load may
     // already be running, so a throw here is expected and tolerated. Then poll
     // for `loaded` up to ~5s and RETURN the instance regardless: getToken and
-    // mountSignIn guard themselves, so a still-false flag must not drop the gate.
+    // redirectToSignIn guard themselves, so a still-false flag is tolerated.
     if (!window.Clerk.loaded) {
       try {
         await window.Clerk.load();
@@ -158,6 +155,10 @@ export async function isSignedIn(): Promise<boolean> {
   return !!(await getSessionToken());
 }
 
+// The embedded gate is gone (hosted redirect owns the flow); kept as a no-op so
+// callers that used to tear down the gate stay valid.
+export function hideSignIn(): void {}
+
 export async function clerkSignOut(): Promise<void> {
   const clerk = await loadClerk();
   try {
@@ -166,92 +167,48 @@ export async function clerkSignOut(): Promise<void> {
   location.replace('/');
 }
 
-function buildGate(): {overlay: HTMLElement; mount: HTMLElement} {
-  // Just a blurred backdrop over the app; Clerk's own card is the only chrome.
-  const overlay = document.createElement('div');
-  overlay.className = 'cyc-clerk-gate';
-  overlay.style.cssText =
-    'position:fixed;inset:0;z-index:2147483600;display:flex;align-items:center;' +
-    'justify-content:center;padding:24px;box-sizing:border-box;overflow:auto;' +
-    'background:rgba(10,10,12,.5);' +
-    'backdrop-filter:blur(14px) saturate(120%);-webkit-backdrop-filter:blur(14px) saturate(120%);';
-  const mount = document.createElement('div');
-  mount.className = 'cyc-clerk-gate-mount';
-  overlay.appendChild(mount);
-  document.body.appendChild(overlay);
-  return {overlay, mount};
-}
-
-// A real session token (not just a present session object) means truly signed
-// in: drop the gate and boot fresh to `/` so the app reloads signed-in and
-// fetches the owner's engines.
-function bootSignedIn(): void {
-  hideSignIn();
-  location.replace('/');
-}
-
+// Redirect to Clerk's HOSTED sign-in. Clerk owns the whole flow on
+// accounts.callyourcode.com and returns to the app already signed in, so the
+// app never renders a Clerk form itself.
 export async function showSignIn(): Promise<void> {
-  if (gateEl) return;
   const clerk = await loadClerk();
-  const {overlay, mount} = buildGate();
-  gateEl = overlay;
-  if (clerk?.mountSignIn) {
-    try {
-      // A redirect sign-in flow (OAuth) must land back on `/`, not the parked
-      // sso-callback URL, so the app boots signed-in.
-      clerk.mountSignIn(mount, {fallbackRedirectUrl: '/', forceRedirectUrl: '/'});
-    } catch {}
-  }
-  // Two ways the gate learns a session landed: Clerk's own listener, and a
-  // polling fallback (the listener does not always fire for every flow). Both
-  // gate on the TOKEN, never the raw session object.
-  clerk?.addListener?.((p) => {
-    if (!gateEl || !(p.user || p.session)) return;
-    void getSessionToken().then((t) => {
-      if (t) bootSignedIn();
+  if (!clerk?.redirectToSignIn) return;
+  if (await getSessionToken()) return; // already signed in, do not bounce
+  // redirectToSignIn needs Clerk fully loaded to know the sign-in URL; called too
+  // early it silently no-ops and the page just sits there. Wait for `loaded`
+  // (up to ~10s) before redirecting.
+  for (let i = 0; i < 200 && !clerk.loaded; i++) await new Promise((r) => setTimeout(r, 50));
+  if (await getSessionToken()) return; // a session may have landed while we waited
+  try {
+    clerk.redirectToSignIn({
+      signInForceRedirectUrl: location.origin + '/',
+      signUpForceRedirectUrl: location.origin + '/'
     });
-  });
-  if (gatePoll) clearInterval(gatePoll);
-  gatePoll = setInterval(() => {
-    if (!gateEl) {
-      if (gatePoll) clearInterval(gatePoll);
-      gatePoll = null;
-      return;
-    }
-    void getSessionToken().then((t) => {
-      if (t && gateEl) bootSignedIn();
-    });
-  }, 1000);
-}
-
-export function hideSignIn(): void {
-  if (gatePoll) {
-    clearInterval(gatePoll);
-    gatePoll = null;
-  }
-  if (gateEl) {
-    gateEl.remove();
-    gateEl = null;
-  }
+  } catch {}
 }
 
 export async function ensureSessionOrGate(): Promise<void> {
   if (bootCheckStarted) return;
   bootCheckStarted = true;
-
-  // Return leg of an OAuth redirect: finish the handshake, then boot to `/` so
-  // the page reloads signed-in and off the parked sso-callback URL.
-  if (isClerkCallbackUrl()) {
-    const clerk = await loadClerk();
-    if (clerk?.handleRedirectCallback) {
+  const clerk = await loadClerk();
+  if (!clerk) return; // clerk-js failed to load; do nothing
+  let token = await getSessionToken();
+  // Returning from the hosted portal carries a handshake; give the session a
+  // moment to settle before deciding we are logged out.
+  if (!token && isClerkCallbackUrl()) {
+    for (let i = 0; i < 60 && !token; i++) {
+      await new Promise((r) => setTimeout(r, 150));
+      token = await getSessionToken();
+    }
+  }
+  if (token) {
+    // Signed in. Clean any handshake params off the URL without a reload.
+    if (isClerkCallbackUrl()) {
       try {
-        await clerk.handleRedirectCallback({});
+        history.replaceState(history.state, '', '/');
       } catch {}
     }
-    location.replace('/');
     return;
   }
-
-  const token = await getSessionToken();
-  if (!token && publishableKey) await showSignIn();
+  if (publishableKey) await showSignIn(); // -> redirects to hosted sign-in
 }
