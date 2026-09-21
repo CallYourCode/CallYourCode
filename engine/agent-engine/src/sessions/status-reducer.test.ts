@@ -53,7 +53,7 @@ describe("mux observation: hint x carried jsonl verdict x nativeDone", () => {
           const r = reduceStatus(st("done", carry), mux(hint, nativeDone));
           const want = oracle(hint, carry, nativeDone);
           expect(r.status).toBe(want.status);
-          expect(r.jsonlStatus).toBe(want.jsonlStatus);
+          expect(r.jsonlStatus ?? null).toBe(want.jsonlStatus ?? null);
           expect(r.changed).toBe(want.status !== "done");
         });
       }

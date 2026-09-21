@@ -97,7 +97,7 @@ initSessionsFrame({
 });
 const reconcile = makeReconcile({
   hasTranscript: () => true,
-  canParseScreen: () => false,
+  canParseScreen: () => false, nativeDone: false,
   sweepTails: () => {},
   broadcastSessions: () => {},
   log: () => {},

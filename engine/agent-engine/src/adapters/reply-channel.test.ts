@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 // the extension module under test (plain CJS)
+// @ts-expect-error plain CJS module, no declaration file ships with it
 import { registerReplyTools } from "../../../harness/pi/reply-channel.js";
 // @ts-expect-error CJS module, _internal is attached at runtime
 import { _internal as rc } from "../../../harness/pi/reply-channel.js";
@@ -238,7 +239,7 @@ describe("the #505 idempotency key: reuse on retry, fresh after success", () => 
     await expect(speak.execute("tc", { text: "same" })).rejects.toThrow("Retry the tool call.");
     // the retry (same text) reuses the SAME key, with a fresh msgId
     await speak.execute("tc", { text: "same" });
-    expect(calls[1].body.key).toBe(calls[0].body.key);
+    expect(calls[1].body.key).toBe(calls[0].body.key!);
     expect(calls[1].body.msgId).not.toBe(calls[0].body.msgId);
     // after that success the entry is cleared, so the next identical text is NEW
     await speak.execute("tc", { text: "same" });

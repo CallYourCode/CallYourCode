@@ -72,7 +72,7 @@ initIngest({
   subscribeStatus: () => null, transcriptFile: () => null, tailOf: () => undefined, setTail: () => {}, log: () => {},
 });
 const reconcile = makeReconcile({
-  hasTranscript: () => false, canParseScreen: () => false, sweepTails: () => {}, broadcastSessions: () => {}, now: () => clock,
+  hasTranscript: () => false, canParseScreen: () => false, nativeDone: false, sweepTails: () => {}, broadcastSessions: () => {}, now: () => clock,
 });
 
 beforeEach(async () => {

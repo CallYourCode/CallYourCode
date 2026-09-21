@@ -87,7 +87,9 @@ test("engineOrigin precedence: CYC_ENGINE_URL, then VOICE_ENGINE_URL, then the d
   expect(engineOrigin({ CYC_ENGINE_URL: "http://a:1/" })).toBe("http://a:1");
   expect(engineOrigin({ VOICE_ENGINE_URL: "http://b:2" })).toBe("http://b:2");
   expect(engineOrigin({ CYC_ENGINE_URL: "http://a:1", VOICE_ENGINE_URL: "http://b:2" })).toBe("http://a:1");
-  expect(engineOrigin({})).toBe("http://127.0.0.1:10101");
+  // hermetic default: on a box RUNNING an engine, the real ~/.callyourcode
+  // engine.sock would win the probe, so the default case pins an empty data dir.
+  expect(engineOrigin({ CYC_DATA_DIR: "/nonexistent-cyc-test-scratch" })).toBe("http://127.0.0.1:10101");
 });
 
 test("tildify collapses the home prefix only", () => {

@@ -87,7 +87,7 @@ const initFrame = () => initSessionsFrame({
 });
 initFrame();
 const reconcile = makeReconcile({
-  hasTranscript: () => false, canParseScreen: () => false, sweepTails: () => {},
+  hasTranscript: () => false, canParseScreen: () => false, nativeDone: false, sweepTails: () => {},
   broadcastSessions, now: () => clock,
 });
 

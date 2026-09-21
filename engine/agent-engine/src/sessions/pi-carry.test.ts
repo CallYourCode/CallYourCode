@@ -75,7 +75,7 @@ initIngest({
 });
 
 const reconcile = makeReconcile({
-  hasTranscript: () => false, canParseScreen: () => false,
+  hasTranscript: () => false, canParseScreen: () => false, nativeDone: false,
   sweepTails: () => {}, broadcastSessions: () => {}, now: () => clock,
 });
 
