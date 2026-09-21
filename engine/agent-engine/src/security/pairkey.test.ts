@@ -289,7 +289,7 @@ test("chooser: Local and Cloud flows via piped stdin", async () => {
     expect(new URL(localUrl).hostname).toBe("localhost");
     expect(new URL(cloudUrl).host).toBe(new URL(cloudStub.url).host);
     expect(new URL(cloudUrl).hostname).not.toBe("localhost");
-    expect(new URL(CLOUD_APP_URL).hostname).toBe("callyourcode.com");
+    expect(new URL(CLOUD_APP_URL).hostname).toBe("app.callyourcode.com");
 
     // the bare key is printed on its own line in both runs, so it can be
     // selected without dragging the url along

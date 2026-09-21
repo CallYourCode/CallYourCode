@@ -43,7 +43,7 @@ import { mkdirPrivateSync } from "../../../shared/runfiles.ts";
 import { join } from "node:path";
 
 // Final paths are undecided.
-export const CLOUD_APP_URL = "https://callyourcode.com";
+export const CLOUD_APP_URL = "https://app.callyourcode.com";
 export const INSTALL_URL = "https://callyourcode.com/install.sh";
 
 /** The hosted base the cloud onboarding talks to. CYC_CLOUD_URL exists for
