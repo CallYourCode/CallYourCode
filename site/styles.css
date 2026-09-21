@@ -63,6 +63,7 @@ a:hover { text-decoration: underline; }
   border: 0; background: transparent; color: var(--muted);
   padding: 6px 10px; border-radius: 6px; cursor: pointer;
   font-family: "IBM Plex Sans", system-ui, sans-serif; font-size: 14px;
+  text-decoration: none; display: inline-flex; align-items: center;
 }
 .btn-login:hover { color: var(--ink); }
 
