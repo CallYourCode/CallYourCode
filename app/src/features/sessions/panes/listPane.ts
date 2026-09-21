@@ -403,6 +403,13 @@ export function createListPane(deps: ListPaneDeps) {
 
       // Step 1 (conditional): only offer a harness step when 2+ are installed.
       const avail = harnesses.filter((h) => h.available);
+      if (harnesses.length && !avail.length) {
+        // A current engine reported its harness list and NOTHING is installed:
+        // any start would only be refused (the engine probes PATH before it
+        // spawns), so name the real fix instead of offering folders.
+        toast('Install a coding harness first: claude code, codex, opencode or pi');
+        return;
+      }
       if (avail.length <= 1) {
         // 0 available (old engine) -> undefined -> engine default (claude);
         // exactly 1 -> that kind, same outcome as the default.

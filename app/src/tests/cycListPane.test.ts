@@ -393,6 +393,32 @@ describe('the new-session menu', () => {
     expect(store.startSession).toHaveBeenCalledWith('e1', '/w/app', undefined, 'claude');
   });
 
+  test('none installed: no menu, the toast names the harnesses to install', async () => {
+    // A current engine reports its list with NOTHING available (a fresh box):
+    // the fab must not offer folders (a start would only be refused) and must
+    // say what to install instead.
+    vi.mocked(store.newSessionPlaces).mockResolvedValueOnce({
+      places: ['/w/app'],
+      home: '/home/u',
+      def: null,
+      harnesses: [
+        {kind: 'claude', available: false},
+        {kind: 'codex', available: false}
+      ],
+      recent: []
+    });
+    const {pane} = mk();
+    const floatingAction = pane.leftContent.querySelector('.cyc-new-conversation') as HTMLElement;
+    floatingAction.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+    await vi.waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        'Install a coding harness first: claude code, codex, opencode or pi'
+      )
+    );
+    expect(vi.mocked(openMenu)).not.toHaveBeenCalled();
+    expect(store.startSession).not.toHaveBeenCalled();
+  });
+
   test('two available: harness step first (unavailable hidden), then the folder menu', async () => {
     vi.mocked(store.newSessionPlaces).mockResolvedValueOnce({
       places: ['/w/app'],
