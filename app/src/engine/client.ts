@@ -165,6 +165,14 @@ export class WsEngineClient implements EngineClient {
 
   private held: 'identity' | 'pairing' | null = null;
 
+  /* A paired()/trustEngine() that landed while a dial attempt was already in
+   * flight. dial()'s in-flight guard silently swallows the redial kick, and
+   * when that attempt then failed (unknown-device), the client parked on
+   * `held` with nobody left to wake it: PAIR tapped during the slow first
+   * hosted dial sat on "Pairing..." until a reload. The kick is remembered
+   * here, and the handshake-failure path retries instead of parking. */
+  private rekeyKick = false;
+
   private voiceCall: VoiceCall | null = null;
 
   private readonly tunnel = new TunnelClient({
@@ -976,6 +984,9 @@ export class WsEngineClient implements EngineClient {
       this.signal = null;
       this.emit('status', 'disconnected');
       if (this.held === 'identity') {
+        // trustEngine() landed during THIS attempt: retry with the trust
+        // applied instead of parking and re-asking.
+        if (this.retryAfterRekey()) return;
         const at = uh.indexOf('@');
         this.emit(
           'identityChanged',
@@ -985,11 +996,16 @@ export class WsEngineClient implements EngineClient {
         return;
       }
       if (this.held === 'pairing') {
+        // paired() landed during THIS attempt (its dial() was swallowed by
+        // the in-flight guard): the key is in the keyring now, so retry
+        // instead of parking forever.
+        this.retryAfterRekey();
         return;
       }
       this.scheduleReconnect();
       return;
     }
+    this.rekeyKick = false;
 
     this.signal?.close(1000, 'upgraded');
     this.signal = null;
@@ -1252,9 +1268,21 @@ export class WsEngineClient implements EngineClient {
     return this.httpBase + path;
   }
 
+  /** True when a rekey (paired / trustEngine) landed while the just-failed
+   *  attempt was in flight: skip the park, schedule the reconnect that the
+   *  swallowed kick meant to cause. */
+  private retryAfterRekey(): boolean {
+    if (!this.rekeyKick) return false;
+    this.rekeyKick = false;
+    this.held = null;
+    this.scheduleReconnect();
+    return true;
+  }
+
   public async paired(userHost: string): Promise<void> {
     this.rememberUserHost(userHost);
     this.held = null;
+    this.rekeyKick = true;
     if (this.pipe) {
       try {
         this.pipe.close(1000, 're-paired');
@@ -1282,6 +1310,7 @@ export class WsEngineClient implements EngineClient {
     }
     this.forgetUserHost();
     this.held = null;
+    this.rekeyKick = true;
     if (!this.closed) void this.dial();
   }
 
