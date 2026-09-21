@@ -195,12 +195,14 @@ write_file() {
 }
 
 # --- prerequisites (we name what to install; we NEVER install it ourselves) ---
-# Two things we cannot get without a package manager, so we check them up front
-# and stop with ONE combined message naming exactly what is missing:
+# Three things we cannot get without a package manager, so we check them up
+# front and stop with ONE combined message naming exactly what is missing:
 #   unzip  -- only if bun must be installed (its installer unpacks a .zip); a
 #             machine that already has bun never needs it.
 #   tmux   -- the multiplexer, since tmux is the default (people already have
 #             it); not required when the user opted into herdr (CYC_MUX=herdr).
+#   bzip2  -- the voice models ship as .tar.bz2 and the engine unpacks them
+#             with tar at first boot; tar needs the bzip2 binary for that.
 # _present TOOL is true when TOOL is on PATH, with a CYC_FAKE_<TOOL>
 # present/absent override so the tests can drive every branch.
 _present() {
@@ -215,6 +217,7 @@ if [ "${CYC_MUX:-}" = "herdr" ]; then
 else
   if ! _present tmux; then _need="${_need:+$_need }tmux"; fi
 fi
+if ! _present bzip2; then _need="${_need:+$_need }bzip2"; fi
 if [ -n "$_need" ]; then
   if [ "$DRY_RUN" = 1 ]; then
     echo "prereqs: missing ($_need); install would stop here"

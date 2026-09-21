@@ -246,7 +246,7 @@ test("CYC_MUX=herdr opts into herdr: CYC_MUX=herdr named, herdr installed", asyn
 
 test("tmux absent on Linux: the prereq gate names tmux, never runs privileged commands", async () => {
   const home = scratchHome();
-  const { out, code } = await dryRun("Linux", home, { CYC_FAKE_TMUX: "absent" });
+  const { out, code } = await dryRun("Linux", home, { CYC_FAKE_TMUX: "absent", CYC_FAKE_BZIP2: "present" });
 
   expect(code).toBe(0); // dry-run names the stop; the real install exits 1 there
   expect(out).toContain("prereqs: missing (tmux); install would stop here");
@@ -256,10 +256,19 @@ test("tmux absent on Linux: the prereq gate names tmux, never runs privileged co
 
 test("CYC_MUX=herdr but herdr absent on Linux: the prereq gate names herdr, not tmux", async () => {
   const home = scratchHome();
-  const { out, code } = await dryRun("Linux", home, { CYC_MUX: "herdr", CYC_FAKE_HERDR: "absent" });
+  const { out, code } = await dryRun("Linux", home, { CYC_MUX: "herdr", CYC_FAKE_HERDR: "absent", CYC_FAKE_BZIP2: "present" });
 
   expect(code).toBe(0);
   expect(out).toContain("prereqs: missing (herdr); install would stop here");
+  expectUntouched(home);
+});
+
+test("bzip2 absent on Linux: the prereq gate names bzip2 (voice models unpack with tar --bzip2)", async () => {
+  const home = scratchHome();
+  const { out, code } = await dryRun("Linux", home, { CYC_FAKE_TMUX: "present", CYC_FAKE_BZIP2: "absent" });
+
+  expect(code).toBe(0);
+  expect(out).toContain("prereqs: missing (bzip2); install would stop here");
   expectUntouched(home);
 });
 
