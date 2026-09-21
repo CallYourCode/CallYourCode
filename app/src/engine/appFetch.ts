@@ -22,6 +22,10 @@ export function setAppAuth(auth: string | null | undefined, key: string | null |
   }
 }
 
+export function isClerkAuth(): boolean {
+  return authMode === 'clerk';
+}
+
 export async function appFetch(input: string, init?: RequestInit): Promise<Response> {
   if (authMode !== 'clerk') return fetch(input, init);
   const headers = new Headers(init?.headers);

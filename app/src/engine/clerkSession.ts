@@ -2,10 +2,11 @@ type ClerkSession = {getToken(): Promise<string | null>};
 type ClerkJS = {
   load(opts?: Record<string, unknown>): Promise<unknown>;
   loaded?: boolean;
-  session?: ClerkSession | null;
   user?: unknown;
+  session?: ClerkSession | null;
   mountSignIn?(el: HTMLElement, opts?: Record<string, unknown>): void;
   handleRedirectCallback?(opts?: Record<string, unknown>): Promise<unknown>;
+  signOut?(opts?: Record<string, unknown>): Promise<unknown>;
   addListener?(cb: (payload: {user?: unknown; session?: unknown}) => void): () => void;
 };
 
@@ -19,6 +20,7 @@ declare global {
 let publishableKey: string | null = null;
 let clerkPromise: Promise<ClerkJS | null> | null = null;
 let gateEl: HTMLElement | null = null;
+let gatePoll: ReturnType<typeof setInterval> | null = null;
 let bootCheckStarted = false;
 
 function fakeToken(): (() => string | null | Promise<string | null>) | null {
@@ -55,6 +57,25 @@ export function frontendApiFromKey(key: string): string | null {
   }
 }
 
+// True when this page load is the return leg of a Clerk redirect (OAuth SSO)
+// and the handshake still needs finishing. clerk-js parks the browser at
+// `/?b=...#/sso-callback` (hash form) or drops one of its handshake params into
+// the query; either means: call handleRedirectCallback, then boot to `/`.
+function isClerkCallbackUrl(): boolean {
+  try {
+    if (/sso-callback/.test(location.hash)) return true;
+    const q = new URLSearchParams(location.search);
+    return (
+      q.has('__clerk_handshake') ||
+      q.has('__clerk_status') ||
+      q.has('__clerk_ticket') ||
+      q.has('__clerk_db_jwt')
+    );
+  } catch {
+    return false;
+  }
+}
+
 function loadScript(src: string, pubKey: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const s = document.createElement('script');
@@ -78,18 +99,34 @@ async function loadClerk(): Promise<ClerkJS | null> {
     if (!publishableKey) return null;
     const api = frontendApiFromKey(publishableKey);
     if (!api) return null;
-    try {
-      await loadScript(`${api}/npm/@clerk/clerk-js@${CLERK_JS_VERSION}/dist/clerk.browser.js`, publishableKey);
-      // The data-clerk-publishable-key attribute makes the script construct AND
-      // auto-load window.Clerk itself. Do NOT call load() ourselves: a second
-      // load() races the auto-load and throws, which would leave this cached
-      // promise null and the sign-in unmounted. Just wait for `loaded`.
-      for (let i = 0; i < 120 && !(window.Clerk && window.Clerk.loaded); i++)
-        await new Promise((r) => setTimeout(r, 50));
-      return window.Clerk && window.Clerk.loaded ? window.Clerk : null;
-    } catch {
-      return null;
+    // Only inject the script when no instance exists yet: if window.Clerk is
+    // already present the constructor has run, and a second injection just races
+    // the running auto-load.
+    if (!window.Clerk) {
+      try {
+        await loadScript(`${api}/npm/@clerk/clerk-js@${CLERK_JS_VERSION}/dist/clerk.browser.js`, publishableKey);
+      } catch {
+        // The script tag may still have constructed window.Clerk via the
+        // data-attribute auto-load before the onerror fired; fall through and let
+        // the wait below decide, rather than dropping the gate outright.
+      }
+      // Wait for the constructor to appear.
+      for (let i = 0; i < 100 && !window.Clerk; i++) await new Promise((r) => setTimeout(r, 50));
     }
+    if (!window.Clerk) return null;
+    // `loaded` can lag well behind construction. If it has not flipped, kick a
+    // load() ourselves inside its OWN try/catch: the data-attribute auto-load may
+    // already be running, so a throw here is expected and tolerated. Then poll
+    // for `loaded` up to ~5s and RETURN the instance regardless: getToken and
+    // mountSignIn guard themselves, so a still-false flag must not drop the gate.
+    if (!window.Clerk.loaded) {
+      try {
+        await window.Clerk.load();
+      } catch {}
+    }
+    for (let i = 0; i < 100 && !window.Clerk.loaded; i++)
+      await new Promise((r) => setTimeout(r, 50));
+    return window.Clerk;
   })();
   return clerkPromise;
 }
@@ -117,6 +154,18 @@ export async function getSessionToken(): Promise<string | null> {
   }
 }
 
+export async function isSignedIn(): Promise<boolean> {
+  return !!(await getSessionToken());
+}
+
+export async function clerkSignOut(): Promise<void> {
+  const clerk = await loadClerk();
+  try {
+    await clerk?.signOut?.({});
+  } catch {}
+  location.replace('/');
+}
+
 function buildGate(): {overlay: HTMLElement; mount: HTMLElement} {
   // Just a blurred backdrop over the app; Clerk's own card is the only chrome.
   const overlay = document.createElement('div');
@@ -133,52 +182,53 @@ function buildGate(): {overlay: HTMLElement; mount: HTMLElement} {
   return {overlay, mount};
 }
 
-/** True when the current URL is Clerk finishing an OAuth/redirect flow. */
-function isClerkCallbackUrl(): boolean {
-  const s = location.search + location.hash;
-  return (
-    /sso-callback/.test(location.hash) ||
-    /(__clerk_handshake|__clerk_status|__clerk_ticket|__clerk_db_jwt|__clerk_help)/.test(s)
-  );
+// A real session token (not just a present session object) means truly signed
+// in: drop the gate and boot fresh to `/` so the app reloads signed-in and
+// fetches the owner's engines.
+function bootSignedIn(): void {
+  hideSignIn();
+  location.replace('/');
 }
 
-export async function showSignIn(pre?: ClerkJS | null): Promise<void> {
+export async function showSignIn(): Promise<void> {
   if (gateEl) return;
-  const clerk = pre ?? (await loadClerk());
-  // Already signed in (e.g. returned from OAuth): never raise the gate.
-  if (clerk?.session) return;
+  const clerk = await loadClerk();
   const {overlay, mount} = buildGate();
   gateEl = overlay;
-  if (!clerk?.mountSignIn) return;
-  let done = false;
-  const finish = () => {
-    if (done) return;
-    done = true;
-    hideSignIn();
-    // Boot the app fresh, now signed in, so it loads the owner's engines.
-    location.replace('/');
-  };
-  try {
-    clerk.mountSignIn(mount, {fallbackRedirectUrl: '/', forceRedirectUrl: '/'});
-    clerk.addListener?.((p) => {
-      if (p.user || p.session) finish();
+  if (clerk?.mountSignIn) {
+    try {
+      // A redirect sign-in flow (OAuth) must land back on `/`, not the parked
+      // sso-callback URL, so the app boots signed-in.
+      clerk.mountSignIn(mount, {fallbackRedirectUrl: '/', forceRedirectUrl: '/'});
+    } catch {}
+  }
+  // Two ways the gate learns a session landed: Clerk's own listener, and a
+  // polling fallback (the listener does not always fire for every flow). Both
+  // gate on the TOKEN, never the raw session object.
+  clerk?.addListener?.((p) => {
+    if (!gateEl || !(p.user || p.session)) return;
+    void getSessionToken().then((t) => {
+      if (t) bootSignedIn();
     });
-    // Fallback: the listener can miss the edge if the session lands as we attach.
-    const started = Date.now();
-    const iv = setInterval(() => {
-      if (done || !gateEl || Date.now() - started > 180000) {
-        clearInterval(iv);
-        return;
-      }
-      if (clerk.session) {
-        clearInterval(iv);
-        finish();
-      }
-    }, 500);
-  } catch {}
+  });
+  if (gatePoll) clearInterval(gatePoll);
+  gatePoll = setInterval(() => {
+    if (!gateEl) {
+      if (gatePoll) clearInterval(gatePoll);
+      gatePoll = null;
+      return;
+    }
+    void getSessionToken().then((t) => {
+      if (t && gateEl) bootSignedIn();
+    });
+  }, 1000);
 }
 
 export function hideSignIn(): void {
+  if (gatePoll) {
+    clearInterval(gatePoll);
+    gatePoll = null;
+  }
   if (gateEl) {
     gateEl.remove();
     gateEl = null;
@@ -188,26 +238,20 @@ export function hideSignIn(): void {
 export async function ensureSessionOrGate(): Promise<void> {
   if (bootCheckStarted) return;
   bootCheckStarted = true;
-  const clerk = await loadClerk();
-  if (!clerk) return;
-  // Complete an OAuth/redirect handshake if we came back on the callback URL.
-  if (isClerkCallbackUrl() && typeof clerk.handleRedirectCallback === 'function') {
-    try {
-      await clerk.handleRedirectCallback({});
-    } catch {}
-  }
-  if (clerk.session) {
-    // Signed in. If we are still sitting on the callback URL, boot the app clean.
-    if (isClerkCallbackUrl()) location.replace('/');
-    else hideSignIn();
+
+  // Return leg of an OAuth redirect: finish the handshake, then boot to `/` so
+  // the page reloads signed-in and off the parked sso-callback URL.
+  if (isClerkCallbackUrl()) {
+    const clerk = await loadClerk();
+    if (clerk?.handleRedirectCallback) {
+      try {
+        await clerk.handleRedirectCallback({});
+      } catch {}
+    }
+    location.replace('/');
     return;
   }
-  // Not signed in. A leftover callback hash confuses the mounted SignIn, so clear
-  // it before raising the gate.
-  if (isClerkCallbackUrl()) {
-    try {
-      history.replaceState(history.state, '', location.pathname + location.search);
-    } catch {}
-  }
-  await showSignIn(clerk);
+
+  const token = await getSessionToken();
+  if (!token && publishableKey) await showSignIn();
 }

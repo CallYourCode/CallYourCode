@@ -59,6 +59,8 @@ import {
   disablePush
 } from '@/engine/pushNotify';
 import {enginePin, clearEnginePinAndReload} from '@/engine/contract';
+import {isClerkAuth} from '@/engine/appFetch';
+import {clerkSignOut, isSignedIn} from '@/engine/clerkSession';
 import {createEnginesSection} from '@/features/pairing/enginesSettings';
 import {fileReport, waitingReports, startReportOutbox} from '@/features/diagnostics/reporting';
 import {clearCachedData} from '@/features/settings/preferences';
@@ -933,9 +935,27 @@ export function createSettingsPane(deps: SettingsPaneDeps) {
 
   const enginesSection = createEnginesSection({onTeardown: deps.onTeardown});
 
+  // Log out sits at the very bottom, and ONLY on the hosted app with Clerk auth
+  // active and a real session. In LOCAL mode (auth 'none') it never appears; the
+  // card starts hidden and reveals itself once a live token is confirmed.
+  const logoutRow = srow({
+    icon: 'user',
+    title: 'Log out',
+    subtitle: 'sign out of this device',
+    clickable: () => void clerkSignOut()
+  });
+  logoutRow.dataset.cycRow = 'logout';
+  const logoutSection = settingsCard({heading: 'Account'}, logoutRow);
+  logoutSection.classList.add('cyc-off');
+  if (isClerkAuth()) {
+    void isSignedIn().then((signedIn) => {
+      if (signedIn) logoutSection.classList.remove('cyc-off');
+    });
+  }
+
   const settingsScroll = scrollSurface();
   settingsScroll.classList.add('relative!', 'flex-auto');
-  settingsScroll.append(thisDeviceSection, enginesSection, helpSection, tipsSection);
+  settingsScroll.append(thisDeviceSection, enginesSection, helpSection, tipsSection, logoutSection);
   settingsPane.append(settingsHeader, settingsScroll, ...subPageEls);
 
   return {
