@@ -18,7 +18,7 @@
  */
 
 import { test, expect, beforeAll, afterEach, afterAll } from "bun:test";
-import { TmuxMux, ensureUtf8Locale, paneKey, paneTargetOf, stillAwaitingSubmit } from "./tmux.ts";
+import { TmuxMux, detachedBootPrefix, ensureUtf8Locale, paneKey, paneTargetOf, stillAwaitingSubmit } from "./tmux.ts";
 import { handleAnnounce, pendingAnnounces, resetHookAnnounce } from "./hook-announce.ts";
 import { TmuxLinker } from "../sessions/tmux-link.ts";
 import type { MuxAgent } from "./mux.ts";
@@ -287,6 +287,22 @@ test("stillAwaitingSubmit: a command that ran and returned to the shell is not r
     "claude: command completed\n" +
     "user@box:~$";
   expect(stillAwaitingSubmit("bash", ran, LAUNCH)).toBe(false);
+});
+
+/* ----------------------------------------------- server boot detachment */
+
+test("detachedBootPrefix: Linux with systemd-run wraps the boot in its own scope", () => {
+  // The prefix that keeps a freshly booted tmux server OUT of the engine's
+  // cgroup, so an engine restart (cyc install runs one) never kills the
+  // server and every agent in it.
+  expect(detachedBootPrefix("linux", true))
+    .toEqual(["systemd-run", "--user", "--scope", "--collect", "--quiet", "--"]);
+});
+
+test("detachedBootPrefix: no wrapping off Linux or without systemd-run", () => {
+  // launchd has no cgroup kill; a box without systemd-run boots plain.
+  expect(detachedBootPrefix("darwin", true)).toEqual([]);
+  expect(detachedBootPrefix("linux", false)).toEqual([]);
 });
 
 /* ------------------------------------------------------------ the pane id */

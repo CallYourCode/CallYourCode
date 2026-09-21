@@ -483,6 +483,10 @@ if [ "$OS" = "Linux" ]; then
   VOICE_UNIT="$HOME/.config/systemd/user/cyc-voice-engine.service"
   TURN_UNIT="$HOME/.config/systemd/user/cyc-turn.service"
 
+  # KillMode=process: the engine boots the tmux server as its own child, so the
+  # systemd default (control-group) made every engine restart (cyc install does
+  # one) SIGTERM the whole cgroup: tmux server and every running agent died.
+  # Kill only the engine process; the tmux server and its agents live on.
   write_file "$ENGINE_UNIT" <<EOF
 [Unit]
 Description=CallYourCode agent engine
@@ -490,6 +494,7 @@ After=network-online.target
 
 [Service]
 Type=simple
+KillMode=process
 WorkingDirectory=$REPO_DIR
 Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=VOICE_URL=http://127.0.0.1:$VOICE_PORT_VAL

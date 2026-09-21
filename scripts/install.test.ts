@@ -377,6 +377,23 @@ test("the engine service unit puts .local/bin + .bun/bin on PATH so it can spawn
   expect(plistPath).toContain("$HOME/.bun/bin");
 });
 
+test("engine unit is KillMode=process so a restart never kills the tmux server + agents", async () => {
+  const script = await Bun.file(join(REPO_ROOT, "scripts/install.sh")).text();
+
+  // The engine boots the tmux server as its own child; the systemd default
+  // (control-group) made every `systemctl --user restart cyc-agent-engine`
+  // (cyc install runs one) SIGTERM the whole cgroup: tmux and every running
+  // agent died. Proven live on cyc-test-engine 2026-09-21.
+  const engineUnit = heredocFor(script, "ENGINE_UNIT");
+  expect(engineUnit.split("\n")).toContain("KillMode=process");
+
+  // Only the engine spares its children; the other three units have no
+  // long-lived children to spare and keep the control-group default.
+  for (const unit of ["APP_UNIT", "VOICE_UNIT", "TURN_UNIT"]) {
+    expect(heredocFor(script, unit)).not.toContain("KillMode");
+  }
+});
+
 test("--dry-run names the cyc shim step and touches nothing", async () => {
   const home = scratchHome();
   const { out, code } = await dryRun("Linux", home);

@@ -87,6 +87,23 @@ export function stillAwaitingSubmit(currentCommand: string, capture: string, com
   return command.endsWith(last) || (tail.length > 0 && last.endsWith(tail));
 }
 
+/** Argv prefix that boots the tmux SERVER outside the engine's control group.
+ *  The engine runs as a systemd user unit; a tmux server booted as its child
+ *  lands in the engine's cgroup, and even KillMode=process only protects it
+ *  from systemd, not from anything else that sweeps the cgroup. `systemd-run
+ *  --user --scope` puts the boot (and the server it daemonizes) in its OWN
+ *  transient scope, fully out of the engine's cgroup; `--collect` reaps the
+ *  scope when the server exits, `--quiet` keeps the scope banner off stderr.
+ *  Empty (no wrapping) off Linux (launchd has no cgroup kill) and when
+ *  systemd-run is absent. Pure; exported for the unit test. */
+export function detachedBootPrefix(
+  platform: NodeJS.Platform = process.platform,
+  haveSystemdRun: boolean = Bun.which("systemd-run") !== null,
+): string[] {
+  if (platform !== "linux" || !haveSystemdRun) return [];
+  return ["systemd-run", "--user", "--scope", "--collect", "--quiet", "--"];
+}
+
 /* How much screen the blocked check reads: the same 60 rows the adapter's
  * ask read (ASK_READ_LINES) parses, so the two verdicts come off the same
  * slice of pane and cannot disagree about whether a dialog is on it. */
@@ -399,7 +416,14 @@ export class TmuxMux implements Multiplexer {
       // A duplicate name is not worth failing over: retry unnamed and tmux
       // auto-numbers the session.
       const name = (opts.label ?? "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
-      res = await this.tmux(name ? [...base, "-s", name] : base);
+      /* When no server is running yet, THIS call boots one; wrap it so the
+       * server lives outside the engine's cgroup and an engine restart never
+       * takes the agents with it. If the wrapped form fails (no systemd user
+       * manager under this login), retry plain: a spawned agent beats a
+       * perfectly detached nothing. */
+      const wrap = await this.serverBootWrap();
+      res = await this.tmux(name ? [...base, "-s", name] : base, wrap);
+      if (!res.ok && wrap.length) res = await this.tmux(name ? [...base, "-s", name] : base);
       if (!res.ok && name && /duplicate session/i.test(res.err)) res = await this.tmux(base);
       if (!res.ok || !PANE_RE.test(res.out.trim().split("\t")[0] ?? "")) {
         throw new Error(`new-session: ${res.err.trim() || res.out.trim() || "no pane"}`);
@@ -506,14 +530,28 @@ export class TmuxMux implements Multiplexer {
 
   // ---------------------------------------------------------------- internals
 
-  /** One tmux CLI call. argv, so there is no shell to interpolate into. */
-  private async tmux(args: string[]): Promise<{ ok: boolean; out: string; err: string; exit: number }> {
+  /** The detach prefix for a call that may BOOT the server: non-empty only
+   *  when tmux itself says no server is on this socket (the same connect
+   *  failure family listPanes reads as NO_SERVER). A live server means the
+   *  new-session is just a client and needs no wrapping. */
+  private async serverBootWrap(): Promise<string[]> {
+    const probe = await this.tmux(["has-session"]);
+    if (probe.ok) return [];
+    const noServer = /no server running/i.test(probe.err) ||
+      /error connecting to .*(No such file or directory|Connection refused|Connection reset)/i.test(probe.err);
+    return noServer ? detachedBootPrefix() : [];
+  }
+
+  /** One tmux CLI call. argv, so there is no shell to interpolate into.
+   *  `prefix` (detachedBootPrefix) wraps the ONE call that may boot the
+   *  server, so the server lands outside the engine's cgroup. */
+  private async tmux(args: string[], prefix: string[] = []): Promise<{ ok: boolean; out: string; err: string; exit: number }> {
     try {
       // env passed explicitly: Bun snapshots the environment at startup for
       // default-inherit spawns, so the LANG that ensureUtf8Locale injects at
       // boot would never reach the tmux child without spreading the live
       // process.env here.
-      const proc = Bun.spawn(["tmux", ...this.sockArgs, ...args],
+      const proc = Bun.spawn([...prefix, "tmux", ...this.sockArgs, ...args],
         { stdout: "pipe", stderr: "pipe", env: { ...process.env } });
       const [out, err] = await Promise.all([
         new Response(proc.stdout).text(),
