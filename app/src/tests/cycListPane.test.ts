@@ -140,6 +140,7 @@ vi.mock('../components/popupMenu', async (importOriginal) => ({
 import {createListPane, type ListPaneDeps} from '../features/sessions/panes/listPane';
 import {sessionState, dataState} from '../sessionState';
 import {openMenu} from '../components/popupMenu';
+import {toast} from '../components/widgets';
 import * as store from '../engine/store';
 const row = (id: string, la: number) => ({id, name: id, unread: 0, lastActivity: la});
 function mk(over: Partial<ListPaneDeps> = {}) {
@@ -491,6 +492,40 @@ describe('the new-session menu', () => {
       agentId: 'ag-AAAAAAAAAAAAAAAA',
       resume: true
     });
+  });
+
+  // The engine refuses when the chosen harness is not installed on its host
+  // (session-ops /new-session typed refusal). startSession maps that to
+  // {paneId:'', notInstalled:true, why:<server sentence>}; the menu must show
+  // that sentence, NOT the misleading "Started it ... has not appeared" line
+  // that a genuinely slow-to-register start would eventually toast.
+  test('a harness-missing refusal toasts the engine sentence, not the timeout line', async () => {
+    vi.mocked(store.newSessionPlaces).mockResolvedValueOnce({
+      places: ['/w/app'],
+      home: '/home/u',
+      def: null,
+      harnesses: [{kind: 'claude', available: true}],
+      recent: []
+    });
+    vi.mocked(store.startSession).mockResolvedValueOnce({
+      paneId: '',
+      agentId: '',
+      why: 'claude is not installed on this host',
+      notInstalled: true
+    });
+    const {pane} = mk();
+    const items = await clickFab(pane);
+    items[1]!.onClick(); // "w/app"
+    await vi.waitFor(() =>
+      expect(vi.mocked(toast)).toHaveBeenCalledWith('claude is not installed on this host')
+    );
+    // never the generic wrapper, never the timeout sentence
+    expect(vi.mocked(toast)).not.toHaveBeenCalledWith(
+      'Could not start it: claude is not installed on this host'
+    );
+    for (const [arg] of vi.mocked(toast).mock.calls) {
+      expect(String(arg)).not.toContain('has not appeared');
+    }
   });
 });
 

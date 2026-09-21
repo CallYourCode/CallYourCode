@@ -298,7 +298,17 @@ export async function recentlyClosed(engineKey: string): Promise<RecentlyClosed[
   }
 }
 
-export type StartedSession = {paneId: string; agentId: string; why: string};
+export type StartedSession = {
+  paneId: string;
+  agentId: string;
+  why: string;
+  // A TYPED harness-missing refusal from /new-session (engine session-ops:
+  // `harness` names the binary that did not resolve on the engine's PATH). It
+  // means `why` is already a ready human sentence ("claude is not installed on
+  // this host"), so the caller shows it as-is rather than the generic
+  // "Could not start it" wrapper or the misleading "has not appeared" timeout.
+  notInstalled?: boolean;
+};
 
 export async function startSession(
   engineKey: string,
@@ -338,6 +348,7 @@ export async function startSession(
     paneId?: unknown;
     agentId?: unknown;
     error?: unknown;
+    harness?: unknown;
   } | null;
   if (!res.ok) {
     return {
@@ -346,7 +357,10 @@ export async function startSession(
       why:
         typeof json?.error === 'string' && json.error
           ? json.error
-          : `the engine answered ${res.status}`
+          : `the engine answered ${res.status}`,
+      // The typed harness-missing refusal carries the harness name; anything
+      // else (unknown dir, unreachable engine) leaves this false.
+      notInstalled: typeof json?.harness === 'string' && !!json.harness
     };
   }
   if (typeof json?.paneId !== 'string' || !json.paneId) {

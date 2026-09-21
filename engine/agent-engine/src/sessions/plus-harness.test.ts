@@ -127,6 +127,20 @@ test("a harness whose binary is not on PATH is refused, but another still starts
   expect(tabCreates(c)).toHaveLength(1);
 });
 
+/* ------------------------------------------------------ 3b. the DEFAULT start
+ * (no `harness` field: the app's ordinary "+") is gated too. A missing claude
+ * used to skip the PATH probe on this path and spawn a dead shell, and the app
+ * hung on "started, but it has not appeared here yet"; now it refuses 400. */
+
+test("a default new-session is refused when claude is not installed, and starts nothing", async () => {
+  // claude is the one missing binary; the request names no harness, so it defaults to claude.
+  const { c, http: h } = await routed((p) => p !== "claude");
+  const res = await h.post("/new-session", { cwd: HARNESS_CWD, near: PANE });
+  expect(res.status).toBe(400);
+  expect(String((await res.json()).error)).toMatch(/claude is not installed/);
+  expect(tabCreates(c), "a tab was created for a default start with no claude").toHaveLength(0);
+});
+
 /* ------------------------------------------------------ 5. the places harness
  * list: launchableKinds order, per-kind availability, pi present. The list
  * LENGTH is not asserted (opencode's presence flips when resume-by-id lands). */

@@ -288,12 +288,15 @@ export function createListPane(deps: ListPaneDeps) {
       // Shared post-start landing: wait for the new/reopened session to appear,
       // then open its chat. `where` names the folder for the timeout toast.
       const landStarted = (
-        started: {paneId: string; agentId: string; why: string},
+        started: {paneId: string; agentId: string; why: string; notInstalled?: boolean},
         where: string
       ) => {
-        const {paneId, agentId, why} = started;
+        const {paneId, agentId, why, notInstalled} = started;
         if (!paneId) {
-          toast('Could not start it: ' + why);
+          // A typed harness-missing refusal (engine session-ops) carries a ready
+          // human sentence ("claude is not installed on this host"); show it as
+          // is. Other failures keep the generic "Could not start it" prefix.
+          toast(notInstalled ? why : 'Could not start it: ' + why);
           return;
         }
         let tries = 0;

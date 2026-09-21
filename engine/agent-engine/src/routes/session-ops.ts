@@ -500,7 +500,7 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
       const prog = programToken(cmd);
       if (!prog || !ctx.binaryOnPath(prog)) {
         console.log(`[new-session] refused ${wantAgentId}: ${harness} is not installed on this host`);
-        return json({ ok: false, error: `${harness} is not installed on this host` }, 400);
+        return json({ ok: false, error: `${harness} is not installed on this host`, harness }, 400);
       }
       launch = cmd;
       aid = wantAgentId; // reopen under the OLD id, so its identity is kept
@@ -535,12 +535,23 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
           console.log(`[new-session] refused ${cwd}: unknown harness ${harness}`);
           return json({ ok: false, error: `unknown harness: ${harness}` }, 400);
         }
-        const prog = programToken(cmd);
-        if (!prog || !ctx.binaryOnPath(prog)) {
-          console.log(`[new-session] refused ${cwd}: ${harness} is not installed on this host`);
-          return json({ ok: false, error: `${harness} is not installed on this host` }, 400);
-        }
         launch = cmd;
+      }
+      /* PROBE THE CHOSEN LAUNCH ON PATH, the default claude included. With no
+       * named harness the app sends nothing and we default to claude, so an
+       * engine that has no claude installed used to spawn a dead shell and the
+       * app hung on "started, but it has not appeared here yet". Refuse 400
+       * BEFORE any tab is spawned, the same shape the named-harness case uses. */
+      {
+        const name = harness ?? "claude";
+        const prog = programToken(launch);
+        if (!prog || !ctx.binaryOnPath(prog)) {
+          console.log(`[new-session] refused ${cwd}: ${name} is not installed on this host`);
+          /* A TYPED refusal: `harness` names the missing binary so the app can
+           * show the server's own sentence rather than the misleading
+           * "started, but it has not appeared here yet" (listPane landStarted). */
+          return json({ ok: false, error: `${name} is not installed on this host`, harness: name }, 400);
+        }
       }
       /* PRE-MINT the stable agent id and inject it into the child's env at spawn
        * (cyc-cli plan section 3). The engine picks the id, hands it to the agent
