@@ -38,13 +38,15 @@ function allowedClerkApi(iss: string): string | null {
   }
 }
 
-function frontendApiFromKey(key: string): string | null {
+export function frontendApiFromKey(key: string): string | null {
   try {
     const raw = key.replace(/^pk_(test|live)_/, '');
     const b64 = raw.replace(/-/g, '+').replace(/_/g, '/');
     const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
-    const payload = JSON.parse(atob(padded)) as {iss?: unknown};
-    return typeof payload.iss === 'string' && payload.iss ? allowedClerkApi(payload.iss) : null;
+    // A Clerk publishable key is base64 of "<frontend-api-host>$" (a bare host,
+    // not JSON): decode it and drop the trailing "$" to get the Frontend API host.
+    const host = atob(padded).replace(/\$+$/, '').trim();
+    return host ? allowedClerkApi(host) : null;
   } catch {
     return null;
   }
