@@ -16,7 +16,7 @@
  */
 
 import { announceBody, announceOnce, deriveWsUrl, HEARTBEAT_DEFAULT_MS } from "./discovery.ts";
-import { clearAppToken, enrollOnce, loadAppToken, saveAppToken } from "../security/enroll.ts";
+import { clearAppToken, enrolledAppServerUrl, enrollOnce, loadAppToken, saveAppToken } from "../security/enroll.ts";
 import { stateFile } from "../storage/datadir.ts";
 import { writePrivate } from "../../../shared/runfiles.ts";
 import { realClock, type Clock } from "../runtime/clock.ts";
@@ -65,7 +65,14 @@ export type Announce = {
 
 export function makeAnnounce(deps: AnnounceDeps): Announce {
   const clk: Clock = deps.clock ?? realClock;
-  const appServerUrl = (deps.appServerUrl ?? process.env.APP_SERVER_URL ?? "http://127.0.0.1:10100")
+  /* The app-server base, in priority order: an explicit dep (tests), the
+   * APP_SERVER_URL env (an operator's pin), then THE ENROLLED BASE the token
+   * file carries (what `cyc pair` -> Cloud saved, so a paired engine goes
+   * live on its next boot with no env and no unit drop-in), and loopback
+   * last. The relay leg and writeAppServerUrl both derive from this one
+   * value, so the whole engine follows the enrollment. */
+  const enrolledBase = enrolledAppServerUrl(stateFile("app-token.json"));
+  const appServerUrl = (deps.appServerUrl ?? process.env.APP_SERVER_URL ?? enrolledBase ?? "http://127.0.0.1:10100")
     .replace(/\/$/, "");
   const engineWsUrl = (process.env.ENGINE_WS_URL ??
     deriveWsUrl(deps.host, deps.port, deps.enginePublicUrl)).replace(/\/$/, "");

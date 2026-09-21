@@ -373,7 +373,14 @@ export async function runCloudOnboard(facts: PairFacts, base = cloudBaseUrl()): 
   if (token) {
     saveAppToken(stateFile("app-token.json"), base, token);
     console.log("Linked: this machine is enrolled with your account.");
-    console.log(`Point APP_SERVER_URL at ${base} and restart the engine to go live.`);
+    /* GO LIVE NOW, not after homework. The engine resolves its app-server
+     * base from the token file just saved (announce.ts enrolledAppServerUrl),
+     * so all it needs is a restart, and that is ours to do, not the user's. */
+    if (await restartEngineService()) {
+      console.log("The engine restarted and is connecting to your account now.");
+    } else {
+      console.log(`Restart the engine to go live: ${restartHint()}`);
+    }
   } else {
     console.log("Enrollment failed: the code may be used, expired, or mistyped.");
     console.log("Run this again to get a fresh code.");
@@ -381,6 +388,39 @@ export async function runCloudOnboard(facts: PairFacts, base = cloudBaseUrl()): 
   }
   console.log();
   printCloud(facts.key, pairingUrl(base, facts.key, facts.engineId));
+}
+
+/** Bounce the installed engine service so a fresh enrollment takes effect.
+ *  The names are the installer's own (scripts/install.sh): a systemd user
+ *  unit on Linux, a LaunchAgent on macOS. Two refusals matter:
+ *  - CYC_DATA_DIR set means a scoped instance (a test, a dev run): it does
+ *    not own the machine's installed service, so touching it would bounce
+ *    somebody else's engine. Never.
+ *  - The service manager absent or refusing (a container, --local): false,
+ *    and the caller prints the manual hint instead. */
+export async function restartEngineService(
+  run: (cmd: string[]) => Promise<number> = runQuiet,
+): Promise<boolean> {
+  if (process.env.CYC_DATA_DIR) return false;
+  const cmd = process.platform === "darwin"
+    ? ["launchctl", "kickstart", "-k", `gui/${process.getuid?.() ?? 0}/com.callyourcode.agent-engine`]
+    : ["systemctl", "--user", "restart", "cyc-agent-engine.service"];
+  return (await run(cmd)) === 0;
+}
+
+function restartHint(): string {
+  return process.platform === "darwin"
+    ? "launchctl kickstart -k gui/$UID/com.callyourcode.agent-engine"
+    : "systemctl --user restart cyc-agent-engine";
+}
+
+async function runQuiet(cmd: string[]): Promise<number> {
+  try {
+    const p = Bun.spawn(cmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    return await p.exited;
+  } catch {
+    return -1;
+  }
 }
 
 async function runChooser(): Promise<void> {

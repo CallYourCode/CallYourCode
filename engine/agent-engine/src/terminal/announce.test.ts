@@ -19,7 +19,8 @@
 import { expect, test, beforeAll, beforeEach, afterAll } from "bun:test";
 import { join } from "node:path";
 import { makeAnnounce, ENROLL_RETRY_MS } from "./announce.ts";
-import { clearAppToken } from "../security/enroll.ts";
+import { clearAppToken, saveAppToken } from "../security/enroll.ts";
+import { DEFAULT_APP_URL } from "../security/pairkey.ts";
 import { ensureBaseTree, stateFile } from "../storage/datadir.ts";
 import { loadOrCreateE2E, type E2EState } from "../security/sec";
 import { manualClock, type ManualClock } from "../runtime/clock.ts";
@@ -95,6 +96,47 @@ async function mk(url: string, clock: ManualClock, heartbeatMs = 3_600_000) {
     appServerUrl: url, heartbeatMs, clock,
   });
 }
+
+/* -------------------------------------------- pair -> Cloud JUST WORKS.
+ * The pair saves the token file with the enrolled base inside; the engine's
+ * next boot must resolve its app-server from it, with no APP_SERVER_URL env
+ * and no unit drop-in. That resolution is what these two pin down. */
+
+async function mkBare() {
+  e2e ??= await loadOrCreateE2E(join(base, "keys.json"));
+  return makeAnnounce({
+    e2e, engineHost: "testhost", engineUser: "tester",
+    host: "127.0.0.1", port: ADVERTISED_PORT, enginePublicUrl: "", rev: "abc1234",
+    heartbeatMs: 3_600_000, clock: manualClock(),
+  });
+}
+
+test("no env: the enrolled base in the token file IS the engine's app-server", async () => {
+  saveAppToken(stateFile("app-token.json"), "https://app.example.test", "cyt_enrolled");
+  const prior = process.env.APP_SERVER_URL;
+  delete process.env.APP_SERVER_URL;
+  try {
+    const a = await mkBare();
+    expect(a.appServerUrl).toBe("https://app.example.test");
+    // and the saved token loads against that resolved base, ready to announce
+    expect(a.peekToken()).toBe("cyt_enrolled");
+  } finally {
+    if (prior === undefined) delete process.env.APP_SERVER_URL;
+    else process.env.APP_SERVER_URL = prior;
+  }
+});
+
+test("no env, no enrollment: loopback stays the default", async () => {
+  const prior = process.env.APP_SERVER_URL;
+  delete process.env.APP_SERVER_URL;
+  try {
+    const a = await mkBare();
+    expect(a.appServerUrl).toBe(DEFAULT_APP_URL);
+  } finally {
+    if (prior === undefined) delete process.env.APP_SERVER_URL;
+    else process.env.APP_SERVER_URL = prior;
+  }
+});
 
 test("a tick enrols once and announces bearing the issued token", async () => {
   const stub = stubServer();

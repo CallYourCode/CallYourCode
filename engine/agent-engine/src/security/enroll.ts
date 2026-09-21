@@ -44,6 +44,24 @@ export function loadAppToken(file: string, appServerUrl: string): string | null 
   }
 }
 
+/** The app-server base a saved enrollment names, or null when there is none.
+ *  This is what lets `cyc pair` -> Cloud JUST WORK: the pair saves the token
+ *  file with the enrolled base inside it, and the engine's next boot resolves
+ *  its app-server address from here when no APP_SERVER_URL env is set, so no
+ *  manual env or unit drop-in is ever needed to go live. A local enrollment
+ *  writes the loopback base, which is the default anyway. */
+export function enrolledAppServerUrl(file: string): string | null {
+  try {
+    if (!existsSync(file)) return null;
+    const j = JSON.parse(readFileSync(file, "utf8")) as TokenFile;
+    if (j?.v !== 1 || typeof j.token !== "string" || !j.token) return null;
+    if (typeof j.appServerUrl !== "string" || !j.appServerUrl) return null;
+    return j.appServerUrl.replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
 export function saveAppToken(file: string, appServerUrl: string, token: string): void {
   const j: TokenFile = { v: 1, appServerUrl, token, issuedAt: Date.now() };
   mkdirSync(dirname(file), { recursive: true });

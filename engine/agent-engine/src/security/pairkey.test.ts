@@ -25,6 +25,7 @@ import {
   appServerUrl,
   localAppUrl,
   renderQr,
+  restartEngineService,
   CLOUD_APP_URL,
   DEFAULT_APP_URL,
 } from "./pairkey";
@@ -611,4 +612,42 @@ test("cloud onboarding: an empty paste skips enrollment and still prints the lin
   expect(r.out).toContain(`${gone}/enroll`);
   expect(urlLine(r.out)).toStartWith(`${gone}/?engine=`);
   expect(existsSync(join(dataDir, "state", "app-token.json"))).toBe(false);
+});
+
+/* --------------------------------------- the post-enroll engine restart.
+ * cyc pair -> Cloud must JUST WORK: the enrollment saves the token file and
+ * the pair bounces the installed engine itself. The two hard rules: a scoped
+ * instance (CYC_DATA_DIR set) never touches the machine's service, and a
+ * refusing service manager reports false rather than throwing. */
+
+test("restartEngineService refuses under CYC_DATA_DIR: a scoped instance never bounces the installed service", async () => {
+  const prior = process.env.CYC_DATA_DIR;
+  process.env.CYC_DATA_DIR = "/tmp/some-scoped-instance";
+  try {
+    const calls: string[][] = [];
+    expect(await restartEngineService(async (cmd) => { calls.push(cmd); return 0; })).toBe(false);
+    expect(calls).toHaveLength(0);
+  } finally {
+    if (prior === undefined) delete process.env.CYC_DATA_DIR;
+    else process.env.CYC_DATA_DIR = prior;
+  }
+});
+
+test("restartEngineService bounces the installer's own unit, and a refusal is false, not a throw", async () => {
+  const prior = process.env.CYC_DATA_DIR;
+  delete process.env.CYC_DATA_DIR;
+  try {
+    const calls: string[][] = [];
+    expect(await restartEngineService(async (cmd) => { calls.push(cmd); return 0; })).toBe(true);
+    expect(calls).toHaveLength(1);
+    if (process.platform === "darwin") {
+      expect(calls[0]!.join(" ")).toContain("com.callyourcode.agent-engine");
+    } else {
+      expect(calls[0]).toEqual(["systemctl", "--user", "restart", "cyc-agent-engine.service"]);
+    }
+    expect(await restartEngineService(async () => 1)).toBe(false);
+  } finally {
+    if (prior === undefined) delete process.env.CYC_DATA_DIR;
+    else process.env.CYC_DATA_DIR = prior;
+  }
 });
