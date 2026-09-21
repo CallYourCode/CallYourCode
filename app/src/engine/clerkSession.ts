@@ -1,6 +1,7 @@
 type ClerkSession = {getToken(): Promise<string | null>};
 type ClerkJS = {
-  load(opts: {publishableKey: string}): Promise<unknown>;
+  load(opts?: Record<string, unknown>): Promise<unknown>;
+  loaded?: boolean;
   session?: ClerkSession | null;
   mountSignIn?(el: HTMLElement, opts?: Record<string, unknown>): void;
   addListener?(cb: (payload: {user?: unknown; session?: unknown}) => void): () => void;
@@ -52,12 +53,16 @@ export function frontendApiFromKey(key: string): string | null {
   }
 }
 
-function loadScript(src: string): Promise<void> {
+function loadScript(src: string, pubKey: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const s = document.createElement('script');
     s.src = src;
     s.async = true;
     s.crossOrigin = 'anonymous';
+    // clerk-js v5's browser build auto-initializes window.Clerk from this
+    // attribute; without it the script throws "Missing publishableKey" and never
+    // sets window.Clerk, so the sign-in never mounts.
+    s.setAttribute('data-clerk-publishable-key', pubKey);
     s.onload = () => resolve();
     s.onerror = () => reject(new Error('clerk script failed to load'));
     document.head.appendChild(s);
@@ -72,9 +77,12 @@ async function loadClerk(): Promise<ClerkJS | null> {
     const api = frontendApiFromKey(publishableKey);
     if (!api) return null;
     try {
-      await loadScript(`${api}/npm/@clerk/clerk-js@${CLERK_JS_VERSION}/dist/clerk.browser.js`);
+      await loadScript(`${api}/npm/@clerk/clerk-js@${CLERK_JS_VERSION}/dist/clerk.browser.js`, publishableKey);
+      // The data attribute makes the script construct window.Clerk itself, but it
+      // may appear a tick after onload; wait briefly for it.
+      for (let i = 0; i < 40 && !window.Clerk; i++) await new Promise((r) => setTimeout(r, 50));
       if (!window.Clerk) return null;
-      await window.Clerk.load({publishableKey});
+      if (!window.Clerk.loaded) await window.Clerk.load();
       return window.Clerk;
     } catch {
       return null;
@@ -107,26 +115,17 @@ export async function getSessionToken(): Promise<string | null> {
 }
 
 function buildGate(): {overlay: HTMLElement; mount: HTMLElement} {
+  // Just a blurred backdrop over the app; Clerk's own card is the only chrome.
   const overlay = document.createElement('div');
   overlay.className = 'cyc-clerk-gate';
   overlay.style.cssText =
     'position:fixed;inset:0;z-index:2147483600;display:flex;align-items:center;' +
-    'justify-content:center;background:rgba(16,16,20,.96);padding:24px;';
-  const panel = document.createElement('div');
-  panel.className = 'cyc-clerk-gate-panel';
-  panel.style.cssText =
-    'width:100%;max-width:420px;background:#1d1d22;border:1px solid #33333a;' +
-    'border-radius:12px;padding:24px;color:#e8e8ea;text-align:center;';
-  const title = document.createElement('div');
-  title.className = 'cyc-clerk-gate-title';
-  title.textContent = 'Sign in';
-  title.style.cssText = 'font-size:1.125rem;font-weight:600;';
-  panel.appendChild(title);
+    'justify-content:center;padding:24px;box-sizing:border-box;overflow:auto;' +
+    'background:rgba(10,10,12,.5);' +
+    'backdrop-filter:blur(14px) saturate(120%);-webkit-backdrop-filter:blur(14px) saturate(120%);';
   const mount = document.createElement('div');
   mount.className = 'cyc-clerk-gate-mount';
-  mount.style.cssText = 'margin-top:1rem;';
-  panel.appendChild(mount);
-  overlay.appendChild(panel);
+  overlay.appendChild(mount);
   document.body.appendChild(overlay);
   return {overlay, mount};
 }
