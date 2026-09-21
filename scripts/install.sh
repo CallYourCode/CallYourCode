@@ -787,6 +787,18 @@ run chmod 755 "$CYC_SHIM"
 echo
 echo "Setup complete: agent-engine, app-server, voice-engine and turn are installed and running."
 echo
+# THE SAME-SHELL PATH GAP: the cyc shim lands in ~/.bun/bin, and when THIS
+# install put bun there, the shell that ran the installer has not re-read its
+# rc yet, so `cyc` is not found until a new shell. Print the exact line rather
+# than letting the very next advertised command fail with "command not found".
+if ! command -v cyc >/dev/null 2>&1; then
+  echo "cyc lives in ~/.bun/bin, which this shell has not picked up yet. Run:"
+  echo
+  echo "    export PATH=\"\$HOME/.bun/bin:\$PATH\""
+  echo
+  echo "(New shells have it already.)"
+  echo
+fi
 echo "Next, link this machine or a phone by running:"
 echo
 echo "    cyc pair"
