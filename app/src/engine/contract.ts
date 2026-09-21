@@ -534,9 +534,15 @@ export async function loadAppConfig(): Promise<void> {
     });
     if (!res.ok) return;
     const cfg = (await res.json()) as AppConfig;
+    // Auth is independent of the engine list: a logged-out HOSTED user gets
+    // engines:[] (engines are owner-scoped, so nothing is announced until a
+    // session exists), but must still get the Clerk sign-in gate. Apply auth
+    // BEFORE the empty-engines guard below, which only protects the cached engine
+    // list from a transient empty announce. Without this, hosted login never
+    // mounts and the user can never sign in.
+    setAppAuth(cfg.auth, cfg.clerkPublishableKey);
     if (!Array.isArray(cfg?.engines) || !cfg.engines.length) return;
     appConfig = cfg;
-    setAppAuth(cfg.auth, cfg.clerkPublishableKey);
     localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg));
     for (const fn of configuredListeners) fn();
   } catch {}
