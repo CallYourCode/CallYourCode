@@ -52,6 +52,41 @@ export { agentIdOfProc };
 // way herdr has one; the poll IS the enumeration.
 const POLL_MS = 2000;
 
+/* The dropped-Enter rescue's budget (newTab -> confirmSubmitted). Up to three
+ * re-sends, ~500ms apart, so a launch that never left the shell gets ~1.5s of
+ * retries and a launch that took the first Enter returns on the first poll. */
+const SUBMIT_POLL_MS = 500;
+const SUBMIT_RESEND_TRIES = 3;
+
+/* The foreground process names that mean "still the login shell" (comm as
+ * pane_current_command and `ps -o comm=` report it, login dashes included). A
+ * spawned agent (claude/codex/opencode/pi) execs OVER the shell, so once the
+ * launch submits, the foreground is the agent and never one of these. */
+const LOGIN_SHELLS = new Set([
+  "sh", "bash", "zsh", "dash", "fish", "ash", "ksh",
+  "-sh", "-bash", "-zsh", "-dash", "-fish", "-ksh",
+]);
+
+/** True when a just-typed launch command has NOT been submitted yet: the
+ *  foreground is still a login shell AND the command's tail is still the last
+ *  visible line (typed at the prompt, never run). A long command wraps, so the
+ *  match is on a suffix of the command against the last non-blank capture line.
+ *  Once the agent paints (foreground is the agent) or the line scrolled away (a
+ *  command that ran), this is false and the caller stops re-sending Enter. */
+export function stillAwaitingSubmit(currentCommand: string, capture: string, command: string): boolean {
+  if (!LOGIN_SHELLS.has(currentCommand.trim())) return false;
+  const lines = capture.replace(/\s+$/, "").split("\n");
+  const last = (lines[lines.length - 1] ?? "").trimEnd();
+  if (last.length < 8) return false;
+  // The launch command wraps at the pane width, so the last visible line is
+  // usually only a SUFFIX of the command (a pure continuation), not the whole
+  // line: match both shapes. `command.endsWith(last)` catches the wrapped
+  // continuation; `last.endsWith(tail)` catches a short command that fit on the
+  // one `<prompt>$ <command>` line. Either means it is typed but unsubmitted.
+  const tail = command.slice(-16);
+  return command.endsWith(last) || (tail.length > 0 && last.endsWith(tail));
+}
+
 /* How much screen the blocked check reads: the same 60 rows the adapter's
  * ask read (ASK_READ_LINES) parses, so the two verdicts come off the same
  * slice of pane and cannot disagree about whether a dialog is on it. */
@@ -393,7 +428,32 @@ export class TmuxMux implements Multiplexer {
     await this.awaitPrompt(paneId);
     await this.sendText(paneId, opts.command);
     await this.sendKeys(paneId, "enter");
+    await this.confirmSubmitted(paneId, opts.command);
     return paneId;
+  }
+
+  /** THE DROPPED-ENTER RESCUE. awaitPrompt closed the eaten-first-keystroke
+   *  race so the literal command always lands; its trailing Enter is a single
+   *  fire-and-forget send-keys and, on a loaded box, was observed to not
+   *  submit (a spawned pane sat with the whole `env CYC_... claude ...` line
+   *  typed but unrun, and the agent never started). Delivery is the weakest
+   *  seam, so make submission CONFIRMED, not assumed: poll briefly for the
+   *  launch to leave the shell, and while the command is still sitting on the
+   *  input line, resend Enter. Bounded, and it stops the instant the agent is
+   *  the foreground process, so it never injects a stray Enter into a running
+   *  agent. A command that already ran and returned to the shell (a test's
+   *  `echo`) is not on the input line any more, so it is never re-sent. */
+  private async confirmSubmitted(paneId: string, command: string): Promise<void> {
+    const target = this.targetOf(paneId);
+    for (let attempt = 0; attempt < SUBMIT_RESEND_TRIES; attempt++) {
+      await new Promise((r) => setTimeout(r, SUBMIT_POLL_MS));
+      const cur = await this.tmux(["display-message", "-p", "-t", target, "#{pane_current_command}"]);
+      const cap = await this.tmux(["capture-pane", "-p", "-t", target]);
+      // a read that failed says nothing; try again until the tries run out.
+      if (!cur.ok || !cap.ok) continue;
+      if (!stillAwaitingSubmit(cur.out, cap.out, command)) return;
+      await this.sendKeys(paneId, "enter");
+    }
   }
 
   /** Poll capture-pane until the pane shows any non-whitespace output (the

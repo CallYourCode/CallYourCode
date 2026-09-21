@@ -18,7 +18,7 @@
  */
 
 import { test, expect, beforeAll, afterEach, afterAll } from "bun:test";
-import { TmuxMux, ensureUtf8Locale, paneKey, paneTargetOf } from "./tmux.ts";
+import { TmuxMux, ensureUtf8Locale, paneKey, paneTargetOf, stillAwaitingSubmit } from "./tmux.ts";
 import { handleAnnounce, pendingAnnounces, resetHookAnnounce } from "./hook-announce.ts";
 import { TmuxLinker } from "../sessions/tmux-link.ts";
 import type { MuxAgent } from "./mux.ts";
@@ -253,6 +253,41 @@ function seedTranscript(cwd: string, uuid: string, mtimeMs: number): string {
   utimesSync(path, new Date(mtimeMs), new Date(mtimeMs));
   return path;
 }
+
+/* ---------------------------------------------- the dropped-Enter rescue */
+
+// The exact stuck pane from the field (2026-09-21): the whole launch command
+// typed at a bash prompt, wrapped across two lines, cursor at the end, never
+// submitted, so the foreground was still the login shell and the agent never
+// started. stillAwaitingSubmit is the decision confirmSubmitted resends Enter
+// on; it runs with no tmux, so it proves on every box.
+const STUCK_CAP =
+  "shikher@cyc-test-engine:~/callyourcode/engine$ env CYC_AGENT_ID=ag-vXZVTbqxl0-0F72D claude --dangero\n" +
+  "usly-skip-permissions";
+const LAUNCH = "env CYC_AGENT_ID=ag-vXZVTbqxl0-0F72D claude --dangerously-skip-permissions";
+
+test("stillAwaitingSubmit: a login shell with the command still on the input line needs a resend", () => {
+  // the field failure: bash foreground, command sitting unsubmitted.
+  expect(stillAwaitingSubmit("bash", STUCK_CAP, LAUNCH)).toBe(true);
+  expect(stillAwaitingSubmit("-bash", STUCK_CAP, LAUNCH)).toBe(true);
+});
+
+test("stillAwaitingSubmit: once the agent is the foreground process, never resend", () => {
+  // Enter took: env exec'd claude, so pane_current_command is the agent, not a
+  // shell. No resend regardless of what the screen still shows.
+  expect(stillAwaitingSubmit("claude", STUCK_CAP, LAUNCH)).toBe(false);
+  expect(stillAwaitingSubmit("node", STUCK_CAP, LAUNCH)).toBe(false);
+});
+
+test("stillAwaitingSubmit: a command that ran and returned to the shell is not resent", () => {
+  // back at a shell (pane_current_command bash) but the launch line scrolled
+  // away above fresh output, so it is not the trailing line: it already ran.
+  const ran =
+    "user@box:~$ env CYC_AGENT_ID=ag-vXZVTbqxl0-0F72D claude --dangerously-skip-permissions\n" +
+    "claude: command completed\n" +
+    "user@box:~$";
+  expect(stillAwaitingSubmit("bash", ran, LAUNCH)).toBe(false);
+});
 
 /* ------------------------------------------------------------ the pane id */
 
