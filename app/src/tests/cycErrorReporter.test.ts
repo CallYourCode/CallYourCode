@@ -8,6 +8,7 @@ import {installErrorReporter} from '../errorReporter';
 
 let cyclogSpy: ReturnType<typeof vi.fn<(event: string, fields: Record<string, unknown>) => void>>;
 vi.mock('../shared/logging', () => ({
+  setLogAutoShip: vi.fn(),
   cyclog: (event: string, fields: Record<string, unknown>) => cyclogSpy(event, fields)
 }));
 

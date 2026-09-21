@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
-vi.mock('@/shared/logging', () => ({cyclog: vi.fn()}));
+vi.mock('@/shared/logging', () => ({cyclog: vi.fn(), setLogAutoShip: vi.fn()}));
 import {cyclog} from '@/shared/logging';
 import {PAGE_SIZE} from '@shared/pages';
 import {

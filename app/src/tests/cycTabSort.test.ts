@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, test, vi} from 'vitest';
 import HorizontalSortable from '../features/sessions/controls/tabSort';
 
-vi.mock('../shared/logging', () => ({cyclog: vi.fn()}));
+vi.mock('../shared/logging', () => ({cyclog: vi.fn(), setLogAutoShip: vi.fn()}));
 
 // jsdom layout and hit testing are stubbed for pointer-driven tab reordering.
 

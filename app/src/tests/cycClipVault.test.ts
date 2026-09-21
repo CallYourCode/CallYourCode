@@ -25,6 +25,7 @@ vi.mock('@/shared/browser', () => ({
 
 const logged: {event: string; fields: Record<string, unknown>}[] = [];
 vi.mock('@/shared/logging', () => ({
+  setLogAutoShip: vi.fn(),
   cyclog: (event: string, fields: Record<string, unknown> = {}) => {
     logged.push({event, fields});
   }

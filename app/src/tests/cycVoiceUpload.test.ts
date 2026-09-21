@@ -29,6 +29,7 @@ vi.mock('../engine/transfers/worker', () => ({
 // hold the clock still, so the events are collected here instead.
 const logged: {event: string; fields: Record<string, unknown>}[] = [];
 vi.mock('@/shared/logging', () => ({
+  setLogAutoShip: vi.fn(),
   cyclog: (event: string, fields: Record<string, unknown> = {}) => {
     logged.push({event, fields});
   }

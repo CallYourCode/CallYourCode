@@ -1,4 +1,5 @@
 import {setAppAuth} from './appFetch';
+import {setLogAutoShip} from '../shared/logging';
 import {hostnameOf} from './hostNames';
 import {
   cachedImageBlob,
@@ -511,6 +512,10 @@ let appConfig: AppConfig | null = (() => {
 })();
 
 setAppAuth(appConfig?.auth, appConfig?.clerkPublishableKey);
+/* Auto-shipping the diagnostic log is a LOCAL-only behavior (hosted is
+ * report-only: shared/logging.ts). Enabled ONLY when a config is actually
+ * known and does not name clerk: an unknown mode stays fail-private. */
+setLogAutoShip(!!appConfig && appConfig.auth !== 'clerk');
 
 export function hasCachedConfig(): boolean {
   return !!appConfig;
@@ -541,6 +546,7 @@ export async function loadAppConfig(): Promise<void> {
     // list from a transient empty announce. Without this, hosted login never
     // mounts and the user can never sign in.
     setAppAuth(cfg.auth, cfg.clerkPublishableKey);
+    setLogAutoShip(cfg.auth !== 'clerk');
     if (!Array.isArray(cfg?.engines) || !cfg.engines.length) return;
     appConfig = cfg;
     localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg));

@@ -18,7 +18,26 @@ function readFlag(name: string) {
   }
 }
 
-const SHIPPING = readFlag('devlog') !== '0';
+const DEVLOG = readFlag('devlog');
+
+/* THE HOSTED PRIVACY GATE. A local app ships its diagnostic log automatically
+ * (the sink is the user's own machine; app.log is theirs). A hosted
+ * (clerk-auth) app never auto-ships: lines stay in the on-device ring and
+ * leave the device only inside an explicit bug report (/report, which attaches
+ * logTail). contract.ts flips this switch once /config names the mode; until
+ * then NOTHING ships (fail-private), and the queue holds the early lines so a
+ * local app still ships its boot the moment local is confirmed. ?devlog=1
+ * forces shipping for a debugging session; ?devlog=0 forces silence anywhere. */
+let autoShip = false;
+function shipAllowed(): boolean {
+  if (DEVLOG === '0') return false;
+  if (DEVLOG === '1') return true;
+  return autoShip;
+}
+export function setLogAutoShip(enabled: boolean): void {
+  autoShip = enabled;
+  scheduleShip();
+}
 
 // Test hook: with ?testhooks=1 every cyclog emit (event + fields, before the
 // burst cap and before formatting) is also handed to window.__cycLogTap when a
@@ -92,7 +111,8 @@ function endpoint() {
 function keep(line: string) {
   ring.push(line);
   if (ring.length > RING_MAX) ring.splice(0, ring.length - RING_MAX);
-  if (!SHIPPING) return;
+  // Queue unconditionally; shipAllowed() gates the SEND, so lines logged
+  // before /config names the mode still ship once a local app is confirmed.
   while (queue.length >= QUEUE_MAX) {
     queue.shift();
     dropped++;
@@ -101,7 +121,7 @@ function keep(line: string) {
 }
 
 async function ship() {
-  if (!SHIPPING || shipping || !queue.length || failures >= GIVE_UP_AFTER) return;
+  if (!shipAllowed() || shipping || !queue.length || failures >= GIVE_UP_AFTER) return;
   shipping = true;
   const lines = queue;
   const lost = dropped;
@@ -126,7 +146,7 @@ async function ship() {
 }
 
 function scheduleShip() {
-  if (!SHIPPING || shipTimer) return;
+  if (!shipAllowed() || shipTimer) return;
   if (queue.length >= SHIP_AT) {
     void ship();
     return;
@@ -138,7 +158,7 @@ function scheduleShip() {
 }
 
 function flushBeacon() {
-  if (!SHIPPING || !queue.length) return;
+  if (!shipAllowed() || !queue.length) return;
   try {
     if (
       navigator.sendBeacon(

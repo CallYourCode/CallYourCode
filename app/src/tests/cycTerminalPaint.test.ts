@@ -45,7 +45,7 @@ vi.mock('../engine/store', () => ({
   TERMINAL_PANE_OVERRIDE: null
 }));
 vi.mock('../components/widgets', () => ({toast: vi.fn()}));
-vi.mock('@/shared/logging', () => ({cyclog: vi.fn()}));
+vi.mock('@/shared/logging', () => ({cyclog: vi.fn(), setLogAutoShip: vi.fn()}));
 
 import {openTerminalViewer} from '../components/terminalViewer';
 import {setPresentationTheme, themePainterCount} from '../components/presentation';

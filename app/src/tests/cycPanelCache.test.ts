@@ -72,7 +72,7 @@ const fakeIndexedDb = {
 vi.stubGlobal('indexedDB', fakeIndexedDb);
 
 const logs = vi.hoisted(() => ({emit: vi.fn()}));
-vi.mock('@/shared/logging', () => ({cyclog: logs.emit}));
+vi.mock('@/shared/logging', () => ({cyclog: logs.emit, setLogAutoShip: () => {}}));
 
 import * as panelVault from '../engine/panelVault';
 

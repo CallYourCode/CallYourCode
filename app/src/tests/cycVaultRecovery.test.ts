@@ -45,7 +45,7 @@ vi.mock('../components/widgets', () => ({
     toasts.push(s);
   }
 }));
-vi.mock('../shared/logging', () => ({cyclog: () => {}}));
+vi.mock('../shared/logging', () => ({cyclog: () => {}, setLogAutoShip: () => {}}));
 
 import {installVaultRecovery} from '../features/composer/voice/vaultRecovery';
 import {dataState, orphanSweep} from '../sessionState';

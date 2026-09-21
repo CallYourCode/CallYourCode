@@ -11,6 +11,7 @@ vi.mock('../features/media/imageCache', () => ({
 
 const logs: {event: string; fields: Record<string, unknown>}[] = [];
 vi.mock('@/shared/logging', () => ({
+  setLogAutoShip: vi.fn(),
   cyclog: (event: string, fields: Record<string, unknown> = {}) => logs.push({event, fields})
 }));
 

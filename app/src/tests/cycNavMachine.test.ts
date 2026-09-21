@@ -8,7 +8,7 @@ vi.mock('../features/sessions/navigation', async (importOriginal) => ({
     writes.push({...state});
   }
 }));
-vi.mock('../shared/logging', () => ({cyclog: vi.fn()}));
+vi.mock('../shared/logging', () => ({cyclog: vi.fn(), setLogAutoShip: vi.fn()}));
 import {createNavMachine, BOOT_FREEZE_CLASS, type NavMachineDeps} from '../navMachine';
 import {sessionState, bootUrlNav, dataState} from '../sessionState';
 import type {CycSession} from '../types';

@@ -18,6 +18,9 @@ describe('cyclog shipment', () => {
 
   test('ships send.pressed when it is beyond the ordinary burst cap', async () => {
     const logging = await import('../shared/logging');
+    // shipment is LOCAL-mode behavior now (hosted is report-only); this test
+    // is about the burst cap, so it runs as a local app.
+    logging.setLogAutoShip(true);
     for (let i = 0; i < 60; i++) logging.cyclog('ordinary.event', {i});
     logging.cyclog('send.pressed', {chars: 14});
 
