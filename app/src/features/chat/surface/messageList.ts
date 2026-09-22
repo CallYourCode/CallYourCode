@@ -2,6 +2,7 @@ import type {CycMessage, CycSession, CycSessionEvent} from '@/types';
 import {RENDERABLE_EVENT_KINDS} from '@/engine/store/rows/core';
 
 import {h} from '@/components/domHelpers';
+import {syncedAt} from '@/engine/sync';
 import {cyclog} from '@/shared/logging';
 import {DEFAULT_AGENT_NAME} from '../navigation/chatRow';
 import {dayLabel} from '@/features/chat/content';
@@ -481,7 +482,12 @@ function paintMessages(
     );
     const content = h('div', 'cyc-message-content ' + SERVICE_CONTENT_UTILS);
     const msg = h('div', 'cyc-service-text ' + SERVICE_TEXT_UTILS);
-    msg.textContent = 'No messages here yet';
+    // The chat's first sync is settled exactly when syncedAt is set (first
+    // attach-ok, or the persisted meta of an earlier sync). Before that a
+    // fresh device may still be pulling months of history, so an empty window
+    // reads as loading, never as an empty chat.
+    msg.textContent =
+      syncedAt(s.id) === undefined ? 'Loading messages...' : 'No messages here yet';
     content.append(msg);
     messageNode.append(content);
     attachMessageHighlight(messageNode);

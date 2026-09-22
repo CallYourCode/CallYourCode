@@ -665,6 +665,14 @@ export function attach(sessionId: string) {
     await openChatWindow(sessionId);
     if (attachedId !== sessionId) return;
     const reachable = sync.engineReachable(s.engineKey);
+    // The persisted cursor is read BEFORE the cache paint so the paint already
+    // knows whether this chat has ever synced: the empty state's wording gates
+    // on syncedAt (loading vs truly empty), and a chat synced on an earlier run
+    // must not flash the loading pill. Still local (a cached cursor read), so
+    // it too is guarded only by the open chat.
+    const meta = await rowStore.readMeta(sessionId);
+    if (attachedId !== sessionId) return;
+    if (meta?.syncedAt) sync.noteSynced(sessionId, meta.syncedAt);
     // The local window is the first placement, even when it is empty. An empty
     // view can safely upgrade to an unread anchor when replay arrives, while a
     // populated local window is held below to avoid a visible bottom-then-jump.
@@ -672,11 +680,7 @@ export function attach(sessionId: string) {
     notify();
 
     // Prime the session's replicator from its persisted cursor so the
-    // background backfill resumes where it left off, then let it run. Still
-    // local (a cached cursor read), so it too is guarded only by the open chat.
-    const meta = await rowStore.readMeta(sessionId);
-    if (attachedId !== sessionId) return;
-    if (meta?.syncedAt) sync.noteSynced(sessionId, meta.syncedAt);
+    // background backfill resumes where it left off, then let it run.
     const rep = replicatorFor(sessionId, s.engineKey, s.paneId);
     seedCursor(rep, meta);
     rep.start();
