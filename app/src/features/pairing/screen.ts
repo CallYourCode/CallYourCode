@@ -1,4 +1,5 @@
 import {h} from '@/components/domHelpers';
+import {cyclog} from '@/shared/logging';
 import {BTN_HOVER_UTILS, makeIcon} from '@/components/iconGlyphs';
 import {avatarView} from '@/components/avatarView';
 import {copyText} from '@/features/media/downloads';
@@ -660,10 +661,26 @@ export function mountPairingScreen(
           row = buildRow(null, engineId, engineId, null);
         }
       }
-      if (row && heldPair && !row.done && !row.input.disabled) {
-        enterConfirm(row, heldPair);
+      const applied = !!(row && heldPair && !row.done && !row.input.disabled);
+      if (applied) {
+        enterConfirm(row!, heldPair!);
       }
       if (row || engines.some((e) => e.engineId === engineId) || paired.has(engineId)) {
+        /* INSTRUMENTED (2026-09-22, the hosted-test hiccup): a followed pair
+         * link reached this screen but the key was CONSUMED without entering
+         * confirm ("Key received" never showed until a reload re-parsed the
+         * URL). The exact stale state that skips enterConfirm is not yet
+         * proven, so name every ingredient when it happens again. */
+        if (heldPair && !applied) {
+          cyclog('pair.key-consumed-unapplied', {
+            engineId,
+            hadRow: !!row,
+            rowDone: row?.done ?? null,
+            rowInputDisabled: row?.input.disabled ?? null,
+            engineKnown: engines.some((e) => e.engineId === engineId),
+            engineIdPaired: paired.has(engineId)
+          });
+        }
         markApplied();
       }
     }

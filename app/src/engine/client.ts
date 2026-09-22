@@ -173,6 +173,17 @@ export class WsEngineClient implements EngineClient {
    * here, and the handshake-failure path retries instead of parking. */
   private rekeyKick = false;
 
+  /* The user JUST tapped Pair (paired() ran): the very next handshakes carry a
+   * fresh pairing key, which is a deliberate trust decision at exactly the
+   * TOFU level of a first-ever pairing. A STALE identity pin from a previous
+   * engine on the same name (a rebuilt VM, live 2026-09-22: four hellos
+   * self-closed on the old pin, "Pairing..." until a reload) must not veto it:
+   * while this intent stands, an identity-changed pin mismatch proceeds
+   * unpinned and the accepted engine is re-pinned by the normal post-accept
+   * writes. Cleared on the first successful handshake; never set by plain
+   * reconnects, so everyday pinning is untouched. */
+  private pairingIntent = false;
+
   private voiceCall: VoiceCall | null = null;
 
   private readonly tunnel = new TunnelClient({
@@ -1006,6 +1017,7 @@ export class WsEngineClient implements EngineClient {
       return;
     }
     this.rekeyKick = false;
+    this.pairingIntent = false; // the deliberate-pairing window closes on success
 
     this.signal?.close(1000, 'upgraded');
     this.signal = null;
@@ -1283,6 +1295,7 @@ export class WsEngineClient implements EngineClient {
     this.rememberUserHost(userHost);
     this.held = null;
     this.rekeyKick = true;
+    this.pairingIntent = true;
     if (this.pipe) {
       try {
         this.pipe.close(1000, 're-paired');
@@ -1346,11 +1359,24 @@ export class WsEngineClient implements EngineClient {
       chan = await SecureChannel.accept(offer, secFrame, expectFp);
     } catch (e) {
       if (/identity changed/.test(String((e as Error)?.message ?? e))) {
-        const err = new Error('sec: engine identity changed') as Error & {userHost?: string};
-        err.userHost = uh;
-        throw err;
+        if (this.pairingIntent) {
+          /* The user just tapped Pair: the stale pin belongs to a previous
+           * engine on this name and the fresh pairing key IS the new trust
+           * decision (the same TOFU a first pairing makes). Proceed unpinned;
+           * the accept below re-derives the channel and the post-accept
+           * writes pin the NEW identity. Without this, a rebuilt engine sat
+           * on "Pairing..." until a reload. */
+          cyclog('e2e.identity-repair', {engine: this.url, uh,
+            why: 'pin mismatch during an explicit pairing; pairing key is the fresh trust'});
+          chan = await SecureChannel.accept(offer, secFrame, null);
+        } else {
+          const err = new Error('sec: engine identity changed') as Error & {userHost?: string};
+          err.userHost = uh;
+          throw err;
+        }
+      } else {
+        throw e;
       }
-      throw e;
     }
 
     const fp = await fpOfSpki(secFrame.id);

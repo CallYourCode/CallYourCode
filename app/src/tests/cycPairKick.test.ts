@@ -49,3 +49,28 @@ test('trustEngine during the failed attempt retries instead of re-asking', async
   expect(c.held).toBeNull();
   expect(c.scheduleReconnect).toHaveBeenCalledTimes(1);
 });
+
+/* THE STALE-PIN VETO (live 2026-09-22, the hosted-test hiccup): pairing a
+ * REBUILT engine under a name the device had pinned before. Four hellos
+ * self-closed on the old pin before the pairing key's proof was ever sent;
+ * "Pairing..." until a reload. paired() now raises a pairing intent, the
+ * handshake's identity-mismatch branch reads it to proceed unpinned (the
+ * fresh pairing key IS the trust decision, the same TOFU as a first pair),
+ * and a successful handshake spends it. */
+
+test('paired() raises the pairing intent; a plain client has none', async () => {
+  const c = mk();
+  expect(c.pairingIntent).toBe(false);
+  await c.paired('user@host');
+  expect(c.pairingIntent).toBe(true);
+});
+
+test('the intent survives failed attempts until a handshake succeeds', async () => {
+  const c = mk();
+  await c.paired('user@host');
+  // failed attempts (parks, retries) never clear it: only success does,
+  // where dialOnce runs `this.pairingIntent = false` after the handshake.
+  c.held = 'identity';
+  c.retryAfterRekey();
+  expect(c.pairingIntent).toBe(true);
+});
