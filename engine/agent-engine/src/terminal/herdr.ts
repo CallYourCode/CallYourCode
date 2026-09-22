@@ -25,6 +25,7 @@ import { homedir } from "node:os";
 import { classifyPaneBox, refusesDelivery, SGR, type BoxVerdict, type PaneBox } from "./blocked.ts";
 import { ANNOUNCED_SOURCE, normalizeAgentId, type AgentSessionRef } from "../runtime/agents.ts";
 import { hookBindFor, markParked, onHookAnnounce, pendingAnnounces, pruneHookBinds, takePending } from "./hook-announce.ts";
+import { stillAwaitingSubmit } from "./tmux.ts";
 import type { AgentStatus, MuxAgent, Multiplexer } from "./mux.ts";
 
 // AgentStatus and the agent shape now live on the multiplexer seam (mux.ts), so
@@ -36,6 +37,31 @@ export type HerdrAgent = MuxAgent;
 // import from herdr.ts reads unchanged.
 export { classifyPaneBox, refusesDelivery, SGR };
 export type { BoxVerdict, PaneBox };
+
+/* The spawn-hardening budgets (newTab below). Prompt wait capped at 5s like
+ * the tmux path; up to three type attempts verified ~150ms after typing; up
+ * to three Enter re-sends ~500ms apart. */
+const SPAWN_PROMPT_CAP_MS = 5_000;
+const SPAWN_TYPE_TRIES = 3;
+const SPAWN_VERIFY_MS = 150;
+const SPAWN_POLL_MS = 500;
+const SPAWN_RESEND_TRIES = 3;
+const SPAWN_READ_LINES = 60;
+
+/** True when the whole launch command is sitting typed on the screen. The
+ *  command wraps at the pane width, so the check flattens the capture (ANSI
+ *  stripped, line breaks removed) and asks for CONTAINMENT of the full
+ *  command string. This is the check a tail match cannot do: the live
+ *  2026-09-22 failure ate only the FIRST character (`env` -> `nv ...`), so
+ *  the tail was intact while the command was ruined. Pure; exported for the
+ *  unit test, which uses that exact capture. */
+export function commandTypedIntact(capture: string, command: string): boolean {
+  // whitespace-insensitive on both sides: a wrap point can fall on a space of
+  // the command and the terminal may pad or trim around it, so spacing is not
+  // evidence; every other byte of the command must be present, in order.
+  const flat = capture.replace(SGR, "").replace(/\s+/g, "");
+  return flat.includes(command.replace(/\s+/g, ""));
+}
 
 type SnapshotAgent = {
   pane_id: string;
@@ -332,11 +358,61 @@ export class HerdrClient implements Multiplexer {
     }, this.sock)) as { root_pane?: { pane_id?: string } };
     const paneId = res?.root_pane?.pane_id;
     if (!paneId) throw new Error("tab.create returned no pane");
-    // a new shell needs a moment before it will accept a command
-    await new Promise((r) => setTimeout(r, 400));
-    await this.sendText(paneId, opts.command);
+    /* THE SAME HARDENING THE TMUX PATH GOT (165743c), because the same seam
+     * broke here live (2026-09-22, MusicBrowser reopen on k8plus): the blind
+     * 400ms sleep typed the launch while an oh-my-zsh "update? [Y/n]" prompt
+     * was consuming stdin, the first character was eaten (`env` -> `nv`,
+     * command not found) and claude never started. Three steps, each proven
+     * against a capture:
+     *   1. wait for the prompt to be painted before typing (awaitPrompt);
+     *   2. VERIFY THE TYPED LINE: the tail check alone cannot catch a
+     *      head-mangled command (the eaten `e` left the tail intact), so the
+     *      flattened screen must CONTAIN the whole command; a mangled line is
+     *      cleared (ctrl+u) and retyped, bounded;
+     *   3. confirm the Enter actually submitted (the tmux dropped-Enter
+     *      rescue), resending while the launch still sits typed on the line
+     *      and no agent has come up on the pane. */
+    await this.awaitPrompt(paneId);
+    for (let attempt = 0; attempt < SPAWN_TYPE_TRIES; attempt++) {
+      await this.sendText(paneId, opts.command);
+      await new Promise((r) => setTimeout(r, SPAWN_VERIFY_MS));
+      const { text } = await this.readPane(paneId, SPAWN_READ_LINES);
+      if (commandTypedIntact(text, opts.command)) break;
+      if (attempt === SPAWN_TYPE_TRIES - 1) break; // out of budget: submit what is there
+      await this.sendKeys(paneId, "ctrl+u");       // clear the mangled input line
+    }
     await this.sendKeys(paneId, "enter");
+    await this.confirmSubmitted(paneId, opts.command);
     return paneId;
+  }
+
+  /** Poll the pane until any non-whitespace output is painted (the shell's
+   *  prompt), capped, so keys cannot land before the shell reads them. The
+   *  tmux path's awaitPrompt, on herdr's reader. */
+  private async awaitPrompt(paneId: string): Promise<void> {
+    const deadline = Date.now() + SPAWN_PROMPT_CAP_MS;
+    for (;;) {
+      const { text } = await this.readPane(paneId, SPAWN_READ_LINES).catch(() => ({ text: "" as string }));
+      if (text.replace(SGR, "").trim().length > 0) return;
+      if (Date.now() >= deadline) return;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  /** The dropped-Enter rescue, herdr edition. Bounded; stops the instant an
+   *  agent is detected on the pane (never a stray Enter into a running agent)
+   *  or the launch left the input line. */
+  private async confirmSubmitted(paneId: string, command: string): Promise<void> {
+    for (let attempt = 0; attempt < SPAWN_RESEND_TRIES; attempt++) {
+      await new Promise((r) => setTimeout(r, SPAWN_POLL_MS));
+      if (this.agents.get(paneId)?.agent) return; // the agent painted: submitted
+      const { text } = await this.readPane(paneId, SPAWN_READ_LINES).catch(() => ({ text: "" as string }));
+      if (!text) continue; // a failed read says nothing; try again
+      // "zsh" stands in for the foreground shell: herdr has no comm field, and
+      // the agent check above already covered the running-agent case.
+      if (!stillAwaitingSubmit("zsh", text.replace(SGR, ""), command)) return;
+      await this.sendKeys(paneId, "enter");
+    }
   }
 
   /** Connect, snapshot, subscribe. Retries forever until stop(). */
