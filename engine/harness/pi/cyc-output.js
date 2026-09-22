@@ -289,25 +289,6 @@ function activate(pi, deps) {
     // never let the reply-channel registration crash the extension load
   }
 
-  const sockPath = process.env.CYC_PI_EVENT_SOCK;
-  if (!sockPath) return; // not launched by cyc for streaming: no event stream
-
-  // last-known session identity, cached the moment session_start names it, so a
-  // (re)connect can re-announce it to an engine listener that was not yet ready
-  // when the one-shot session_start fired. This is the fix for the capture race:
-  // the identity survives a socket that came up (or came back) after the emit.
-  let lastSession = null;
-
-  // a test seam: inject a fake sink whose connect timing it controls; pi always
-  // calls activate(pi) with one arg, so the real makeSink is used in production.
-  const makeSinkFn = (deps && deps.makeSink) || makeSink;
-  const sink = makeSinkFn(sockPath, () => {
-    // on every (re)connect: if we already know who this pane is, re-send the
-    // identity so a late-ready engine listener still binds the pane. Idempotent
-    // on the engine (recordHookBind is latest-wins), so a duplicate is harmless.
-    if (lastSession) sink.send(lastSession);
-  });
-
   // never throw out of a handler: wrap every one so a bad frame or a socket
   // hiccup can never crash pi or abort its turn.
   const safe = (fn) => (event, ctx) => {
@@ -325,6 +306,35 @@ function activate(pi, deps) {
       // an old pi without this event: skip it, keep the rest
     }
   };
+
+  const sockPath = process.env.CYC_PI_EVENT_SOCK;
+  if (!sockPath) {
+    /* NOT LAUNCHED BY CYC (a plain `pi` typed into a pane, loading this file
+     * from pi's global extensions): no event stream, but the engine still has
+     * to learn which session this pane is, or it never tails the transcript
+     * and the chat shows replies with no session rows. The announce is an
+     * HTTP POST, independent of the socket, so it runs here too. */
+    on("session_start", (_event, ctx) => {
+      void announceSession(sessionIdOf(ctx), cwdOf(ctx));
+    });
+    return;
+  }
+
+  // last-known session identity, cached the moment session_start names it, so a
+  // (re)connect can re-announce it to an engine listener that was not yet ready
+  // when the one-shot session_start fired. This is the fix for the capture race:
+  // the identity survives a socket that came up (or came back) after the emit.
+  let lastSession = null;
+
+  // a test seam: inject a fake sink whose connect timing it controls; pi always
+  // calls activate(pi) with one arg, so the real makeSink is used in production.
+  const makeSinkFn = (deps && deps.makeSink) || makeSink;
+  const sink = makeSinkFn(sockPath, () => {
+    // on every (re)connect: if we already know who this pane is, re-send the
+    // identity so a late-ready engine listener still binds the pane. Idempotent
+    // on the engine (recordHookBind is latest-wins), so a duplicate is harmless.
+    if (lastSession) sink.send(lastSession);
+  });
 
   // identity, so cyc can bind the pane from the extension too. Each field is
   // read through its own null-safe accessor so a throwing ctx getter can never

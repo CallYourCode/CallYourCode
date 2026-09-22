@@ -73,7 +73,18 @@ export type HarnessCaps = {
  * must map to the same key. */
 export type SessionEventSource =
   | { mode: "lines"; eventOf(line: string, off: number): SessionEvent | null }
-  | { mode: "poll"; since(path: string, cursor: number): Promise<{ events: SessionEvent[]; cursor: number } | null> };
+  /* `consumed` (optional): the RAW texts of user records this drain saw land in
+   * the harness's own store -- the proof a delivered message entered the model's
+   * context, which is what clears the app's "Queued" mark (chat/ingest
+   * markInContext, exact-text match, so raw and uncapped). The lines mode gets
+   * this from the claude-format side parse (tailSideOf); a poll harness that
+   * can name its user records returns them here. Absent means none this drain. */
+  /* `startAtEnd` (optional): with no saved cursor, begin at the store's current
+   * size instead of 0 -- the lines tail's rule. For an append-only file whose
+   * byte offset IS the cursor (pi), so binding a resumed session never replays
+   * its whole history into the chat as new rows. Absent: cursor 0, one backfill
+   * batch deduped by rid (opencode's store). */
+  | { mode: "poll"; startAtEnd?: boolean; since(path: string, cursor: number): Promise<{ events: SessionEvent[]; cursor: number; consumed?: string[] } | null> };
 
 export type DetectInput = {
   kindStamp: string; // mux's agent stamp (normalized)
@@ -132,7 +143,7 @@ export interface HarnessReader {
   parseLine?(line: string): AgentEvent | null;
 
   /** This harness's activity-event extraction (see SessionEventSource above).
-   *  Declared by claude (lines), codex (lines) and opencode (poll); absent
+   *  Declared by claude (lines), codex (lines), opencode (poll) and pi (poll); absent
    *  means no activity tail for this harness. */
   readonly sessionEvents?: SessionEventSource;
 

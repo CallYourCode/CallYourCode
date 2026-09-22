@@ -22,6 +22,7 @@
 
 import { test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -289,11 +290,12 @@ afterEach(async () => {
 const listOf = (client: FakeClient): any[] => (client.last("sessions")?.list as any[]) ?? [];
 
 test("a pi pane's model and context ride the sessions contract", async () => {
-  /* The engine reads a non-claude transcript for exactly the things the row
-   * renders and nothing else. `claudeSessionId` stays null -- the harness id is
-   * not a claude uuid and pretending otherwise would send every claude-keyed
-   * reader down a path that cannot work -- while `model` still comes off the
-   * pi session file, because the app draws "Pi . grok-4.6" from this row. */
+  /* The row's `model` comes off the pi session file as a DISPLAY name ("Grok 4.6"), the same
+   * composed-here contract sessions-frame.ts states for every harness: the pi
+   * reader surfaces the raw id ("grok-4.6"), and the context cache maps it to
+   * the display name for the row, so the list never shows a bare id where a
+   * claude row shows "Opus 4.8". (Before, the generic branch stored the raw id
+   * as the display name and the list showed "claude-fable-5" / "grok-4.6".) */
   core = await wireCore({
     panes: ["w1:p1"], agents: { "w1:p1": "pi" }, sessionIds: { "w1:p1": PI_ID },
     with: ["sessions"],
@@ -303,20 +305,28 @@ test("a pi pane's model and context ride the sessions contract", async () => {
   await until(() => !!c.byHandle("w1:p1"), { what: "the pi pane to reconcile" });
   await until(() => {
     c.hello(client);
-    return listOf(client).find((s) => s.id === wireId("w1:p1"))?.model === "grok-4.6";
-  }, { what: "the pi row to grow a model from its session file" });
+    return listOf(client).find((s) => s.id === wireId("w1:p1"))?.model === "Grok 4.6";
+  }, { what: "the pi row to grow a mapped model name from its session file" });
 
   const row = listOf(client).find((s) => s.id === wireId("w1:p1"));
   expect(row.agentId, "the row does not say which coding agent it is").toBe("pi");
   expect(row.contextPct, "pi tokens against the 1M default ride the row: 7594 / 1M floors to 0").toBe(0);
-  expect(row.claudeSessionId, "a pi pane must not claim a claude session id").toBeNull();
+  // the overlay gate (wire name kept for the app): pi now declares an activity
+  // tail, so its row advertises its harness id and the app paints its rows.
+  expect(row.claudeSessionId, "the pi row must open the app's session-row overlay").toBe(PI_ID);
 });
 
-test("a pi pane's harness narration never enters the chat stream", async () => {
-  /* The other half, and the one that is silent when wrong. The transcript is
-   * read for the row; it is NOT the conversation. A harness that replayed its
-   * own prompts and narration as chat bubbles would fill his phone with the
-   * agent talking to itself, and every unread count would be a lie. */
+test("a pi pane's conversation enters the chat stream; non-turns do not", async () => {
+  /* pi's transcript IS its conversation, the same as claude/codex/opencode:
+   * the reader now declares a sessionEvents tail (readers/pi.ts piEventsSince),
+   * so a pi pane's user prompts and assistant replies land in the chat log
+   * HOWEVER the pane was started. Until this, pi alone had no such tail: only a
+   * pi that cyc itself launched streamed rows (over the extension socket), so a
+   * pi opened by hand in a mux pane showed replies but no session messages and
+   * the app sat on "Queued". This is the guardrail's inverse: the real turns
+   * MUST show (they are the conversation, not the agent talking to itself), and
+   * the records that are NOT turns -- toolResult rows, the session/model_change
+   * bookkeeping lines -- must never become chat bubbles. */
   core = await wireCore({
     panes: ["w1:p1"], agents: { "w1:p1": "pi" }, sessionIds: { "w1:p1": PI_ID },
     with: ["frames"],
@@ -324,19 +334,44 @@ test("a pi pane's harness narration never enters the chat stream", async () => {
   const c = core;
   await until(() => !!c.byHandle("w1:p1"), { what: "the pi pane to reconcile" });
 
+  /* The tail starts at the file's END on first bind (startAtEnd: a resumed
+   * session never replays its history), so the fixture already on disk is NOT
+   * expected in the log; a turn written AFTER the bind is. Each beat appends a
+   * fresh turn until one lands, so the test never races the subscribe. */
   const page = c.client();
-  await dispatchClientFrame(page.sock, { t: "attach", id: wireId("w1:p1"), since: 0 });
-  await until(() => page.last("attach-ok") !== undefined, { what: "the attach answer" });
+  let n = 0;
+  const stamp = () => new Date().toISOString();
+  await until(() => {
+    n++;
+    appendFileSync(piPanePath,
+      JSON.stringify({ type: "message", id: `u-live-${n}`, parentId: null, timestamp: stamp(),
+        message: { role: "user", content: [{ type: "text", text: `live prompt ${n}` }], timestamp: Date.now() } }) + "\n"
+      + JSON.stringify({ type: "message", id: `a-live-${n}`, parentId: null, timestamp: stamp(),
+        message: { role: "assistant", content: [{ type: "text", text: `live reply ${n}` }],
+          stopReason: "stop", timestamp: Date.now() } }) + "\n"
+      + JSON.stringify({ type: "message", id: `r-live-${n}`, parentId: null, timestamp: stamp(),
+        message: { role: "toolResult", toolCallId: "x", toolName: "bash",
+          content: [{ type: "text", text: `tool output ${n}` }], isError: false, timestamp: Date.now() } }) + "\n");
+    void dispatchClientFrame(page.sock, { t: "attach", id: wireId("w1:p1"), since: 0 });
+    return (page.last("attach-ok")?.total as number ?? 0) > 0;
+  }, { timeoutMs: LOADED_MS, what: "a live pi turn to reach the chat log" });
 
   const ok = page.last("attach-ok")!;
-  expect(ok.total, "harness turns became chat rows").toBe(0);
   const texts = ((ok.pages as any[]) ?? [])
     .flatMap((p) => (p.messages ?? []).map((m: any) => String(m.text)));
-  expect(texts.some((t) => t.includes("BRIEF-612")),
-    "the pi prompt leaked into the chat stream").toBe(false);
-  expect(texts.some((t) => t.includes("TranscriptSupport")),
-    "the agent narration leaked into the chat stream").toBe(false);
-  expect(c.byHandle("w1:p1")!.chat).toEqual([]);
+  expect(texts.some((t) => /^live prompt \d+$/.test(t)),
+    "the user's prompt did not reach the chat stream").toBe(true);
+  expect(texts.some((t) => /^live reply \d+$/.test(t)),
+    "the assistant reply did not reach the chat stream").toBe(true);
+  expect(texts.some((t) => t.includes("tool output")),
+    "a toolResult record became a chat row").toBe(false);
+  expect(texts.some((t) => t.includes("wire the TranscriptSupport table")),
+    "the history already on disk was replayed into the chat").toBe(false);
+  // a bookkeeping record (no role message) is never a bubble
+  const kinds = ((ok.pages as any[]) ?? [])
+    .flatMap((p) => (p.messages ?? []).map((m: any) => m.kind));
+  expect(kinds.every((k: string) => k !== "status" && k !== "session"),
+    "a non-turn record became a chat row").toBe(true);
 });
 
 test("Stop on a non-claude pane sends a mux ctrl+c, not a claude hook", async () => {

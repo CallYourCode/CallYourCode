@@ -39,6 +39,155 @@
 import { PI_TRANSCRIPT } from "../chat/transcripts.ts";
 import { augmentPiLaunch, PI_EXTENSION_PATH } from "../adapters/pi-launch.ts";
 import type { HarnessReader } from "./types.ts";
+import type { SessionEvent } from "../sessions/session-events.ts";
+
+/* THE pi ACTIVITY TAIL (sessionEvents, poll mode). Until now pi was the ONE
+ * harness with no transcript tail into the chat log: its session records only
+ * flowed over the launch-time extension socket (adapters/pi-events.ts), which
+ * exists solely for a pane cyc itself spawned. A pi someone starts in a plain
+ * mux pane -- the normal way a person opens pi -- therefore showed replies (the
+ * reply-channel POST) but NO session rows, and the app sat on "Queued" until a
+ * reply landed. claude/codex/opencode all tail their own files whoever started
+ * them; this gives pi the same floor. The socket stays as the faster live
+ * source; both feed logSession, which dedupes on the durable id both carry
+ * (the jsonl record id for messages, the toolCallId for tools -- the SAME ids
+ * cyc-output.js puts on its frames), so a cyc-spawned pi never double-rows.
+ *
+ * Poll mode, not lines mode: one pi assistant record can hold text AND several
+ * toolCalls, so one line can be several rows, which the lines contract (one
+ * event per line) cannot express. The file IS append-only; the poll simply
+ * reads the bytes past the cursor, consumes whole lines, and leaves a torn
+ * trailing line for the next beat. */
+
+// caps pinned to cyc-output.js / adapters/pi-events.ts so the tail row and the
+// socket row for the same record carry identical text.
+const PI_TOOL_CAP = 200;
+const PI_BODY_CAP = 2000;
+const capText = (t: string, n: number): string => (t.length > n ? t.slice(0, n) + "…" : t);
+
+/** The joined text blocks of a pi message content, trimmed ("" when none). */
+function piContentText(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const p of content) {
+    if (p && typeof p === "object" && (p as { type?: unknown }).type === "text"
+      && typeof (p as { text?: unknown }).text === "string") {
+      parts.push((p as { text: string }).text);
+    }
+  }
+  return parts.join("").trim();
+}
+
+/** The tool row's text, the SAME derivation cyc-output.js toolText uses. */
+function piToolText(name: string, input: unknown): string {
+  if (input && typeof input === "object") {
+    const o = input as Record<string, unknown>;
+    if (typeof o.command === "string") return capText(o.command, PI_TOOL_CAP);
+    if (typeof o.path === "string") return capText(o.path, PI_TOOL_CAP);
+    if (typeof o.file_path === "string") return capText(o.file_path, PI_TOOL_CAP);
+    if (typeof o.pattern === "string") return capText(o.pattern, PI_TOOL_CAP);
+  }
+  return name || "";
+}
+
+/** One parsed pi jsonl record -> its renderable rows (0..n). Exported for the
+ *  unit test; piEventsSince drives it per consumed line. */
+export function piRecordEvents(rec: unknown, off: number): SessionEvent[] {
+  if (!rec || typeof rec !== "object") return [];
+  const e = rec as { type?: unknown; id?: unknown; timestamp?: unknown; message?: unknown; summary?: unknown };
+  const uuid = typeof e.id === "string" ? e.id : "";
+  if (!uuid) return [];
+  const recTs = typeof e.timestamp === "string" ? Date.parse(e.timestamp) : NaN;
+  if (e.type === "compaction") {
+    if (!Number.isFinite(recTs)) return [];
+    return [{ uuid, ts: recTs, kind: "compact", text: "Context compacted", off }];
+  }
+  if (e.type !== "message" || !e.message || typeof e.message !== "object") return [];
+  const m = e.message as { role?: unknown; content?: unknown; timestamp?: unknown };
+  const ts = typeof m.timestamp === "number" && Number.isFinite(m.timestamp) ? m.timestamp : recTs;
+  if (!Number.isFinite(ts)) return [];
+  const out: SessionEvent[] = [];
+  if (m.role === "user") {
+    const text = capText(piContentText(m.content), PI_BODY_CAP);
+    if (text) out.push({ uuid, ts, kind: "prompt", text, off });
+  } else if (m.role === "assistant") {
+    // tool rows first (that is the order the turn ran them in), each on the
+    // toolCallId the socket frame and the transcript share; then the reply
+    // text, on the record id, skipped when the turn was pure tool calls.
+    if (Array.isArray(m.content)) {
+      for (const b of m.content) {
+        if (!b || typeof b !== "object") continue;
+        const blk = b as { type?: unknown; id?: unknown; name?: unknown; arguments?: unknown };
+        if (blk.type !== "toolCall" || typeof blk.id !== "string" || !blk.id) continue;
+        const tool = typeof blk.name === "string" ? blk.name : "";
+        out.push({ uuid: blk.id, ts, kind: "tool", tool,
+          text: capText(piToolText(tool, blk.arguments), PI_TOOL_CAP), off });
+      }
+    }
+    const text = capText(piContentText(m.content), PI_BODY_CAP);
+    if (text) out.push({ uuid, ts, kind: "reply", text, off });
+  }
+  // toolResult records are not rows, matching the socket source.
+  return out;
+}
+
+/** The RAW joined text of a user record, uncapped and untrimmed: the exact
+ *  string the engine armed at send time (chat/ingest awaitingByText), so a
+ *  landed prompt clears the app's "Queued" mark by exact match. */
+function piRawUserText(rec: unknown): string | null {
+  if (!rec || typeof rec !== "object") return null;
+  const e = rec as { type?: unknown; message?: unknown };
+  if (e.type !== "message" || !e.message || typeof e.message !== "object") return null;
+  const m = e.message as { role?: unknown; content?: unknown };
+  if (m.role !== "user") return null;
+  const c = m.content;
+  if (typeof c === "string") return c;
+  if (!Array.isArray(c)) return null;
+  const parts: string[] = [];
+  for (const p of c) {
+    if (p && typeof p === "object" && (p as { type?: unknown }).type === "text"
+      && typeof (p as { text?: unknown }).text === "string") {
+      parts.push((p as { text: string }).text);
+    }
+  }
+  return parts.length ? parts.join("") : null;
+}
+
+/** The poll-mode drain: every row in the bytes past `cursor`, whole lines
+ *  only (a torn trailing line waits for the next beat). `consumed` carries the
+ *  raw user texts that landed, for the queued-clear. Null only when the file
+ *  is not there (retried on the next snapshot). */
+export async function piEventsSince(path: string, cursor: number):
+  Promise<{ events: SessionEvent[]; cursor: number; consumed: string[] } | null> {
+  const f = Bun.file(path);
+  if (!(await f.exists())) return null;
+  const size = f.size;
+  const at = cursor >= 0 && cursor <= size ? cursor : 0;
+  if (size <= at) return { events: [], cursor: at, consumed: [] };
+  const chunk = Buffer.from(await f.slice(at, size).arrayBuffer());
+  const nl = chunk.lastIndexOf(0x0a);
+  if (nl < 0) return { events: [], cursor: at, consumed: [] }; // no complete line yet
+  const events: SessionEvent[] = [];
+  const consumed: string[] = [];
+  let lineStart = 0;
+  while (lineStart <= nl) {
+    const lineEnd = chunk.indexOf(0x0a, lineStart);
+    const line = chunk.subarray(lineStart, lineEnd).toString("utf8").trim();
+    const off = at + lineEnd + 1; // the record's end offset, like the lines tail
+    if (line) {
+      let rec: unknown = null;
+      try { rec = JSON.parse(line); } catch { /* a corrupt line is skipped, not fatal */ }
+      if (rec) {
+        events.push(...piRecordEvents(rec, off));
+        const raw = piRawUserText(rec);
+        if (raw) consumed.push(raw);
+      }
+    }
+    lineStart = lineEnd + 1;
+  }
+  return { events, cursor: at + nl + 1, consumed };
+}
 
 export const piReader: HarnessReader = {
   tag: "pi",
@@ -115,6 +264,12 @@ export const piReader: HarnessReader = {
   // to be a command-string sniff in the generic spawn path, now driven by this
   // reader declaration. Every non-pi harness omits it and spawns untouched.
   eventSocket: true,
+
+  // The transcript activity tail (see piEventsSince above): session rows for
+  // EVERY pi pane, however it was started. The extension socket above stays as
+  // the faster live source for a cyc-spawned pi; the two dedupe on the durable
+  // record ids they share.
+  sessionEvents: { mode: "poll", startAtEnd: true, since: piEventsSince },
 
   // Decorate a pi launch so the cyc-launched pi loads the output extension and
   // points it at the bound socket: a leading `CYC_PI_EVENT_SOCK=<sock>` env

@@ -3,7 +3,7 @@
  *  - session_start sends a {t:"pi.session"} identity frame;
  *  - a message_end and a tool_call send {t:"pi.event"} frames with stable ids;
  *  - a handler throwing internally never crashes (the transcript path covers);
- *  - with no CYC_PI_EVENT_SOCK it does nothing at all (subscribes to nothing).
+ *  - with no CYC_PI_EVENT_SOCK it streams nothing but still announces identity.
  *
  * No real pi: the stub records pi.on handlers so the test emits events itself.
  *
@@ -213,11 +213,41 @@ describe("the pi output extension", () => {
     expect(session.model).toBeUndefined();
   });
 
-  test("without CYC_PI_EVENT_SOCK it subscribes to nothing (no-op)", () => {
+  /* A plain `pi` (loaded from pi's global extensions, not launched by cyc) has
+   * no event socket, but it MUST still announce its session id: without it the
+   * engine never binds the pane's harness session, never tails the transcript,
+   * and the app shows replies with no session rows. So: no stream handlers,
+   * exactly one session_start handler, and firing it POSTs the announce. */
+  test("without CYC_PI_EVENT_SOCK it streams nothing but still announces", async () => {
     delete process.env.CYC_PI_EVENT_SOCK;
-    const pi = stubPi();
-    activate(pi as any);
-    expect(pi.handlers.size).toBe(0); // no socket target: it never even registers
+    const posts: any[] = [];
+    let got: (b: any) => void = () => {};
+    const posted = new Promise<any>((r) => { got = r; });
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const body = await req.json().catch(() => null);
+        posts.push({ path: new URL(req.url).pathname, body });
+        got(body);
+        return new Response("ok");
+      },
+    });
+    const prevPort = process.env.AGENT_PORT;
+    process.env.AGENT_PORT = String(server.port);
+    try {
+      const pi = stubPi();
+      activate(pi as any);
+      expect([...pi.handlers.keys()]).toEqual(["session_start"]);
+      pi.emit("session_start", { type: "session_start", reason: "startup" }, ctxFor());
+      const body = await posted;
+      expect(posts).toHaveLength(1);
+      expect(posts[0].path).toBe("/harness/announce");
+      expect(body).toMatchObject({ sessionId: "sess-abc", cwd: "/work", harness: "pi" });
+    } finally {
+      process.env.AGENT_PORT = prevPort;
+      server.stop(true);
+      announce.announcedSessions.clear();
+    }
   });
 
   /* The capture-race fix: the identity is re-announced whenever the socket

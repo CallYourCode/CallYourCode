@@ -48,6 +48,7 @@ const CLAUDE_ID = "5efab001-1111-4aaa-8bbb-000000000001";
 const CODEX_ID = "01aa2233-44bb-7000-8000-556677889900";
 const OC_ID = "ses_aaaa0000bbbbCCCCddddEEEE01";
 const PI_ID = "01bb0000-0000-7000-8000-000000000001";
+const HERMES_ID = "01cc0000-0000-7000-8000-000000000001";
 
 const deps: S.SessionStateDeps = { noteMinted: () => {}, broadcastSessions: () => {}, lineageOf: () => undefined };
 
@@ -126,11 +127,11 @@ test("the readers-table predicate: exactly the harnesses that declare the slot",
   expect(adapter.hasSessionEvents("claude")).toBe(true);
   expect(adapter.hasSessionEvents("codex")).toBe(true);
   expect(adapter.hasSessionEvents("opencode")).toBe(true);
-  expect(adapter.hasSessionEvents("pi")).toBe(false); // live events ride its socket
+  expect(adapter.hasSessionEvents("pi")).toBe(true); // transcript tail, any pi however started
   expect(adapter.hasSessionEvents("hermes")).toBe(false); // no reader at all
 });
 
-test("a codex/opencode row advertises the overlay-capable id on the wire; a slotless reader stays null with its id still carried", async () => {
+test("a codex/opencode/pi row advertises the overlay-capable id on the wire; a slotless reader stays null with its id still carried", async () => {
   await S.loadSessionState(deps);
   S.sessionStateReady();
   reconcile([
@@ -138,6 +139,7 @@ test("a codex/opencode row advertises the overlay-capable id on the wire; a slot
     pane("w2:p2", "codex", CODEX_ID),
     pane("w2:p3", "opencode", OC_ID),
     pane("w2:p4", "pi", PI_ID),
+    pane("w2:p5", "hermes", HERMES_ID),
   ]);
   const rows = sessionList() as Array<{ agentId: string; claudeSessionId: string | null; harnessSessionId: string | null }>;
   const by = (kind: string) => {
@@ -150,8 +152,10 @@ test("a codex/opencode row advertises the overlay-capable id on the wire; a slot
   // the fix: the harnesses whose readers tail activity advertise THEIR id
   expect(by("codex").claudeSessionId).toBe(CODEX_ID);
   expect(by("opencode").claudeSessionId).toBe(OC_ID);
-  /* pi: the id is CARRIED (harnessSessionId) but the overlay field is null,
-   * proving the gate is the declared slot, not the presence of an id. */
-  expect(by("pi").harnessSessionId).toBe(PI_ID);
-  expect(by("pi").claudeSessionId).toBeNull();
+  expect(by("pi").claudeSessionId).toBe(PI_ID);
+  /* hermes (no reader, so no slot): the id is CARRIED (harnessSessionId) but
+   * the overlay field is null, proving the gate is the declared slot, not the
+   * presence of an id. */
+  expect(by("hermes").harnessSessionId).toBe(HERMES_ID);
+  expect(by("hermes").claudeSessionId).toBeNull();
 });

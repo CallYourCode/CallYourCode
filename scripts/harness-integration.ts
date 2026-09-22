@@ -4,7 +4,7 @@
  * server, the skill, and the two hooks -- each in that harness's real
  * mechanism (formats verified on this box; PARITY.md).
  *
- *   bun scripts/harness-integration.ts [claude] [opencode] [codex] [--dry-run]
+ *   bun scripts/harness-integration.ts [claude] [opencode] [codex] [pi] [--dry-run]
  *
  * With no harness named, installs for every harness detected on the machine
  * (binary on PATH or config root present) and exits 0 when there is none.
@@ -57,6 +57,11 @@
  *                                guard (engine/harness/codex/enforce-shell-async.py)
  *   skills/callyourcode/         the repo skill, copied fresh; a legacy
  *                                skills/callyourcode dir is archived away
+ *
+ * pi (~/.pi/agent, or $PI_CODING_AGENT_DIR):
+ *   settings.json                adds the absolute path of the repo's
+ *                                engine/harness/pi/cyc-output.js to
+ *                                `extensions` (reply tools + session announce)
  *
  * Codex asks once, at the next interactive start, to trust the two hooks
  * (its startup hooks review). That is codex's supported flow; this installer
@@ -115,6 +120,40 @@ export function mergeOpencodeConfig(
     text: JSON.stringify(data, null, 2) + "\n",
     changed: true,
     note: migrated ? "migrated mcp.callyourcode to `cyc mcp`" : "added mcp.callyourcode (`cyc mcp`)",
+  }
+}
+
+/* pi's settings.json (~/.pi/agent/settings.json): add the cyc extension's
+ * ABSOLUTE path to the top-level `extensions` array. pi has no MCP; this one
+ * extension is its whole integration: the speak/chat/show reply tools, and the
+ * session-identity announce that lets the engine tail its transcript. Without
+ * it a plain `pi` typed into a pane has no way to reply and the app shows no
+ * session rows. The engine's own `-e <same path>` on a pi it spawns is merged
+ * with this entry by pi (canonical-path dedupe), so the file loads once. An
+ * older entry for the same file at another path (a moved checkout) is
+ * replaced in place; every other key and entry is kept. */
+const PI_EXTENSION_SUFFIX = path.join("engine", "harness", "pi", "cyc-output.js")
+
+export function mergePiSettings(
+  text: string,
+  extensionPath: string,
+): { text: string; changed: boolean; note: string } {
+  const data = text.trim() ? JSON.parse(text) : {}
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new Error("pi settings.json root is not an object")
+  }
+  const list = (data.extensions ??= [])
+  if (!Array.isArray(list)) throw new Error("pi settings.json extensions is not an array")
+  if (list.includes(extensionPath)) {
+    return { text, changed: false, note: "extensions already has the cyc extension" }
+  }
+  const stale = list.findIndex((p: unknown) => typeof p === "string" && p.endsWith(PI_EXTENSION_SUFFIX))
+  if (stale >= 0) list[stale] = extensionPath
+  else list.push(extensionPath)
+  return {
+    text: JSON.stringify(data, null, 2) + "\n",
+    changed: true,
+    note: stale >= 0 ? "moved the cyc extension entry to this checkout" : "added the cyc extension",
   }
 }
 
@@ -526,6 +565,25 @@ export function installCodex(opts: { home: string; repo: string; dry: boolean })
   }
 }
 
+export function installPi(opts: { home: string; repo: string; dry: boolean }): void {
+  const { home, repo, dry } = opts
+  const agentDir =
+    process.env.PI_CODING_AGENT_DIR && !process.env.CYC_HOME
+      ? process.env.PI_CODING_AGENT_DIR
+      : path.join(home, ".pi", "agent")
+  console.log(`pi -> ${agentDir}`)
+
+  const settingsFile = path.join(agentDir, "settings.json")
+  const text = fs.existsSync(settingsFile) ? fs.readFileSync(settingsFile, "utf-8") : ""
+  const merged = mergePiSettings(text, path.join(repo, PI_EXTENSION_SUFFIX)) // invalid JSON crashes loud
+  if (merged.changed) {
+    writeMerged(settingsFile, merged.text, dry)
+    console.log(`  ok    settings.json: ${merged.note}`)
+  } else {
+    console.log(`  skip  settings.json: ${merged.note}`)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Detection + CLI.
 
@@ -538,6 +596,7 @@ export function detectHarnesses(home: string): string[] {
   if (Bun.which("claude") || fs.existsSync(path.join(home, ".claude"))) found.push("claude")
   if (Bun.which("opencode") || fs.existsSync(path.join(home, ".config", "opencode"))) found.push("opencode")
   if (Bun.which("codex") || fs.existsSync(path.join(home, ".codex"))) found.push("codex")
+  if (Bun.which("pi") || fs.existsSync(path.join(home, ".pi", "agent"))) found.push("pi")
   return found
 }
 
@@ -545,8 +604,8 @@ function main(argv: string[]): number {
   const dry = argv.includes("--dry-run")
   const named = argv.filter((a) => !a.startsWith("--"))
   for (const a of named) {
-    if (a !== "claude" && a !== "opencode" && a !== "codex") {
-      console.error(`usage: harness-integration.ts [claude] [opencode] [codex] [--dry-run]`)
+    if (a !== "claude" && a !== "opencode" && a !== "codex" && a !== "pi") {
+      console.error(`usage: harness-integration.ts [claude] [opencode] [codex] [pi] [--dry-run]`)
       return 2
     }
   }
@@ -558,15 +617,16 @@ function main(argv: string[]): number {
   const repo = path.resolve(import.meta.dir, "..")
   const targets = named.length ? named : detectHarnesses(home)
   if (targets.length === 0) {
-    console.log("harness-integration: no claude, opencode or codex on this machine; nothing to do")
+    console.log("harness-integration: no claude, opencode, codex or pi on this machine; nothing to do")
     return 0
   }
   for (const t of targets) {
     if (t === "claude") installClaude({ home, repo, dry })
     if (t === "opencode") installOpencode({ home, repo, dry })
     if (t === "codex") installCodex({ home, repo, dry })
+    if (t === "pi") installPi({ home, repo, dry })
   }
-  console.log("Done. Restart running claude/opencode/codex sessions to pick up MCP, hooks and skills.")
+  console.log("Done. Restart running claude/opencode/codex/pi sessions to pick up MCP, hooks, skills and the pi extension.")
   return 0
 }
 

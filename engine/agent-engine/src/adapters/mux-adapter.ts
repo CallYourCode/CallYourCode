@@ -374,6 +374,11 @@ function transcriptFileOf(info: MuxAgentInfo): { sessionId: string; path: string
 /** The poll tail's cheap change gate: mtime+size of the store file and its
  *  sqlite -wal sidecar (where commits land between checkpoints). "" when the
  *  store file itself is missing. */
+/** A file's current byte size, 0 when it cannot be statted (not there yet). */
+function statSizeOf(file: string): number {
+  try { return statSync(file).size; } catch { return 0; }
+}
+
 function statKeyOf(statPath: string): string {
   let key: string;
   try {
@@ -418,7 +423,7 @@ type StatusTail = {
 type PollTail = {
   path: string; // the locate's path, handed to since() verbatim
   statPath: string; // the store file the change gate stats
-  since: (path: string, cursor: number) => Promise<{ events: SessionEvent[]; cursor: number } | null>;
+  since: (path: string, cursor: number) => Promise<{ events: SessionEvent[]; cursor: number; consumed?: string[] } | null>;
   cursor: number;
   statKey: string; // last seen mtime/size of statPath (+wal)
   pump: () => void;
@@ -951,7 +956,7 @@ export class MuxAdapter implements MultiplexerAdapter {
    * next snapshot.
    *
    * HARNESS DISPATCH is the reader's declared sessionEvents slot
-   * (readers/types.ts): no slot, no tail (pi's live events ride its socket).
+   * (readers/types.ts): no slot, no tail.
    * The file is the reader's own locate (transcriptFileOf), the same answer
    * transcriptFile() gives the ingest's gate. For claude both derivations are
    * the same bytes: toInfo lifts harnessSessionId from the id-kind, non-premint,
@@ -970,7 +975,10 @@ export class MuxAdapter implements MultiplexerAdapter {
     if (!located) return null; // no session log; retried on the next snapshot
     const path = located.path;
     const sessionId = located.sessionId || handle;
-    if (src.mode === "poll") return this.subscribePoll(handle, sessionId, path, src.since, cb, from);
+    if (src.mode === "poll") {
+      const start = from === null && src.startAtEnd ? statSizeOf(path) : from;
+      return this.subscribePoll(handle, sessionId, path, src.since, cb, start);
+    }
     if (path.includes("#")) return null; // a lines source needs an append-only file
     const existing = this.overlayTails.get(handle);
     if (existing) {
@@ -1048,7 +1056,7 @@ export class MuxAdapter implements MultiplexerAdapter {
    * fs.watch on the store file is armed as the fast path when it exists, but
    * the heartbeat alone is sufficient (the tail-poll test's inert-pool rule). */
   private subscribePoll(handle: string, sessionId: string, path: string,
-    since: (path: string, cursor: number) => Promise<{ events: SessionEvent[]; cursor: number } | null>,
+    since: (path: string, cursor: number) => Promise<{ events: SessionEvent[]; cursor: number; consumed?: string[] } | null>,
     cb: (batch: OverlayBatch) => void, from: number | null): TailSub | null {
     const existing = this.pollTails.get(handle);
     if (existing) {
@@ -1069,7 +1077,7 @@ export class MuxAdapter implements MultiplexerAdapter {
           w.statKey = key;
           if (got.cursor === w.cursor && got.events.length === 0) return;
           w.cursor = got.cursor;
-          w.cb({ events: got.events, queueOps: [], consumed: [], delivered: [], offset: got.cursor });
+          w.cb({ events: got.events, queueOps: [], consumed: got.consumed ?? [], delivered: [], offset: got.cursor });
         })
         .catch((e) => console.error(`[session-poll] ${sessionId} drain:`, e));
     };

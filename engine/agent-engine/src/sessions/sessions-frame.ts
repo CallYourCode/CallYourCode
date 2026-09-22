@@ -137,11 +137,9 @@ export function sessionList(ordered: readonly Session[] = orderedSessions()) {
        * rotation/gained detection already read `claudeSessionId`), but the
        * value is derived from the reader's DECLARED activity-event slot, not
        * the agent kind: any harness whose reader tails session events (claude,
-       * codex, opencode today) advertises its one harness session id here, so
+       * codex, opencode, pi) advertises its one harness session id here, so
        * the app paints the activity rows the ingest already logs. A reader
-       * without the slot (pi: its live events ride its socket, and its rows
-       * are claude-shaped none) stays null, exactly the old claude-only
-       * value for every such harness. */
+       * without the slot stays null, exactly the old claude-only value. */
       claudeSessionId: C().hasSessionEvents(s.agent.id) ? s.harnessSessionId : null,
       /* THE HARNESS SESSION ID this agent currently answers to, any harness,
        * or null while its pane has not said. An attribute of the row: it

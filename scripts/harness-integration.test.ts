@@ -22,6 +22,7 @@ import {
   mergeCodexHooks,
   mergeClaudeJson,
   mergeClaudeSettings,
+  mergePiSettings,
   MCP_LAUNCHER,
 } from "./harness-integration.ts"
 import { CallYourCode } from "../engine/harness/opencode/callyourcode.ts"
@@ -1058,4 +1059,57 @@ test("plugin factory: session.idle nudges the session once, then never again", a
     if (oldPane === undefined) delete process.env.HERDR_PANE_ID
     else process.env.HERDR_PANE_ID = oldPane
   }
+})
+
+// ---------------------------------------------------------------------------
+// pi: the cyc extension in ~/.pi/agent/settings.json `extensions`
+
+const PI_EXT = "/home/u/callyourcode/engine/harness/pi/cyc-output.js"
+
+test("pi: an empty settings file gets the extension", () => {
+  const r = mergePiSettings("", PI_EXT)
+  expect(r.changed).toBe(true)
+  expect(JSON.parse(r.text)).toEqual({ extensions: [PI_EXT] })
+})
+
+test("pi: every other key and extension is kept; re-running is a no-op", () => {
+  const before = JSON.stringify({
+    packages: ["npm:pi-claude-bridge"], defaultModel: "gpt-5.6-terra", extensions: ["/x/other.ts"],
+  })
+  const once = mergePiSettings(before, PI_EXT)
+  expect(once.changed).toBe(true)
+  const data = JSON.parse(once.text)
+  expect(data.packages).toEqual(["npm:pi-claude-bridge"])
+  expect(data.defaultModel).toBe("gpt-5.6-terra")
+  expect(data.extensions).toEqual(["/x/other.ts", PI_EXT])
+  const twice = mergePiSettings(once.text, PI_EXT)
+  expect(twice.changed).toBe(false)
+  expect(twice.text).toBe(once.text)
+})
+
+test("pi: an entry for a moved checkout is replaced in place, not duplicated", () => {
+  const old = JSON.stringify({ extensions: ["/a.ts", "/old/place/engine/harness/pi/cyc-output.js", "/b.ts"] })
+  const r = mergePiSettings(old, PI_EXT)
+  expect(JSON.parse(r.text).extensions).toEqual(["/a.ts", PI_EXT, "/b.ts"])
+})
+
+test("pi: a malformed file is refused loudly, never rewritten", () => {
+  expect(() => mergePiSettings("{not json", PI_EXT)).toThrow()
+  expect(() => mergePiSettings("[]", PI_EXT)).toThrow()
+  expect(() => mergePiSettings(JSON.stringify({ extensions: "x" }), PI_EXT)).toThrow()
+})
+
+test("cli: pi install writes the repo's extension path into pi settings, then re-runs clean", async () => {
+  const home = scratch()
+  const first = await runInstaller(home, [], "pi")
+  expect(first.code).toBe(0)
+  const file = join(home, ".pi", "agent", "settings.json")
+  const cfg = JSON.parse(readFileSync(file, "utf-8"))
+  const ext = join(REPO, "engine", "harness", "pi", "cyc-output.js")
+  expect(cfg.extensions).toEqual([ext])
+  expect(existsSync(ext)).toBe(true)
+  const second = await runInstaller(home, [], "pi")
+  expect(second.code).toBe(0)
+  expect(second.out).toContain("skip  settings.json")
+  expect(JSON.parse(readFileSync(file, "utf-8")).extensions).toEqual([ext])
 })
