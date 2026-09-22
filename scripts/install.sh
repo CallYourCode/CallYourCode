@@ -63,6 +63,12 @@ BUN_BIN="$HOME/.bun/bin/bun"
 # (`bash -s "bun-v1.4.0"`), verified against the current install script.
 BUN_PIN="bun-v1.4.0"
 
+# The piped `curl | sh` shell has a bare PATH, so tools living in personal
+# bin dirs (herdr, bun, brew) would look absent even when the user's own
+# shell sees them (live 2026-09-22: herdr present, invisible here, mux fell
+# to tmux). Look where they actually live.
+PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 # The engine's data home (the engine is moving to it). Created empty at 0700;
 # the engine mints its own files on first boot, the installer writes NONE.
 DATA_DIR="$HOME/.callyourcode"
