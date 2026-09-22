@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, test, expect } from "bun:test";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
-import { renderUsageCard, usageDedupe, usageCardPlugin, pollLimitsOnce, __usageCardTest, type UsagePollDeps } from "./index.ts";
+import { NO_ACTIVE_HARNESS, renderUsageCard, usageDedupe, usageCardPlugin, pollLimitsOnce, __usageCardTest, type UsagePollDeps } from "./index.ts";
 import { pluginDecl } from "../registry.ts";
 import { tmpDir } from "../../test-utils/tmp.ts";
 import { until, settle } from "../../test-utils/wait.ts";
@@ -334,6 +334,7 @@ test("force with a hung source returns the last-good after the bound, never blan
 
 test("cold render (no cache yet) never blanks and never claims logged-out", async () => {
   __usageCardTest.reset();
+  __usageCardTest.setColdWait(30); // the cold wait would otherwise ride out its full bound here
   __usageCardTest.setSource(() => new Promise<LimitsReport>(() => {})); // never resolves
   const out = await usageCardPlugin().card!.render();
   expect(out.html.length).toBeGreaterThan(0);     // a face, not empty
@@ -503,6 +504,7 @@ test("a torn or non-ok file on disk is ignored, and the cold face is served", as
   for (const junk of ["{not json", "null", "[]", JSON.stringify({ ok: false, fetchedAt: NOW })]) {
     writeFileSync(cacheFile, junk);
     __usageCardTest.reset();
+    __usageCardTest.setColdWait(30); // four cold renders; the full bound would blow the budget
     __usageCardTest.setSource(() => new Promise<LimitsReport>(() => {})); // never lands
     const out = await usageCardPlugin().card!.render();
     expect(out.html).toContain("check right now");
@@ -597,6 +599,42 @@ test("with no active harness answering usage the fold throws and the last-good c
   await __usageCardTest.refresh(false);
   expect(usageCalls).toEqual([]);          // an inactive harness is never asked
   expect(__usageCardTest.cache()).toBe(GOOD); // the throw did not blank the cache
+});
+
+/* ========== NO CARD ON A HARNESSLESS ENGINE (a fresh install) ================ */
+
+test("harnessless with no cache: a plain render refuses instead of drawing 'can't check' forever", async () => {
+  __usageCardTest.reset();
+  __usageCardTest.setColdWait(50);
+  const { factory } = fakeCore({ harnesses: [{ kind: "claude", active: false }], usage: () => GOOD });
+  const plugin = usageCardPlugin(factory);
+  // the FIRST poll already refuses: the cold wait lets the fold's refusal land
+  await expect(plugin.card!.render()).rejects.toThrow(NO_ACTIVE_HARNESS);
+});
+
+test("harnessless with no cache: the refresh button refuses the same way", async () => {
+  __usageCardTest.reset();
+  const { factory } = fakeCore({ harnesses: [], usage: () => GOOD });
+  const plugin = usageCardPlugin(factory);
+  await expect(plugin.card!.render({ force: true })).rejects.toThrow(NO_ACTIVE_HARNESS);
+});
+
+test("harnessless with a last-good cache: the card keeps rendering (a past harness earned it)", async () => {
+  __usageCardTest.reset();
+  __usageCardTest.seed(GOOD);
+  __usageCardTest.expireFloor();
+  const { factory } = fakeCore({ harnesses: [{ kind: "claude", active: false }], usage: () => GOOD });
+  const plugin = usageCardPlugin(factory);
+  const out = await plugin.card!.render();
+  expect(out.html).toContain("sam@example.com");
+});
+
+test("cold with a FAILING (non-refusal) source still serves the COLD face, never an error", async () => {
+  __usageCardTest.reset();
+  __usageCardTest.setColdWait(50);
+  __usageCardTest.setSource(async () => { throw new Error("upstream on fire"); });
+  const out = await usageCardPlugin().card!.render();
+  expect(out.html).toContain("check right now"); // COLD, not a refusal: usage may exist
 });
 
 /* ========== THE PLUGIN OWNS ITS TICKER (crons-shaped, injectable clock) ======= */

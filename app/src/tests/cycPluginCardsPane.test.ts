@@ -80,14 +80,15 @@ describe('usage-card transport', () => {
   });
 
   test('an engine that never had usage (no active harness) paints no card at all', async () => {
-    // A fresh box with no coding harness answers the usage fetch with exactly
-    // this refusal; there is no usage to show, so no card must appear (a
-    // permanent error card there is noise). An engine with a report keeps its
-    // card: the test above stays untouched.
+    // A fresh box with no coding harness refuses the card render; the engine's
+    // route wraps that refusal ("card render failed: Error: ..."), so the app
+    // matches by containment. There is no usage to show, so no card must
+    // appear (a permanent error card there is noise). An engine with a report
+    // keeps its card: the test above stays untouched.
     const orig = {...fake.response};
     (fake as {response: unknown}).response = {
       ok: false,
-      error: 'no active harness on this engine answers plan usage'
+      error: 'card render failed: Error: no active harness on this engine answers plan usage'
     };
     try {
       const container = document.createElement('div');

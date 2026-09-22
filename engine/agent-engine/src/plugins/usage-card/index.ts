@@ -306,6 +306,11 @@ let usageSource: UsageSource | null = null;
  * re-reads upstream (core.usage("claude", true) -> limitsNow(true)). */
 let usageCore: ((id: string) => PluginCore) | null = null;
 
+/* The refusal a harnessless engine answers. The app knows this exact sentence:
+ * it hides the card when the fetch fails with it (a fresh install with no
+ * coding harness has no usage to show, and a permanent error card is noise). */
+export const NO_ACTIVE_HARNESS = "no active harness on this engine answers plan usage";
+
 async function foldUsageOverHarnesses(core: (id: string) => PluginCore, force: boolean): Promise<UsageReport> {
   const c = core("usage-card");
   for (const h of await c.harnesses()) {
@@ -313,7 +318,7 @@ async function foldUsageOverHarnesses(core: (id: string) => PluginCore, force: b
     const u = await c.usage(h.kind, force);
     if (isUsageReport(u)) return u;
   }
-  throw new Error("no active harness on this engine answers plan usage");
+  throw new Error(NO_ACTIVE_HARNESS);
 }
 
 async function loadUsage(force: boolean): Promise<UsageReport> {
@@ -374,6 +379,11 @@ let lastRefreshAt = 0;      // when the last recompute COMPLETED (the floor's an
  * button, landing while a recompute runs, waits on THAT read rather than opening
  * a second one. null when nothing is in flight. */
 let inflightRefresh: Promise<void> | null = null;
+/* Why the last recompute failed (its error message), null after a success.
+ * Render reads it to tell "no cache yet" from "no cache and there never will
+ * be one": with no cache and the NO_ACTIVE_HARNESS refusal recorded, render
+ * refuses too instead of drawing "can't check right now" forever. */
+let lastRefreshError: string | null = null;
 
 /* The neutral face shown ONLY before the first recompute has landed (a cold
  * engine, first ever card). It renders as "can't check right now" for the split
@@ -394,8 +404,10 @@ export function refreshUsageCache(force = false): Promise<void> {
       lastReport = report;
       persistUsageCache(report);
       lastRefreshAt = Date.now();
-    } catch {
+      lastRefreshError = null;
+    } catch (e) {
       /* keep cachedReport as it was: a broken recompute is not a reason to blank */
+      lastRefreshError = e instanceof Error ? e.message : String(e);
     } finally {
       inflightRefresh = null;
     }
@@ -429,15 +441,23 @@ const REFRESH_FLOOR_S = 5;
 const FORCE_TIMEOUT_MS = 11_000;
 let forceTimeoutMs = FORCE_TIMEOUT_MS;
 
-/* Await a forced recompute, never longer than the bound. refreshUsageCache never
+/* The plain-poll twin of the force bound, used ONLY when there is no cache at
+ * all (a cold engine): render waits this long for the first recompute before
+ * falling back to the COLD face. Well under the route's poll budget (8s), and
+ * a harnessless fold refuses in milliseconds, so the refusal lands on the
+ * FIRST poll and the card never flashes. */
+const COLD_WAIT_MS = 3_000;
+let coldWaitMs = COLD_WAIT_MS;
+
+/* Await a recompute, never longer than the bound. refreshUsageCache never
  * rejects (it swallows the source), so this only races the clock: on the bound
  * it resolves and the caller renders the last-good cache. Sharing is automatic
  * -- refreshUsageCache returns the in-flight read when one is already running. */
-async function forceRefreshBounded(): Promise<void> {
+async function refreshBounded(force: boolean, boundMs: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const cap = new Promise<void>((resolve) => { timer = setTimeout(resolve, forceTimeoutMs); });
+  const cap = new Promise<void>((resolve) => { timer = setTimeout(resolve, boundMs); });
   try {
-    await Promise.race([refreshUsageCache(true), cap]);
+    await Promise.race([refreshUsageCache(force), cap]);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -529,6 +549,16 @@ export async function pollLimitsOnce(core: (id: string) => PluginCore, deps: Usa
   }
 }
 
+/* NO CARD ON A HARNESSLESS ENGINE. With no report ever computed AND the last
+ * recompute refusing because no active harness answers usage, render refuses
+ * with the same sentence instead of drawing the COLD face forever; the app
+ * hides the card on exactly this refusal. A cache from a past harness keeps
+ * rendering as before, and a cold engine whose first recompute has not
+ * finished still gets the COLD face (lastRefreshError is null then). */
+function refuseWhenNoUsageEver(): void {
+  if (!cachedReport && lastRefreshError === NO_ACTIVE_HARNESS) throw new Error(NO_ACTIVE_HARNESS);
+}
+
 /* The card surface (render/dedupe) reads the module cache; identical whether or
  * not this engine runs the poll loop, so it is one object both factory paths use. */
 const usageCard: PluginSpec["card"] = {
@@ -541,13 +571,21 @@ const usageCard: PluginSpec["card"] = {
       // not a person's explicit press), shares an in-flight recompute instead of
       // stacking a second read, and is time-bounded so a hung endpoint returns
       // the last-good cache rather than blanking the card.
-      await forceRefreshBounded();
+      await refreshBounded(true, forceTimeoutMs);
+      refuseWhenNoUsageEver();
       return renderUsageCard(cachedReport ?? COLD, Date.now());
     }
     // a plain poll: return the cached render at once and schedule a floored,
     // fire-and-forget background recompute. The RESPONSE is always the current
-    // cache, so N polls never become N (or N slow) recomputes.
+    // cache, so N polls never become N (or N slow) recomputes. The ONE cold
+    // exception: with no cache at all, briefly await that first recompute, so
+    // a harnessless engine refuses on the first poll instead of drawing
+    // "can't check right now" until the app's next cycle.
     scheduleRefresh(false, REFRESH_FLOOR_S * 1000);
+    if (!cachedReport) {
+      await refreshBounded(false, coldWaitMs);
+      refuseWhenNoUsageEver();
+    }
     return renderUsageCard(cachedReport ?? COLD, Date.now());
   },
   dedupe: () => usageDedupe(lastReport),
@@ -601,9 +639,10 @@ export function usageCardPlugin(core?: (id: string) => PluginCore, poll?: UsageP
  * the real `claude` usage. Not used by the engine. */
 export const __usageCardTest = {
   setSource(fn: UsageSource | null): void { usageSource = fn; },
-  reset(): void { usageSource = null; usageCore = null; cachedReport = null; lastReport = null; lastRefreshAt = 0; inflightRefresh = null; forceTimeoutMs = FORCE_TIMEOUT_MS; },
+  reset(): void { usageSource = null; usageCore = null; cachedReport = null; lastReport = null; lastRefreshAt = 0; inflightRefresh = null; lastRefreshError = null; forceTimeoutMs = FORCE_TIMEOUT_MS; coldWaitMs = COLD_WAIT_MS; },
   setCacheFile(path: string): void { cacheFileOverride = path; },
   setForceTimeout(ms: number): void { forceTimeoutMs = ms; },
+  setColdWait(ms: number): void { coldWaitMs = ms; },
   seed(report: UsageReport): void { cachedReport = report; lastReport = report; lastRefreshAt = Date.now(); },
   /* pretend the floor has elapsed, so the next render's recompute is due */
   expireFloor(): void { lastRefreshAt = 0; },

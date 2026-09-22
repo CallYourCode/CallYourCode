@@ -178,15 +178,17 @@ export function createPluginCardsPane(deps: PluginCardsDeps) {
     lastCardTab = sessionState.activeTabId;
 
     const {container, anchor} = deps.mountPoints();
-    /* NEVER-ANY-USAGE IS NO CARD. An engine with no active harness answers the
-     * usage fetch with exactly this refusal (engine plugins/usage-card
-     * foldUsageOverHarnesses), and a box that never produced a report has no
+    /* NEVER-ANY-USAGE IS NO CARD. An engine with no active harness refuses the
+     * card render with this sentence (engine plugins/usage-card
+     * refuseWhenNoUsageEver), and a box that never produced a report has no
      * usage to show; a permanent error card there is noise (a fresh install
-     * with no coding harness). An engine with a report (g.answer, cache
-     * included) keeps its card exactly as before. */
+     * with no coding harness). Matched by containment because the engine's
+     * route wraps a render refusal ("card render failed: Error: ..."). An
+     * engine with a report (g.answer, cache included) keeps its card exactly
+     * as before. */
     const NO_USAGE = 'no active harness on this engine answers plan usage';
     const wanted = [...groups.values()].filter(
-      (g) => g.answer !== null || g.neverError !== NO_USAGE
+      (g) => g.answer !== null || !(g.neverError ?? '').includes(NO_USAGE)
     );
     const wantedKeys = new Set(wanted.map((g) => g.key));
 

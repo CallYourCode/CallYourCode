@@ -483,14 +483,15 @@ test("a harness engine holds a made-up token, and reaches nothing at all", async
    * state every spec in this repo runs against, so it is worth proving once
    * that it is the state and not an accident.
    *
-   * Read through the usage card (the /limits route is gone): a face that never
-   * claims numbers and never claims logged-out. No `uc-track` means no bars,
-   * which means no numbers were reached from anywhere. */
+   * Read through the usage card (the /limits route is gone). This engine has
+   * no LIVE agent, so the card route REFUSES with the no-active-harness
+   * sentence (the app hides the card on it): the strongest possible form of
+   * "no numbers were reached from anywhere" -- there is no face at all. */
   const card = await (await fetch(`${e.http}/plugin/usage-card/card`)).json() as
-    { ok?: boolean; html?: string };
-  expect(card.ok, "the usage card route did not answer").toBe(true);
-  expect(String(card.html)).toMatch(/can&#39;t check right now|can't check right now|not signed in|could not check/);
-  expect(String(card.html),
+    { ok?: boolean; html?: string; error?: string };
+  expect(card.ok, "a harnessless engine must refuse the usage card").toBe(false);
+  expect(String(card.error)).toContain("no active harness on this engine answers plan usage");
+  expect(String(card.html ?? ""),
     "the card drew usage bars, so this engine reached an upstream that answered with numbers")
     .not.toContain(String.raw`class="uc-track"`);
 }, 60_000);
