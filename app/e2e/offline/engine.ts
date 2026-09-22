@@ -15,9 +15,9 @@ import {
   verifySecPairTag,
   keyId,
   type EngineIdentity
-} from '../../src/engine/e2e';
-import {Reassembler, fragment} from '../../src/engine/dcpipe';
-import {ReqReassembler, encodeRes, TunnelError, type ReqComplete} from '../../src/engine/tunnel';
+} from '../../../engine/shared/e2e';
+import {Reassembler, fragment} from '../../../engine/shared/dcpipe';
+import {ReqReassembler, encodeRes, TunnelError, type ReqComplete} from '../../../engine/shared/tunnel';
 
 const te = new TextEncoder();
 

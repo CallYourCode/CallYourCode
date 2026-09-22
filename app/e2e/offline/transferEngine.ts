@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 import {startEngine, type TestEngine} from './engine';
-import type {ReqComplete} from '../../src/engine/tunnel';
+import type {ReqComplete} from '../../../engine/shared/tunnel';
 
 // A resumable-transfer engine for the offline rig. It speaks the real sealed
 // tunnel (startEngine) and serves the /transfer/* routes the app's worker drives,

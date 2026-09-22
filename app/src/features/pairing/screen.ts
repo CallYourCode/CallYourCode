@@ -654,6 +654,22 @@ export function mountPairingScreen(
       if (!row) {
         const known = engines.find((e) => e.engineId === engineId);
         if (known) {
+          /* THE REBUILT-ENGINE RE-PAIR (live 2026-09-22, reproduced in
+           * pairing-repair.spec.ts): a machine wiped and reinstalled under
+           * the SAME name arrives with a fresh pair link while the keyring
+           * still holds the OLD engine's record for that user@host. That
+           * stale record made this branch skip the row, so the held key was
+           * consumed below without ever reaching "Key received", and the
+           * screen sat on "Pairing..." until a reload. A followed link IS
+           * the user's decision to pair THIS engine now: drop the stale
+           * record so the whole flow (row, confirm, completion detection,
+           * the client's pin fallback) behaves like a first pairing. */
+          if (heldPair && rowPaired(known.userHost, known.url || null, paired)) {
+            try {
+              await keyring.deleteKey(known.userHost);
+            } catch {}
+            paired.delete(known.userHost);
+          }
           if (!rowPaired(known.userHost, known.url || null, paired)) {
             row = buildRow(known, known.engineId, known.userHost, known.url || null);
           }

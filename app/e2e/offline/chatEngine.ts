@@ -1,6 +1,6 @@
 import type {WebSocket as WS} from 'ws';
 import {startEngine, type TestEngine, type TunnelReply} from './engine';
-import type {ReqComplete} from '../../src/engine/tunnel';
+import type {ReqComplete} from '../../../engine/shared/tunnel';
 
 /* The sealed rig (engine.ts) carries frames; it has no idea what a chat is.
  * This is the chat the offline acceptance tests (offline design v2, section

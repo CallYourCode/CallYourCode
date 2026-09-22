@@ -2,7 +2,7 @@ import {expect, test, type Page} from '@playwright/test';
 import {execFileSync} from 'node:child_process';
 import {copyFileSync, mkdirSync, readdirSync, readFileSync, statSync} from 'node:fs';
 import {dirname, resolve} from 'node:path';
-import {b64encode} from '../../src/engine/e2e';
+import {b64encode} from '../../../engine/shared/e2e';
 import {registeredEngine, type RegisteredEngine} from './engine';
 
 async function waitRegistered(port: number): Promise<RegisteredEngine> {
