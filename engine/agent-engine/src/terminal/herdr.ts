@@ -362,13 +362,17 @@ export class HerdrClient implements Multiplexer {
      * broke here live (2026-09-22, MusicBrowser reopen on k8plus): the blind
      * 400ms sleep typed the launch while an oh-my-zsh "update? [Y/n]" prompt
      * was consuming stdin, the first character was eaten (`env` -> `nv`,
-     * command not found) and claude never started. Three steps, each proven
-     * against a capture:
+     * command not found) and claude never started. Three steps:
      *   1. wait for the prompt to be painted before typing (awaitPrompt);
-     *   2. VERIFY THE TYPED LINE: the tail check alone cannot catch a
-     *      head-mangled command (the eaten `e` left the tail intact), so the
-     *      flattened screen must CONTAIN the whole command; a mangled line is
-     *      cleared (ctrl+u) and retyped, bounded;
+     *   2. VERIFY THE TYPED LINE by whole-command containment (a head-mangled
+     *      command leaves the tail intact, so a tail check cannot catch it);
+     *      a mangled line is ABANDONED WITH CTRL+C, not ctrl+u, and retyped
+     *      after a fresh prompt. ctrl+c is load-bearing: ctrl+u clears only to
+     *      the start of the CURRENT line, so a long command that already
+     *      wrapped keeps its earlier lines and the retype concatenates onto
+     *      them (proven live the same night: a long pi launch became
+     *      `...cyc-output.jsenv CYC_...`). ctrl+c abandons the whole multi-line
+     *      input, so the retype always starts clean;
      *   3. confirm the Enter actually submitted (the tmux dropped-Enter
      *      rescue), resending while the launch still sits typed on the line
      *      and no agent has come up on the pane. */
@@ -376,10 +380,11 @@ export class HerdrClient implements Multiplexer {
     for (let attempt = 0; attempt < SPAWN_TYPE_TRIES; attempt++) {
       await this.sendText(paneId, opts.command);
       await new Promise((r) => setTimeout(r, SPAWN_VERIFY_MS));
-      const { text } = await this.readPane(paneId, SPAWN_READ_LINES);
+      const { text } = await this.readPane(paneId, SPAWN_READ_LINES).catch(() => ({ text: "" as string }));
       if (commandTypedIntact(text, opts.command)) break;
       if (attempt === SPAWN_TYPE_TRIES - 1) break; // out of budget: submit what is there
-      await this.sendKeys(paneId, "ctrl+u");       // clear the mangled input line
+      await this.sendKeys(paneId, "ctrl+c");        // abandon the WHOLE input, wrapped lines and all
+      await this.awaitPrompt(paneId);               // wait for the fresh prompt before retyping
     }
     await this.sendKeys(paneId, "enter");
     await this.confirmSubmitted(paneId, opts.command);
