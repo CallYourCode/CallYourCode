@@ -679,19 +679,45 @@ test("tailnetServeBase: scoped instance or a non-loopback base refuses before an
   expect(calls).toHaveLength(0);
 });
 
-test("tailnetServeBase: present -> serve -> https base, in that order", async () => {
+const PROBE_OK = async () => true;
+
+test("tailnetServeBase: present -> serve -> cert -> probed https base, in that order", async () => {
   const calls: string[][] = [];
   const run = async (cmd: string[]) => {
     calls.push(cmd);
     if (cmd[1] === "status") return { code: 0, out: TS_RUNNING };
     return { code: 0, out: "" };
   };
-  expect(await tailnetServeBase(DEFAULT_APP_URL, run)).toBe("https://box.tail42.ts.net");
+  const probed: string[] = [];
+  const probeFn = async (url: string) => { probed.push(url); return true; };
+  expect(await tailnetServeBase(DEFAULT_APP_URL, run, () => {}, undefined, probeFn)).toBe("https://box.tail42.ts.net");
   expect(calls.map((c) => c.join(" "))).toEqual([
     "tailscale version",
     `tailscale serve --bg ${TS_PORT}`,
     "tailscale status --json",
+    "tailscale cert --cert-file /dev/null --key-file /dev/null box.tail42.ts.net",
   ]);
+  expect(probed).toEqual(["https://box.tail42.ts.net/"]);
+});
+
+test("tailnetServeBase: a dead link is never printed; certs-off names the toggle", async () => {
+  const said: string[] = [];
+  const okRun = async (cmd: string[]) =>
+    cmd[1] === "status" ? { code: 0, out: TS_RUNNING } : { code: 0, out: "" };
+
+  // everything green but the page never answers: fall back, loudly
+  expect(await tailnetServeBase(DEFAULT_APP_URL, okRun, (l) => said.push(l), undefined, async () => false)).toBeNull();
+  expect(said.join("\n")).toContain("not answering");
+
+  // cert refused with a tailscale approval link and nobody to ask: name the toggle
+  said.length = 0;
+  const certOff = async (cmd: string[]) => {
+    if (cmd[1] === "cert") return { code: 1, out: "HTTPS cert support not enabled: https://login.tailscale.com/f/https?node=n1" };
+    if (cmd[1] === "status") return { code: 0, out: TS_RUNNING };
+    return { code: 0, out: "" };
+  };
+  expect(await tailnetServeBase(DEFAULT_APP_URL, certOff, (l) => said.push(l), undefined, PROBE_OK)).toBeNull();
+  expect(said.join("\n")).toContain("HTTPS Certificates");
 });
 
 test("tailnetServeBase: no tailscale is a silent fallback; a failed serve says why", async () => {
@@ -732,7 +758,7 @@ test("tailnetServeBase: serve-not-enabled hands the approval link to ask and ret
 
   const asked: string[] = [];
   const yes = async (u: string) => { asked.push(u); return true; };
-  expect(await tailnetServeBase(DEFAULT_APP_URL, run, () => {}, yes)).toBe("https://box.tail42.ts.net");
+  expect(await tailnetServeBase(DEFAULT_APP_URL, run, () => {}, yes, PROBE_OK)).toBe("https://box.tail42.ts.net");
   expect(asked).toEqual([ENABLE]);
   expect(serveTries).toBe(2);
 
@@ -752,5 +778,5 @@ test("tailnetServeBase: a version-skew warning around the status JSON still pars
     if (cmd[1] === "status") return { code: 0, out: `Warning: client version "1.98.8" != tailscaled server version "1.102.4"\n${TS_RUNNING}` };
     return { code: 0, out: "" };
   };
-  expect(await tailnetServeBase(DEFAULT_APP_URL, warned)).toBe("https://box.tail42.ts.net");
+  expect(await tailnetServeBase(DEFAULT_APP_URL, warned, () => {}, undefined, PROBE_OK)).toBe("https://box.tail42.ts.net");
 });

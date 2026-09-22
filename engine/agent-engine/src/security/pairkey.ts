@@ -408,6 +408,7 @@ export async function tailnetServeBase(
    * needs a one-time admin OK. Answer true to retry the serve, false to
    * fall back. No `ask` (tests, non-tty) falls back straight away. */
   ask?: (enableUrl: string) => Promise<boolean>,
+  probeFn: (url: string) => Promise<boolean> = probe,
 ): Promise<string | null> {
   const skip = (why: string): null => {
     say(`tailscale skipped: ${why} (using the localhost link)`);
@@ -420,17 +421,20 @@ export async function tailnetServeBase(
   if (!u.port) return null;
   const present = await run(["tailscale", "version"]);
   if (present.code !== 0) return null; // no tailscale on this machine: nothing to say
-  let served = await run(["tailscale", "serve", "--bg", u.port]);
-  /* "Serve is not enabled on your tailnet": tailscale hands back a one-time
-   * admin approval link. Walk the user through it right here (live
-   * 2026-09-22: burying that link in a fallback line made a working setup
-   * look broken) and retry once they say it is enabled. */
-  const enable = served.code !== 0 ? served.out.match(/https:\/\/login\.tailscale\.com\/\S+/) : null;
-  if (enable && ask) {
-    while (served.code !== 0 && (await ask(enable[0]))) {
-      served = await run(["tailscale", "serve", "--bg", u.port]);
+  /* Tailnet features (Serve, HTTPS certificates) each need a one-time admin
+   * approval, and tailscale's error hands back the approval link. Walk the
+   * user through it right here (live 2026-09-22: burying the link in a
+   * fallback line made a working setup look broken) and retry once they say
+   * it is enabled. */
+  const withApproval = async (cmd: string[]) => {
+    let r = await run(cmd);
+    const link = r.code !== 0 ? r.out.match(/https:\/\/login\.tailscale\.com\/\S+/) : null;
+    if (link && ask) {
+      while (r.code !== 0 && (await ask(link[0]))) r = await run(cmd);
     }
-  }
+    return r;
+  };
+  const served = await withApproval(["tailscale", "serve", "--bg", u.port]);
   if (served.code !== 0) return skip(`\`tailscale serve --bg ${u.port}\` failed: ${served.out.trim().slice(0, 200) || "no output"}`);
   const st = await run(["tailscale", "status", "--json"]);
   let dns = "";
@@ -443,7 +447,36 @@ export async function tailnetServeBase(
     } catch { /* fall through to the skip below */ }
   }
   if (!dns) return skip("served, but no tailnet machine name found");
+  /* Serve accepting the port is NOT a working link (live 2026-09-22: the
+   * printed link answered TLS internal errors because the tailnet's HTTPS
+   * certificates toggle was off, a separate approval from Serve). Mint the
+   * certificate now, walking through its approval link the same way, then
+   * prove the page answers before the link is ever printed. */
+  const cert = await withApproval(["tailscale", "cert", "--cert-file", "/dev/null", "--key-file", "/dev/null", dns]);
+  if (cert.code !== 0 && /login\.tailscale\.com/.test(cert.out)) {
+    return skip(
+      "the tailnet's HTTPS Certificates toggle is off; enable it at" +
+      " https://login.tailscale.com/admin/dns and rerun",
+    );
+  }
+  /* Any other cert stumble (slow first mint, version skew) is not a verdict;
+   * the probe below is. A first Let's Encrypt mint can take a minute. */
+  const answers = await probeFn(`https://${dns}/`);
+  if (!answers) return skip(`https://${dns}/ is served but not answering; the https certificate may still be minting -- rerun in a minute`);
   return `https://${dns}`;
+}
+
+/* The final proof: the link cyc pair prints must actually answer. Certificate
+ * minting can lag a few seconds behind `tailscale cert`, so poll briefly. */
+async function probe(url: string, tries = 5, fetcher: typeof fetch = fetch): Promise<boolean> {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetcher(url, { signal: AbortSignal.timeout(5_000) });
+      if (r.ok) return true;
+    } catch { /* not up yet */ }
+    await new Promise((res) => setTimeout(res, 2_000));
+  }
+  return false;
 }
 
 /* Hard cap on every tailscale call. `tailscale serve` can sit waiting on
