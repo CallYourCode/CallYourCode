@@ -377,6 +377,21 @@ test("the engine service unit puts .local/bin + .bun/bin on PATH so it can spawn
   expect(plistPath).toContain("$HOME/.bun/bin");
 });
 
+test("the installer writes ~/.callyourcode/env and the hint sources it (same-shell PATH gap)", async () => {
+  const script = await Bun.file(join(REPO_ROOT, "scripts/install.sh")).text();
+
+  // A child process can never change the calling shell's PATH, so the
+  // advertised one-liner ends with `&& . ~/.callyourcode/env`, and the
+  // installer must write that env file with the PATH line.
+  expect(script).toContain('write_file "$DATA_DIR/env"');
+  expect(script).toContain('export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"');
+
+  // the not-on-PATH hint names the source line, not a raw export
+  expect(script).toContain(". ~/.callyourcode/env");
+  // and the one-liner in the header carries the sourcing tail
+  expect(script).toContain("install.sh | sh && . ~/.callyourcode/env");
+});
+
 test("engine unit is KillMode=process so a restart never kills the tmux server + agents", async () => {
   const script = await Bun.file(join(REPO_ROOT, "scripts/install.sh")).text();
 

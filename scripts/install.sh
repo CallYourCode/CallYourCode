@@ -2,7 +2,7 @@
 #
 # CallYourCode install one-liner (onboarding).
 #
-#   curl -fsSL https://callyourcode.com/install.sh | sh
+#   curl -fsSL https://callyourcode.com/install.sh | sh && . ~/.callyourcode/env
 #
 # The seamless one-shot: installs bun if needed, clones or updates the repo to
 # ~/callyourcode, builds the app frontend at app/,
@@ -300,6 +300,16 @@ echo "app bundle: $DIST_DIR"
 # --- data dir (created empty; the engine mints its own files on first boot) ---
 echo "data: $DATA_DIR (0700, no files written)"
 run mkdir -p -m 0700 "$DATA_DIR"
+
+# THE ENV FILE THE ONE-LINER SOURCES. A child process can never change its
+# parent shell's PATH, so no amount of sourcing rc files in here makes `cyc`
+# available in the shell that ran the installer. The advertised one-liner is
+#   curl -fsSL https://callyourcode.com/install.sh | sh && . ~/.callyourcode/env
+# and that trailing source runs IN THE CALLING SHELL, so `cyc pair` works
+# immediately whether or not bun was preinstalled (the bun pattern).
+write_file "$DATA_DIR/env" <<'EOF'
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+EOF
 run chmod 0700 "$DATA_DIR"
 
 # --- STUN/TURN config (shared turn.env) ---
@@ -799,7 +809,7 @@ echo
 if ! command -v cyc >/dev/null 2>&1; then
   echo "cyc lives in ~/.bun/bin, which this shell has not picked up yet. Run:"
   echo
-  echo "    export PATH=\"\$HOME/.bun/bin:\$PATH\""
+  echo "    . ~/.callyourcode/env"
   echo
   echo "(New shells have it already.)"
   echo

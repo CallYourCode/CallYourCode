@@ -147,7 +147,7 @@ One line installs everything: Bun if missing, the repo to `~/callyourcode`,
 wiring for every agent it detects, and the services:
 
 ```sh
-curl -fsSL https://callyourcode.com/install.sh | sh
+curl -fsSL https://callyourcode.com/install.sh | sh && . ~/.callyourcode/env
 ```
 
 Then link your phone and go:
