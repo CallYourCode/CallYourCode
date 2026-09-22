@@ -36,7 +36,9 @@ const DEFAULTS: GlobalSettings = {
   sound: true,
   activity: true,
 
-  replyLevel: 3,
+  /* Chat, not Read out: on a fresh install the voice engine is still
+   * downloading its models, so a speech default would answer into silence. */
+  replyLevel: 2,
   complexity: 3,
 
   verbosityOn: true,
