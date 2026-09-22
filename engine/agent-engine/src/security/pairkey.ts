@@ -395,16 +395,11 @@ export async function runCloudOnboard(facts: PairFacts, base = cloudBaseUrl()): 
  *  the app on https://<machine>.<tailnet>.ts.net with a real certificate,
  *  which the phone wants anyway: PWA install, the mic and the service worker
  *  all need a secure context, and localhost is not one from another device.
- *  Every refusal falls back to the plain link, and each one SAYS WHY through
- *  `say` (the 2026-09-22 field debug ran blind because these were silent):
- *  - CYC_DATA_DIR set: a scoped instance (a test, a dev run) does not own the
- *    machine's tailnet and must never rewrite its serve config.
- *  - base not loopback: an operator already chose an address; respect it.
- *  - no tailscale binary, daemon not Running, no DNS name.
- *  - `tailscale serve status` shows a config that is NOT ours: never clobber
- *    something the user serves already.
- *  - the serve command itself refusing (an old CLI without --bg, missing
- *    operator rights, client/daemon version skew). */
+ *  Simple by order (Shikher, 2026-09-22): tailscale present -> try the serve;
+ *  can't -> say why and fall back to the localhost link. The only silent
+ *  refusals are the ones with nothing to tell a user: a scoped instance
+ *  (CYC_DATA_DIR: a test or dev run must never rewrite the machine's serve
+ *  config), an operator-chosen non-loopback base, and no tailscale at all. */
 export async function tailnetServeBase(
   base: string,
   run: (cmd: string[]) => Promise<{ code: number; out: string }> = runOut,
@@ -414,31 +409,26 @@ export async function tailnetServeBase(
     say(`tailscale skipped: ${why} (using the localhost link)`);
     return null;
   };
-  if (process.env.CYC_DATA_DIR) return null; // scoped instance: silent by design
+  if (process.env.CYC_DATA_DIR) return null;
   let u: URL;
-  try { u = new URL(base); } catch { return skip(`app url unreadable: ${base}`); }
-  if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") return null; // operator chose an address
-  if (!u.port) return skip(`app url has no port: ${base}`);
-  const st = await run(["tailscale", "status", "--json"]);
-  if (st.code !== 0) return skip("`tailscale status` failed (no tailscale, or not running)");
-  let dns = "";
-  try {
-    /* A version-skewed tailscale prints warning lines around the JSON; parse
-     * from the first brace so a warning never reads as a broken install. */
-    const braced = st.out.slice(st.out.indexOf("{"));
-    const j = JSON.parse(braced) as { BackendState?: string; Self?: { DNSName?: string } };
-    if (j?.BackendState !== "Running") return skip(`tailscale backend is ${j?.BackendState ?? "unknown"}, not Running`);
-    dns = (j?.Self?.DNSName ?? "").replace(/\.+$/, "");
-  } catch {
-    return skip("`tailscale status` output was not readable JSON");
-  }
-  if (!dns) return skip("this machine has no tailnet DNS name");
-  const existing = await run(["tailscale", "serve", "status"]);
-  if (existing.code === 0 && existing.out.trim() && !existing.out.includes(`127.0.0.1:${u.port}`)) {
-    return skip("tailscale already serves something else; not touching it");
-  }
+  try { u = new URL(base); } catch { return null; }
+  if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") return null;
+  if (!u.port) return null;
+  const present = await run(["tailscale", "version"]);
+  if (present.code !== 0) return null; // no tailscale on this machine: nothing to say
   const served = await run(["tailscale", "serve", "--bg", u.port]);
   if (served.code !== 0) return skip(`\`tailscale serve --bg ${u.port}\` failed: ${served.out.trim().slice(0, 200) || "no output"}`);
+  const st = await run(["tailscale", "status", "--json"]);
+  let dns = "";
+  if (st.code === 0) {
+    try {
+      /* A version-skewed tailscale prints warning lines around the JSON;
+       * parse from the first brace so a warning never hides the name. */
+      const j = JSON.parse(st.out.slice(st.out.indexOf("{"))) as { Self?: { DNSName?: string } };
+      dns = (j?.Self?.DNSName ?? "").replace(/\.+$/, "");
+    } catch { /* fall through to the skip below */ }
+  }
+  if (!dns) return skip("served, but no tailnet machine name found");
   return `https://${dns}`;
 }
 
