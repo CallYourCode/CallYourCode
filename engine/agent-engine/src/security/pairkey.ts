@@ -432,13 +432,24 @@ export async function tailnetServeBase(
   return `https://${dns}`;
 }
 
+/* Hard cap on every tailscale call. `tailscale serve` can sit waiting on
+ * interactive input (enable-HTTPS prompts and the like); with stdin ignored
+ * that is a forever-hang, and it froze a live `cyc pair` on 2026-09-22. */
+const RUN_CAP_MS = 15_000;
+
 async function runOut(cmd: string[]): Promise<{ code: number; out: string }> {
   try {
     // stderr rides along so a failed command's reason survives into the skip line.
     const p = Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const timer = setTimeout(() => { try { p.kill(); } catch {} }, RUN_CAP_MS);
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
     const code = await p.exited;
-    return { code, out: code === 0 ? out : `${out}\n${err}`.trim() };
+    clearTimeout(timer);
+    if (code !== 0) {
+      const detail = `${out}\n${err}`.trim();
+      return { code, out: detail || `timed out or was killed after ${RUN_CAP_MS / 1000}s` };
+    }
+    return { code, out };
   } catch {
     return { code: -1, out: "" };
   }
