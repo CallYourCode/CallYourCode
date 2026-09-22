@@ -251,8 +251,12 @@ echo "bun: $BUN"
 if [ "$LOCAL" = 1 ]; then
   echo "repo: local mode -- using existing $REPO_DIR (no clone/pull)"
 elif [ -d "$REPO_DIR/.git" ]; then
+  # The installed repo is an artifact the installer owns: update means "become
+  # the published main", never a merge. A bare `pull --ff-only` died on any
+  # checkout without tracking info (live 2026-09-22), so align explicitly.
   echo "repo: update $REPO_DIR"
-  run git -C "$REPO_DIR" pull --ff-only
+  run git -C "$REPO_DIR" fetch --depth 1 origin main
+  run git -C "$REPO_DIR" checkout -q -B main FETCH_HEAD
 elif [ -d "$REPO_DIR" ]; then
   echo "FAILED: $REPO_DIR exists but is not a git checkout (no .git)." >&2
   echo "  Re-run with --local to install from it as-is, or remove it to clone fresh." >&2
