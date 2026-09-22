@@ -12,6 +12,7 @@
  */
 
 import { realClock, type Clock } from "../runtime/clock.ts";
+import { modelDisplayName } from "./model-names.ts";
 
 export const CONTEXT_POLL_MS = 8000;
 
@@ -177,8 +178,13 @@ export async function refreshContext(s: CtxSession): Promise<boolean> {
   if (had && had.size === size) return false;
   const read = await deps.contextRead(s.muxHandle);
   if (!read) return false;
-  contextByKey.set(key, { size, pct: read.pct, modelId: null, modelName: read.model });
-  return !had || had.pct !== read.pct || had.modelName !== read.model;
+  // The generic read hands back the transcript's RAW model id (a pi pane on the
+  // claude bridge writes "claude-fable-5"); map it to the display name here,
+  // exactly as the claude branch stores an already-mapped name, so the sessions
+  // list never prints a raw id where every other row prints "Fable 5".
+  const modelName = read.model === null ? null : modelDisplayName(read.model);
+  contextByKey.set(key, { size, pct: read.pct, modelId: read.model, modelName });
+  return !had || had.pct !== read.pct || had.modelName !== modelName;
 }
 
 /* Claude Code's own title: the second source for a session's one title

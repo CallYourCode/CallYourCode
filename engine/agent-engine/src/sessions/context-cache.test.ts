@@ -79,6 +79,30 @@ test("an unchanged file is not re-read (the size short-circuit)", async () => {
   expect(contextReadCalls).toBe(1);
 });
 
+test("a non-claude session's raw model id is mapped to its display name", async () => {
+  // A pi pane on the claude bridge writes the RAW id "claude-fable-5" into its
+  // transcript; the generic branch must store the mapped name, not the raw id
+  // (the sessions list printed "claude-fable-5" next to "Fable 5" rows).
+  const piSession: CtxSession = {
+    id: "s2", harnessSessionId: null, agent: { id: "pi" }, hasTranscript: true,
+    cwd: CWD, muxHandle: "w1:p6", alive: true,
+  };
+  resetForTest();
+  initContextCache({
+    sessions: () => [piSession],
+    transcriptFile: () => ({ path }),
+    contextRead: async () => ({ pct: 26, model: "claude-fable-5" }),
+    claudeTranscriptPath: () => null,
+    claudeContextRead: async () => null,
+    claudeTitleRead: async () => null,
+    broadcastSessions: () => {},
+    clock: manualClock(),
+  });
+  await pollOnce();
+  expect(contextPctOf(piSession)).toBe(26);
+  expect(modelOf(piSession)).toBe("Fable 5");
+});
+
 test("a grown file is re-read and the new answer replaces the old", async () => {
   await pollOnce();
   expect(modelAcronymOf(session)).toBe("O4.8");
