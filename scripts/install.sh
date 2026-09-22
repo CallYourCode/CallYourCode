@@ -421,42 +421,31 @@ PLIST_TURN_ENV="		<key>TURN_HOST</key>
 		<key>TURN_STATIC_SECRET</key>
 		<string>$TURN_STATIC_SECRET</string>"
 
-# --- dependency: the multiplexer (tmux the default, herdr the opt-in) ---
-# The engine needs ONE terminal multiplexer for the sessions to live in. tmux
-# is the default: people already have it, so the default path never touches
-# the network for this step and never runs the herdr.dev installer; it only
-# confirms tmux is present (guaranteed by the prereq gate above).
-# CYC_MUX=herdr opts into the herdr upgrade: keep it CURRENT, not merely
-# present (an out-of-date herdr breaks the engine's pane subscription -- the
-# engine needs herdr's newer event API, e.g. pane.updated -- so a stale herdr
-# means the engine sees zero agents). Update via the manager that owns it:
-# brew on macOS if brew installed it, else the herdr.dev installer.
+# --- dependency: the multiplexer (herdr when present, tmux otherwise) ---
+# The engine needs ONE terminal multiplexer for the sessions to live in.
+# A present herdr is USED AS-IS: never upgraded, never restarted (live
+# 2026-09-22: the old keep-it-current step restarted the herdr server and
+# killed every open pane, including the one the installer ran in). The one
+# check is the version floor: the engine's pane subscription needs herdr's
+# 0.7.5+ event API, and an older running herdr means the engine sees zero
+# agents, so we stop and say so rather than half-work.
 echo "deps: multiplexer"
-_herdr_before=none
-_herdr_after=none
-HERDR_RESTART_NEEDED=0
 if [ "$MUX" = "herdr" ]; then
   if [ "${CYC_MUX:-}" = "herdr" ]; then
     echo "deps: herdr (opted in via CYC_MUX=herdr)"
   else
     echo "deps: herdr (already on this machine; CYC_MUX=tmux overrides)"
   fi
-  _herdr_before="$(herdr --version 2>/dev/null | head -1 || echo none)"
-  if command -v brew >/dev/null 2>&1 && brew list herdr >/dev/null 2>&1; then
-    run_sh "brew upgrade herdr 2>/dev/null || brew install herdr"
-  else
-    run_sh "curl -fsSL https://herdr.dev/install.sh | sh"
-  fi
-  _herdr_after="$(herdr --version 2>/dev/null | head -1 || echo none)"
-  echo "herdr: $_herdr_after"
-  # If the binary was actually upgraded, the RUNNING herdr server is still the
-  # old version and the engine cannot use it until it is restarted (herdr has no
-  # in-place restart; `herdr server stop` is the only way, and the next herdr
-  # use starts the new-version server). We do that at the very END of the
-  # installer, after the closing message, since the stop exits pane processes.
-  if [ "$_herdr_before" != "none" ] && [ "$_herdr_before" != "$_herdr_after" ]; then
-    HERDR_RESTART_NEEDED=1
-  fi
+  _hv="$(herdr --version 2>/dev/null | head -1 || echo none)"
+  echo "herdr: $_hv (left exactly as it is; this installer never upgrades or restarts herdr)"
+  case "$_hv" in
+    "herdr 0."[0-6].*|"herdr 0.7."[0-4])
+      echo "FAILED: herdr $_hv is older than 0.7.5, which the engine needs to see panes." >&2
+      echo "  Update herdr yourself (brew upgrade herdr, or curl -fsSL https://herdr.dev/install.sh | sh)," >&2
+      echo "  restart herdr when it suits you, then re-run this installer." >&2
+      [ "$DRY_RUN" = 1 ] || exit 1
+      ;;
+  esac
   echo "mux: herdr"
 else
   echo "deps: tmux"
@@ -846,10 +835,5 @@ echo
 echo "That is the one interactive step: a Local / Cloud menu, then the link to open."
 echo "Run 'cyc help' to see every command."
 
-if [ "$HERDR_RESTART_NEEDED" = 1 ] && [ "$DRY_RUN" != 1 ]; then
-  echo
-  echo "herdr was updated ($_herdr_before -> $_herdr_after); restarting its server so"
-  echo "the new version takes effect. This EXITS any current herdr panes; herdr"
-  echo "starts fresh on next use and the engine reconnects on its own."
-  herdr server stop 2>/dev/null || true
-fi
+# Nothing here may touch the running herdr server: stopping it exits every
+# pane, including the one this installer may be running in (live 2026-09-22).
