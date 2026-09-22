@@ -787,11 +787,20 @@ EOF
   fi
   for plist in $CYC_BOOTSTRAP_PLISTS; do
     label=$(basename "$plist" .plist)
+    # A loaded service must be fully unloaded and loaded again: kickstart -k
+    # relaunches it with the OLD plist environment, so a setting this install
+    # just wrote (CYC_MUX, ports) silently never lands (live 2026-09-22: the
+    # reinstall wrote herdr and the engine came back on tmux until a manual
+    # cyc stop/start did bootout+bootstrap). Wait out the unload to dodge the
+    # bootout->bootstrap race ("Bootstrap failed: 5: Input/output error").
     if [ "$DRY_RUN" != 1 ] && launchctl print "$GUI/$label" >/dev/null 2>&1; then
-      run launchctl kickstart -k "$GUI/$label"
-    else
-      run launchctl bootstrap "$GUI" "$plist"
+      run launchctl bootout "$GUI/$label"
+      _i=0
+      while [ "$DRY_RUN" != 1 ] && [ $_i -lt 20 ] && launchctl print "$GUI/$label" >/dev/null 2>&1; do
+        sleep 0.5; _i=$((_i+1))
+      done
     fi
+    run launchctl bootstrap "$GUI" "$plist"
   done
 fi
 
