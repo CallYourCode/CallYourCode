@@ -381,15 +381,15 @@ test("the installer writes ~/.callyourcode/env and the hint sources it (same-she
   const script = await Bun.file(join(REPO_ROOT, "scripts/install.sh")).text();
 
   // A child process can never change the calling shell's PATH, so the
-  // advertised one-liner ends with `&& . ~/.callyourcode/env`, and the
-  // installer must write that env file with the PATH line.
+  // installer writes an env file with the PATH line and the closing hint
+  // tells the user to source it when `cyc` is not found.
   expect(script).toContain('write_file "$DATA_DIR/env"');
   expect(script).toContain('export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"');
 
   // the not-on-PATH hint names the source line, not a raw export
   expect(script).toContain(". ~/.callyourcode/env");
-  // and the one-liner in the header carries the sourcing tail
-  expect(script).toContain("install.sh | sh && . ~/.callyourcode/env");
+  // the advertised one-liner stays clean, no sourcing tail
+  expect(script).not.toContain("install.sh | sh && ");
 });
 
 test("engine unit is KillMode=process so a restart never kills the tmux server + agents", async () => {

@@ -14,7 +14,7 @@
     paintToggle();
   }
 
-  var CMD = "curl -fsSL https://callyourcode.com/install.sh | sh && . ~/.callyourcode/env";
+  var CMD = "curl -fsSL https://callyourcode.com/install.sh | sh";
   document.querySelectorAll("[data-copy]").forEach(function (btn) {
     btn.addEventListener("click", function () {
       function fallback() {

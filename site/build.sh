@@ -6,7 +6,7 @@
 # build step. Its only job is to keep site/install.sh a byte-identical copy of
 # the single source of truth, scripts/install.sh, so the one-liner
 #
-#   curl -fsSL https://callyourcode.com/install.sh | sh && . ~/.callyourcode/env
+#   curl -fsSL https://callyourcode.com/install.sh | sh
 #
 # always serves exactly what the repo ships. The drift test
 # (site/drift.test.ts) fails when the two files diverge, so the committed copy
