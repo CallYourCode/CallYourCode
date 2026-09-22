@@ -14,7 +14,7 @@
 import { safeCid, newCid } from "../../../shared/logbook.ts";
 import { PaneNotReady, DeliveryStranded } from "../adapters/mux-adapter.ts";
 import { deliverToPane } from "./pane-deliver.ts";
-import { stampTs, logChat, awaitingQueue, armAwaiting, clearAwaiting, armQueueClear,
+import { stampTs, logChat, noticeChat, awaitingQueue, armAwaiting, clearAwaiting, armQueueClear,
   QUEUE_STUCK_MS } from "./chatlog.ts";
 import { markReadOnUtterance } from "../sessions/readstate.ts";
 import { audio, clipOnDisk, haveClip, adoptStagedClip } from "./clips.ts";
@@ -123,7 +123,12 @@ export function onUtterance(ws: Sock, m: any): Promise<void> {
   const takenAt = Date.now();
   const sid = String(m.id ?? "");
   const cid = safeCid(m.cid) || newCid("m");
-  if (!safeCid(m.cid)) m = { ...m, cid };
+  /* A FRAME WITH NO USABLE CID IS MARKED. The send-failed a refusal answers
+   * with is keyed by cid, and a cid this engine minted is one no app row can
+   * ever match (measured live 2026-09-19, cid=m-mu91a57j-uaeui: the refusal
+   * frame went out and the user saw nothing). dropDead reads the mark and says
+   * the failure in the chat instead. */
+  if (!safeCid(m.cid)) m = { ...m, cid, cidMinted: true };
   /* THE ACK COMES FIRST (offline design v2, section 2b). ACKED MEANS TAKEN, not
    * delivered: the app deletes its intent on this receipt and promotes the row
    * to the single 'sent' tick, and it never rewrites the frame. Everything
@@ -518,12 +523,23 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
    * websocket waiting to be told. The default below is the offline case, kept
    * spelled out here because it is the one a caller may report without a
    * reason. */
-  const dropDead = (why?: string, tell?: string) => {
+  const dropDead = (why?: string, tell?: string, showingPrompt?: boolean) => {
     D().log("utterance.dropped", { cid, session: s.id, msgId: voice.msgId,
       chars: text.length, why: why ?? "the session is offline; nothing was delivered and " +
         "nothing was written to the chat log" });
     D().send(ws, { t: "send-failed", id: s.id, cid,
       reason: failReason(tell ?? "(session is offline; message not delivered)") });
+    /* THE ROW CHANNEL CANNOT WORK FOR THIS FRAME: it carried no usable cid, so
+     * the send-failed above is keyed by a cid no app ever issued and lands on
+     * no row. Falling silent here is what made a refused first message read as
+     * a dead product, so the failure is said in the chat itself -- plain words,
+     * and for a pane sitting on a prompt or menu, what to do about it. */
+    if (m.cidMinted === true) {
+      noticeChat(s, showingPrompt
+        ? "This agent is showing a menu or setup screen. Open the terminal view to " +
+          "finish it, then send your message again."
+        : `Message not delivered: ${failReason(tell ?? "(session is offline)")}`);
+    }
   };
 
   // Every inbound message, before anything can go wrong with it. Messages
@@ -552,7 +568,7 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
      * decoded -- is time he has been looking at a bubble that has not landed. */
     takenAt,
   });
-  if (!res.ok) dropDead(res.why ?? "it could not be delivered", res.tell);
+  if (!res.ok) dropDead(res.why ?? "it could not be delivered", res.tell, res.showingPrompt);
 }
 
 /* THE ONE WAY A MESSAGE GETS INTO A SESSION.
@@ -616,7 +632,11 @@ export type Injection = {
 /** What a caller is told when nothing was delivered: `why` for the log and for
  *  the schedule's record, `tell` for the sentence a person reads in the app.
  *  `retriable` is a promise that NOTHING was typed, never a wish. */
-export type Injected = { ok: boolean; why?: string; tell?: string; ts?: number; retriable?: boolean };
+export type Injected = { ok: boolean; why?: string; tell?: string; ts?: number; retriable?: boolean;
+  /** the pane is sitting on a prompt, menu or notice a person has to answer in
+   *  the terminal (PaneNotReady.showingPrompt), so the right advice is "finish
+   *  it there", not "try again" */
+  showingPrompt?: boolean };
 
 /** The one failure with no keystroke anywhere near it. Spelled once: both the
  *  herdr path and the socket path end here, and the two used to disagree about
@@ -744,7 +764,8 @@ export async function injectUserMessage(
           why: (e as DeliveryStranded).why, tell: (e as DeliveryStranded).tell };
       return notReady
         ? { ok: false, retriable: true,
-            why: (e as PaneNotReady).why, tell: (e as PaneNotReady).tell }
+            why: (e as PaneNotReady).why, tell: (e as PaneNotReady).tell,
+            showingPrompt: (e as PaneNotReady).showingPrompt || undefined }
         : { ok: false,
             why: "the pane is alive but would not take the keystrokes; nothing was " +
               "delivered and nothing was written to the chat log",

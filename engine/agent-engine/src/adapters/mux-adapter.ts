@@ -529,7 +529,12 @@ const CONVERSATION_EVENT_BYTES = Number(process.env.CYC_ATTACH_EVENT_BYTES) || 1
  *  box, which is why the caller may offer the message again (retriable) with no
  *  risk of doubling it. */
 export class PaneNotReady extends Error {
-  constructor(readonly why: string, readonly tell: string) { super(why); }
+  /** `showingPrompt` marks the refusals where the pane is sitting on a prompt,
+   *  menu or notice a person has to answer in the terminal (chooser, blocked,
+   *  swallowed) -- as opposed to a pane that timed out or could not be read.
+   *  The caller words the user-facing notice off it. */
+  constructor(readonly why: string, readonly tell: string,
+    readonly showingPrompt = false) { super(why); }
 }
 
 /** Thrown when the body WAS typed and an enter WAS pressed, but the pane still
@@ -605,11 +610,12 @@ export function deliverToPane(
       case "stranded":
         throw new DeliveryStranded(outcome.why, outcome.tell);
       case "refusedTimeout":
-      case "refusedBlocked":
       case "refusedUnreadable":
+        throw new PaneNotReady(outcome.why, outcome.tell);
+      case "refusedBlocked":
       case "refusedChooser":
       case "refusedSwallowed":
-        throw new PaneNotReady(outcome.why, outcome.tell);
+        throw new PaneNotReady(outcome.why, outcome.tell, true);
     }
   });
 }

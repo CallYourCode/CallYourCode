@@ -817,6 +817,55 @@ test("T2: the scrolled model picker gets the body typed once, no enter, and fail
   expect(failed[0].cid).toBe("c-picker");
 });
 
+/* THE SILENT DROP (measured live 2026-09-19, engine.log cid=m-mu91a57j-uaeui).
+ * A freshly installed claude sat on its first-run wizard (a menu screen the
+ * classifier calls `unknown`); the phone sent "hi" on a frame that carried NO
+ * cid. The guard refused correctly (echo gate, nothing typed into the menu),
+ * and the refusal went back as `send-failed` on a cid the ENGINE had minted --
+ * a cid no app ever issued, so no row matched it and the user saw NOTHING. When
+ * the row channel cannot work (no client cid), the refusal must fall back to a
+ * plain notice in the chat itself. */
+test("a cid-less frame refused at a menu is told in the chat, not dropped in silence", async () => {
+  const c = await rig({ screens: { [PANE]: MODEL_PICKER_SCROLLED } });
+  const cl = c.client();
+
+  await onUtterance(cl.sock, { id: wireId(PANE), text: "hi" });
+
+  // the guard's refusal behaviour is untouched: typed once, no enter, nothing
+  // submitted, no user row written
+  expect(c.herdr.keys.filter((k) => k.keys.includes("enter")),
+    "enter was pressed at the menu").toEqual([]);
+  expect(c.submitted, "the menu swallowed the message but the agent was said to receive it")
+    .toEqual([]);
+  expect(cl.of("chat").filter((f) => f.role === "user"),
+    "a swallowed message was written to the chat as though delivered").toEqual([]);
+
+  // ...but the user is TOLD, in the chat, in plain words
+  const notices = cl.of("chat").filter((f) => f.role === "claude");
+  expect(notices, "the refusal never reached the app chat: the send-failed went out on an " +
+    "engine-minted cid no app row can match, and nothing else was said").toHaveLength(1);
+  expect(String(notices[0].text)).toMatch(/menu or setup screen/i);
+  expect(String(notices[0].text)).toMatch(/terminal/i);
+});
+
+/* THE OTHER HALF OF THAT LINE: a frame carrying the app's OWN cid already
+ * surfaces on its row (send-failed -> failed state + reason + retry tap,
+ * measured live 2026-09-19: the desktop's retry.rebuild tap seconds later). It
+ * must NOT also get a broadcast bubble: that is the F2 regression, a notice on
+ * every device for a message only one device sent. */
+test("a frame with its own cid is refused on the row alone, no extra chat bubble", async () => {
+  const c = await rig({ screens: { [PANE]: MODEL_PICKER_SCROLLED } });
+  const cl = c.client();
+
+  await onUtterance(cl.sock, { id: wireId(PANE), cid: "c-own-cid", text: "hi" });
+
+  const failed = failedFrames(cl);
+  expect(failed, "the refusal did not fail the send on its cid").toHaveLength(1);
+  expect(failed[0].cid).toBe("c-own-cid");
+  expect(cl.of("chat").filter((f) => f.role === "claude"),
+    "a cid-carrying refusal was ALSO broadcast as a bubble (the F2 regression)").toEqual([]);
+});
+
 /* A BODY TYPED BUT NOT SUBMITTED. The enter returns success but the box
  * still holds the body (an enter that became a newline). The post-enter confirm
  * reads the box, sees content, and fails honestly with DeliveryStranded -- note
