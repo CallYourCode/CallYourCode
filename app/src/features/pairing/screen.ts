@@ -408,7 +408,8 @@ export function mountPairingScreen(
         e2e: true
       });
     }
-    if (info.url) await pairEngine(info.url, info.userHost);
+    // engineKey may be '' here; pairEngine's fallback unparks regardless
+    await pairEngine(info.url || '', info.userHost);
     pendingByEngineId.delete(info.engineId);
     const row = rows.find((r) => r.engineId === info.engineId);
     if (row) {
@@ -450,7 +451,8 @@ export function mountPairingScreen(
           label: row.userHost,
           e2e: true
         });
-        if (row.url) await pairEngine(row.url, row.userHost);
+        // engineKey may be null here; pairEngine's fallback unparks regardless
+        await pairEngine(row.url || '', row.userHost);
 
         row.stateEl.textContent = 'Pairing…';
         row.input.disabled = false;
