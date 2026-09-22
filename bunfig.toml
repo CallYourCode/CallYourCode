@@ -1,0 +1,8 @@
+# A `bun test` started at the REPO ROOT runs every suite it can find without
+# any package bunfig: bun reads the bunfig of the CWD only, so the agent-engine
+# [test] home-guard preload would be skipped and tests could touch the real
+# ~/.callyourcode (which happened on 2026-09-22: a wrong-folder run clobbered
+# the production engine's pane bindings). Same guard here, so no start folder
+# disarms it. homeguard.test.ts is the tripwire.
+[test]
+preload = ["./engine/agent-engine/src/test-utils/homeguard.ts"]

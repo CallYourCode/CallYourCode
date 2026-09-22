@@ -1,0 +1,9 @@
+# A `bun test` started HERE (the engine/ folder, one level above agent-engine)
+# used to run the agent-engine suite WITHOUT agent-engine/bunfig.toml: bun
+# reads the bunfig of the CWD, not of the package a test file lives in. That
+# skipped the [test] home-guard preload, and on 2026-09-22 such a run wrote
+# test fixtures into the real ~/.callyourcode on the production box (pane
+# bindings clobbered, live agents unlinked). Same guard here, so the wrong
+# start folder can never disarm it. homeguard.test.ts is the tripwire.
+[test]
+preload = ["./agent-engine/src/test-utils/homeguard.ts"]
