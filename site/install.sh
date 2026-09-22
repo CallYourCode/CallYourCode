@@ -846,3 +846,15 @@ echo "Run 'cyc help' to see every command."
 
 # Nothing here may touch the running herdr server: stopping it exits every
 # pane, including the one this installer may be running in (live 2026-09-22).
+# Instead, ASK (owner, 2026-09-22): agents opened before this install run
+# without cyc's tools until herdr restarts, so the user does it when it suits
+# them, knowing it exits their open panes.
+if [ "$MUX" = "herdr" ]; then
+  echo
+  echo "herdr note: agents opened BEFORE this install cannot speak through cyc yet."
+  echo "When convenient, restart herdr (this exits open panes):"
+  echo
+  echo "    herdr server stop"
+  echo
+  echo "then open herdr again. Everything started after that is fully connected."
+fi
