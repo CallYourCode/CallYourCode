@@ -720,3 +720,35 @@ test("tailnetServeBase: a foreign serve config, a stopped daemon, or a refused s
   // no tailscale binary at all
   expect(await tailnetServeBase(DEFAULT_APP_URL, async () => ({ code: -1, out: "" }))).toBeNull();
 });
+
+test("tailnetServeBase: a version-skew warning around the status JSON still parses (2026-09-22 field case)", async () => {
+  const warned = async (cmd: string[]) => {
+    if (cmd[1] === "status") return { code: 0, out: `Warning: client version "1.98.8" != tailscaled server version "1.102.4"\n${TS_RUNNING}` };
+    return { code: 0, out: "" };
+  };
+  expect(await tailnetServeBase(DEFAULT_APP_URL, warned)).toBe("https://box.tail42.ts.net");
+});
+
+test("tailnetServeBase: every fallback names its reason through say", async () => {
+  const said: string[] = [];
+  const say = (l: string) => said.push(l);
+
+  const refusing = async (cmd: string[]) => {
+    if (cmd[1] === "status") return { code: 0, out: TS_RUNNING };
+    if (cmd[1] === "serve" && cmd[2] === "status") return { code: 0, out: "" };
+    return { code: 1, out: "config: unable to reach tailscaled" };
+  };
+  expect(await tailnetServeBase(DEFAULT_APP_URL, refusing, say)).toBeNull();
+  expect(said.join("\n")).toContain(`tailscale serve --bg ${TS_PORT}`);
+  expect(said.join("\n")).toContain("unable to reach tailscaled");
+
+  said.length = 0;
+  const stopped = async (cmd: string[]) =>
+    cmd[1] === "status" ? { code: 0, out: JSON.stringify({ BackendState: "NeedsLogin" }) } : { code: 0, out: "" };
+  expect(await tailnetServeBase(DEFAULT_APP_URL, stopped, say)).toBeNull();
+  expect(said.join("\n")).toContain("NeedsLogin");
+
+  said.length = 0;
+  expect(await tailnetServeBase(DEFAULT_APP_URL, async () => ({ code: -1, out: "" }), say)).toBeNull();
+  expect(said.join("\n")).toContain("no tailscale, or not running");
+});

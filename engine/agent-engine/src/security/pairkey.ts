@@ -395,7 +395,8 @@ export async function runCloudOnboard(facts: PairFacts, base = cloudBaseUrl()): 
  *  the app on https://<machine>.<tailnet>.ts.net with a real certificate,
  *  which the phone wants anyway: PWA install, the mic and the service worker
  *  all need a secure context, and localhost is not one from another device.
- *  Every refusal is a silent null and the plain link stands:
+ *  Every refusal falls back to the plain link, and each one SAYS WHY through
+ *  `say` (the 2026-09-22 field debug ran blind because these were silent):
  *  - CYC_DATA_DIR set: a scoped instance (a test, a dev run) does not own the
  *    machine's tailnet and must never rewrite its serve config.
  *  - base not loopback: an operator already chose an address; respect it.
@@ -403,41 +404,51 @@ export async function runCloudOnboard(facts: PairFacts, base = cloudBaseUrl()): 
  *  - `tailscale serve status` shows a config that is NOT ours: never clobber
  *    something the user serves already.
  *  - the serve command itself refusing (an old CLI without --bg, missing
- *    operator rights). */
+ *    operator rights, client/daemon version skew). */
 export async function tailnetServeBase(
   base: string,
   run: (cmd: string[]) => Promise<{ code: number; out: string }> = runOut,
+  say: (line: string) => void = () => {},
 ): Promise<string | null> {
-  if (process.env.CYC_DATA_DIR) return null;
+  const skip = (why: string): null => {
+    say(`tailscale skipped: ${why} (using the localhost link)`);
+    return null;
+  };
+  if (process.env.CYC_DATA_DIR) return null; // scoped instance: silent by design
   let u: URL;
-  try { u = new URL(base); } catch { return null; }
-  if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") return null;
-  if (!u.port) return null;
+  try { u = new URL(base); } catch { return skip(`app url unreadable: ${base}`); }
+  if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") return null; // operator chose an address
+  if (!u.port) return skip(`app url has no port: ${base}`);
   const st = await run(["tailscale", "status", "--json"]);
-  if (st.code !== 0) return null;
+  if (st.code !== 0) return skip("`tailscale status` failed (no tailscale, or not running)");
   let dns = "";
   try {
-    const j = JSON.parse(st.out) as { BackendState?: string; Self?: { DNSName?: string } };
-    if (j?.BackendState !== "Running") return null;
+    /* A version-skewed tailscale prints warning lines around the JSON; parse
+     * from the first brace so a warning never reads as a broken install. */
+    const braced = st.out.slice(st.out.indexOf("{"));
+    const j = JSON.parse(braced) as { BackendState?: string; Self?: { DNSName?: string } };
+    if (j?.BackendState !== "Running") return skip(`tailscale backend is ${j?.BackendState ?? "unknown"}, not Running`);
     dns = (j?.Self?.DNSName ?? "").replace(/\.+$/, "");
   } catch {
-    return null;
+    return skip("`tailscale status` output was not readable JSON");
   }
-  if (!dns) return null;
+  if (!dns) return skip("this machine has no tailnet DNS name");
   const existing = await run(["tailscale", "serve", "status"]);
   if (existing.code === 0 && existing.out.trim() && !existing.out.includes(`127.0.0.1:${u.port}`)) {
-    return null;
+    return skip("tailscale already serves something else; not touching it");
   }
   const served = await run(["tailscale", "serve", "--bg", u.port]);
-  if (served.code !== 0) return null;
+  if (served.code !== 0) return skip(`\`tailscale serve --bg ${u.port}\` failed: ${served.out.trim().slice(0, 200) || "no output"}`);
   return `https://${dns}`;
 }
 
 async function runOut(cmd: string[]): Promise<{ code: number; out: string }> {
   try {
-    const p = Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const out = await new Response(p.stdout).text();
-    return { code: await p.exited, out };
+    // stderr rides along so a failed command's reason survives into the skip line.
+    const p = Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+    const code = await p.exited;
+    return { code, out: code === 0 ? out : `${out}\n${err}`.trim() };
   } catch {
     return { code: -1, out: "" };
   }
@@ -489,7 +500,7 @@ async function runChooser(): Promise<void> {
      * With tailscale running, the app goes on the tailnet over https first
      * (tailnetServeBase), so the printed link works from the PHONE and gets
      * a QR; without it, the plain localhost link as always. */
-    const tail = await tailnetServeBase(base);
+    const tail = await tailnetServeBase(base, undefined, (line) => console.log(line));
     const url = pairingUrl(tail ?? localAppUrl(base), facts.key, facts.engineId);
     if (tail) {
       console.log("tailscale found: the app is served on your tailnet over https.");
