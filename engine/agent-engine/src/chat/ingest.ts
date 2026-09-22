@@ -33,6 +33,7 @@ import type { TailPointer } from "../runtime/agentmeta.ts";
 import { awaitingQueue, awaitingByText, clearAwaiting, clearQueued, logSession,
   type ChatSession } from "./chatlog.ts";
 import { turnSinceFor } from "./turn.ts";
+import { noteReply } from "./reply-trace.ts";
 import { reduceStatus, deriveBusy } from "../sessions/status-reducer.ts";
 import type { AgentStatus } from "../terminal/mux.ts";
 import type { ChatMsg } from "./chatmsg.ts";
@@ -143,7 +144,16 @@ function recOf(s: IngestSession, sid: string, ev: SessionEvent) {
  *  new (the rest were already logged: a replay past the pointer). */
 function appendBatch(s: IngestSession, sid: string, batch: OverlayBatch, live: boolean): number {
   let added = 0;
-  for (const ev of batch.events) if (logSession(s, recOf(s, sid, ev))) added++;
+  for (const ev of batch.events) {
+    if (!logSession(s, recOf(s, sid, ev))) continue;
+    added++;
+    /* An ingested reply row REACHED the user (it renders in the app chat), so
+     * it counts for the Stop hook's "something has to have reached them" --
+     * only live rows: a backfilled old reply answered an old message. Without
+     * this, a session that answers in its terminal is blocked by the hook for
+     * an answer the user already has (live 2026-09-22). */
+    if (live && ev.kind === "reply") noteReply(s.agent.id);
+  }
   /* A.5: the app's own message landing in the transcript is the `delivered`
    * fact, logged with the user record's identity as its key. Backfill skips
    * it: an old landing is not news, and the bubble it would clear is gone. */

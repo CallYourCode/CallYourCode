@@ -222,6 +222,14 @@ def main():
         allow()  # not a session the engine knows: normal coding, or unidentifiable
     pane, entry = found
 
+    # No reply channel: this session's harness never loaded the MCP (started
+    # before cyc, or the tools failed to spawn), so speak/chat DO NOT EXIST for
+    # it and demanding them traps the agent (live 2026-09-22: a "hi" took a
+    # five-minute blocked expedition). Its terminal answer already reaches the
+    # app through transcript ingest, so the answer stands.
+    if not entry.get("hasReplyChannel"):
+        allow()
+
     pending = outstanding(entry, read_ack(pane), time.time() * 1000)
     if not pending:
         allow()  # nothing was delivered here: this hook is inert during ordinary coding

@@ -20,7 +20,7 @@ import { stateFile } from "../storage/datadir.ts";
 import { writePrivate } from "../../../shared/runfiles.ts";
 
 export type ReplyTraceDeps = {
-  sessions(): Iterable<{ id: string; cwd: string; agent: { id: string }; harnessSessionId: string | null; muxHandle?: string | null }>;
+  sessions(): Iterable<{ id: string; cwd: string; agent: { id: string }; harnessSessionId: string | null; muxHandle?: string | null; channels?: string[] }>;
   engineHost: string;
   /** Whether this agent kind's reader declares an activity-event source (the
    *  adapter's hasSessionEvents): the hook-state's session-id field is derived
@@ -100,6 +100,10 @@ export function noteReply(sessionId: string) {
 const hookStateFile = (): string => stateFile("reply-state.json");
 
 export function writeHookState() {
+  /* Uninitialised (a unit test touching noteReply through ingest, or a caller
+   * racing boot): there is no state to persist and nothing to enforce; the
+   * hook fails open on a missing file, so silence here is correct. */
+  if (!cfg) return;
   const d = C();
   const perSession: Record<string, unknown> = {};
   const live = new Set<string>();
@@ -118,6 +122,15 @@ export function writeHookState() {
        * (HERDR_PANE_ID / TMUX_PANE) matches on this field, not on the key. */
       pane: s.muxHandle ?? null,
       cwd: s.cwd,
+      /* Whether this session has EVER reached us over the MCP reply route
+       * (channels are declared on every reply POST). A session without one --
+       * typically an agent started before cyc was installed, whose harness
+       * never loaded the MCP -- cannot call speak/chat, and its terminal
+       * answer already reaches the app through transcript ingest; the Stop
+       * hook reads this to let that answer stand instead of demanding tools
+       * the session does not have (live 2026-09-22: a "hi" took a five-minute
+       * hook-blocked expedition before the user heard anything). */
+      hasReplyChannel: (s.channels?.length ?? 0) > 0,
       deliveries: t?.deliveries ?? [],
       replies: t?.replies ?? [],
     };

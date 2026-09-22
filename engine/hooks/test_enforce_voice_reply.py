@@ -48,11 +48,15 @@ class HookCase(unittest.TestCase):
         with open(self.state_file, "w", encoding="utf-8") as fh:
             json.dump({"writtenAt": now_ms(), "host": "test", "sessions": sessions}, fh)
 
-    def session(self, deliveries=(), replies=()):
+    def session(self, deliveries=(), replies=(), has_channel=True):
+        # has_channel mirrors the engine's hasReplyChannel: the default fixtures
+        # model a session whose MCP works (the hook may block); a channel-less
+        # session (agent started before cyc) must never be blocked.
         return {
             PANE: {
                 "cwd": CWD,
                 "claudeSessionId": CLAUDE_ID,
+                "hasReplyChannel": bool(has_channel),
                 "deliveries": list(deliveries),
                 "replies": list(replies),
             }
@@ -134,6 +138,14 @@ class HookCase(unittest.TestCase):
         self.write_state(self.session([self.delivery(ago_ms=3 * 60 * 60 * 1000)]))
         code, err = self.run_hook()
         self.assertAllows(code, err, "for a delivery hours old")
+
+    def test_no_reply_channel_never_blocks(self):
+        # An agent started before cyc (its harness never loaded the MCP) has no
+        # speak/chat tools; its terminal answer reaches the app via ingest, so
+        # the hook must let it stand (live 2026-09-22: the five-minute "hi").
+        self.write_state(self.session(deliveries=[self.delivery()], has_channel=False))
+        code, err = self.run_hook()
+        self.assertAllows(code, err, "for a session with no reply channel")
 
     def test_no_deliveries_allows(self):
         """The ordinary coding case: nothing was delivered, so there is nothing to enforce."""
