@@ -274,3 +274,10 @@ article[hidden] { display: none; }
 
 /* darker CTA band in dark mode */
 :root[data-theme="dark"] .cta .band { background: #4a3016; }
+
+/* Narrow, quiet scrollbar on the horizontally scrolling install one-liners
+ * (the command grew a sourcing tail and the default bar looked like a plank). */
+.install code, .cta .install-dark code { scrollbar-width: thin; scrollbar-color: rgba(128,128,128,0.35) transparent; }
+.install code::-webkit-scrollbar, .cta .install-dark code::-webkit-scrollbar { height: 4px; }
+.install code::-webkit-scrollbar-track, .cta .install-dark code::-webkit-scrollbar-track { background: transparent; }
+.install code::-webkit-scrollbar-thumb, .cta .install-dark code::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.35); border-radius: 2px; }
