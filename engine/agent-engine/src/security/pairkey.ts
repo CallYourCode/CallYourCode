@@ -404,6 +404,10 @@ export async function tailnetServeBase(
   base: string,
   run: (cmd: string[]) => Promise<{ code: number; out: string }> = runOut,
   say: (line: string) => void = () => {},
+  /* Called with tailscale's enable-serve approval link when the tailnet
+   * needs a one-time admin OK. Answer true to retry the serve, false to
+   * fall back. No `ask` (tests, non-tty) falls back straight away. */
+  ask?: (enableUrl: string) => Promise<boolean>,
 ): Promise<string | null> {
   const skip = (why: string): null => {
     say(`tailscale skipped: ${why} (using the localhost link)`);
@@ -416,7 +420,17 @@ export async function tailnetServeBase(
   if (!u.port) return null;
   const present = await run(["tailscale", "version"]);
   if (present.code !== 0) return null; // no tailscale on this machine: nothing to say
-  const served = await run(["tailscale", "serve", "--bg", u.port]);
+  let served = await run(["tailscale", "serve", "--bg", u.port]);
+  /* "Serve is not enabled on your tailnet": tailscale hands back a one-time
+   * admin approval link. Walk the user through it right here (live
+   * 2026-09-22: burying that link in a fallback line made a working setup
+   * look broken) and retry once they say it is enabled. */
+  const enable = served.code !== 0 ? served.out.match(/https:\/\/login\.tailscale\.com\/\S+/) : null;
+  if (enable && ask) {
+    while (served.code !== 0 && (await ask(enable[0]))) {
+      served = await run(["tailscale", "serve", "--bg", u.port]);
+    }
+  }
   if (served.code !== 0) return skip(`\`tailscale serve --bg ${u.port}\` failed: ${served.out.trim().slice(0, 200) || "no output"}`);
   const st = await run(["tailscale", "status", "--json"]);
   let dns = "";
@@ -501,7 +515,22 @@ async function runChooser(): Promise<void> {
      * With tailscale running, the app goes on the tailnet over https first
      * (tailnetServeBase), so the printed link works from the PHONE and gets
      * a QR; without it, the plain localhost link as always. */
-    const tail = await tailnetServeBase(base, undefined, (line) => console.log(line));
+    /* The one-time tailnet approval: show tailscale's own enable link and
+     * wait right here; Enter retries, n (or no tty) falls back to localhost. */
+    const askEnable = async (enableUrl: string): Promise<boolean> => {
+      console.log();
+      console.log("Tailscale needs a one-time approval to serve on your tailnet.");
+      console.log("Open this link (any tailnet admin), click Enable, come back:");
+      console.log();
+      console.log(`    ${enableUrl}`);
+      console.log();
+      if (!process.stdin.isTTY) return false;
+      process.stdout.write("Press Enter when enabled to retry, or n to use the localhost link:");
+      const line = readLineSync(0);
+      process.stdout.write("\n");
+      return !line.trim().toLowerCase().startsWith("n");
+    };
+    const tail = await tailnetServeBase(base, undefined, (line) => console.log(line), askEnable);
     const url = pairingUrl(tail ?? localAppUrl(base), facts.key, facts.engineId);
     if (tail) {
       console.log("tailscale found: the app is served on your tailnet over https.");

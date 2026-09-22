@@ -717,6 +717,36 @@ test("tailnetServeBase: no tailscale is a silent fallback; a failed serve says w
   expect(said.join("\n")).toContain("no tailnet machine name");
 });
 
+test("tailnetServeBase: serve-not-enabled hands the approval link to ask and retries on yes", async () => {
+  const ENABLE = "https://login.tailscale.com/f/serve?node=nABC123CNTRL";
+  let serveTries = 0;
+  const run = async (cmd: string[]) => {
+    if (cmd[1] === "serve") {
+      serveTries += 1;
+      if (serveTries === 1) return { code: 1, out: `Serve is not enabled on your tailnet.\nTo enable, visit:\n\n\t${ENABLE}` };
+      return { code: 0, out: "" };
+    }
+    if (cmd[1] === "status") return { code: 0, out: TS_RUNNING };
+    return { code: 0, out: "" };
+  };
+
+  const asked: string[] = [];
+  const yes = async (u: string) => { asked.push(u); return true; };
+  expect(await tailnetServeBase(DEFAULT_APP_URL, run, () => {}, yes)).toBe("https://box.tail42.ts.net");
+  expect(asked).toEqual([ENABLE]);
+  expect(serveTries).toBe(2);
+
+  // declining the retry falls back loudly; without ask it falls back too
+  serveTries = 0;
+  const said: string[] = [];
+  const failing = async (cmd: string[]) =>
+    cmd[1] === "serve" ? { code: 1, out: `Serve is not enabled on your tailnet.\n${ENABLE}` } : { code: 0, out: TS_RUNNING };
+  const no = async () => false;
+  expect(await tailnetServeBase(DEFAULT_APP_URL, failing, (l) => said.push(l), no)).toBeNull();
+  expect(said.join("\n")).toContain("not enabled");
+  expect(await tailnetServeBase(DEFAULT_APP_URL, failing, () => {})).toBeNull();
+});
+
 test("tailnetServeBase: a version-skew warning around the status JSON still parses (2026-09-22 field case)", async () => {
   const warned = async (cmd: string[]) => {
     if (cmd[1] === "status") return { code: 0, out: `Warning: client version "1.98.8" != tailscaled server version "1.102.4"\n${TS_RUNNING}` };
