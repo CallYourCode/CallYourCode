@@ -22,6 +22,7 @@ import {
   mergeCodexHooks,
   mergeClaudeJson,
   mergeClaudeSettings,
+  MCP_LAUNCHER,
 } from "./harness-integration.ts"
 import { CallYourCode } from "../engine/harness/opencode/callyourcode.ts"
 import { stateFile } from "../engine/agent-engine/src/storage/datadir.ts"
@@ -55,7 +56,7 @@ test("opencode: empty config gains schema and mcp.callyourcode on the `cyc mcp` 
   const data = JSON.parse(r.text)
   expect(data.$schema).toBe("https://opencode.ai/config.json")
   // Path-independent: the launcher, never an absolute engine path.
-  expect(data.mcp.callyourcode).toEqual({ type: "local", command: ["cyc", "mcp"] })
+  expect(data.mcp.callyourcode).toEqual({ type: "local", command: [MCP_LAUNCHER, "mcp"] })
 })
 
 test("opencode: fixture config keeps the foreign server byte-for-byte", () => {
@@ -64,7 +65,7 @@ test("opencode: fixture config keeps the foreign server byte-for-byte", () => {
   expect(r.changed).toBe(true)
   const data = JSON.parse(r.text)
   expect(data.mcp.otherserver).toEqual(JSON.parse(fixture).mcp.otherserver)
-  expect(data.mcp.callyourcode.command).toEqual(["cyc", "mcp"])
+  expect(data.mcp.callyourcode.command).toEqual([MCP_LAUNCHER, "mcp"])
 })
 
 test("opencode: merge is idempotent", () => {
@@ -80,7 +81,7 @@ test("opencode: an old installer's absolute `bun .../server.ts` is migrated to `
   const r = mergeOpencodeConfig(legacy)
   expect(r.changed).toBe(true)
   expect(r.note).toContain("migrated")
-  expect(JSON.parse(r.text).mcp.callyourcode.command).toEqual(["cyc", "mcp"])
+  expect(JSON.parse(r.text).mcp.callyourcode.command).toEqual([MCP_LAUNCHER, "mcp"])
 })
 
 test("opencode: invalid JSON crashes loud instead of clobbering", () => {
@@ -95,7 +96,7 @@ test("codex toml: empty file gains the section on the `cyc mcp` launcher", () =>
   const r = mergeCodexToml("")
   expect(r.changed).toBe(true)
   // Path-independent: the launcher, never an absolute engine path.
-  expect(r.text).toBe(`[mcp_servers.callyourcode]\ncommand = "cyc"\nargs = ["mcp"]\n`)
+  expect(r.text).toBe(`[mcp_servers.callyourcode]\ncommand = ${JSON.stringify(MCP_LAUNCHER)}\nargs = ["mcp"]\n`)
 })
 
 test("codex toml: fixture is preserved verbatim as a prefix, section appended", () => {
@@ -119,7 +120,7 @@ test("codex toml: merge is idempotent, and a nested sub-table also counts as pre
 // codex notify announcer merge (session identity over codex's notify setting)
 
 // The path-independent notify line every fresh/migrated config now carries.
-const NOTIFY = `notify = ["cyc", "hook", "announce-session", "--codex-notify"]`
+const NOTIFY = `notify = [${JSON.stringify(MCP_LAUNCHER)}, "hook", "announce-session", "--codex-notify"]`
 
 test("codex notify: empty config gains the root-level notify announcer on `cyc hook`", () => {
   const r = mergeCodexNotify("")
@@ -245,8 +246,8 @@ test("codex hooks: empty file gains Stop and PreToolUse on the `cyc hook` launch
   expect(r.changed).toBe(true)
   const data = JSON.parse(r.text)
   // Path-independent: the launcher names the hook, never an absolute path.
-  expect(data.hooks.Stop[0].hooks[0]).toEqual({ type: "command", command: `cyc hook ${STOP}` })
-  expect(data.hooks.PreToolUse[0].hooks[0]).toEqual({ type: "command", command: `cyc hook ${PRE}` })
+  expect(data.hooks.Stop[0].hooks[0]).toEqual({ type: "command", command: `${MCP_LAUNCHER} hook ${STOP}` })
+  expect(data.hooks.PreToolUse[0].hooks[0]).toEqual({ type: "command", command: `${MCP_LAUNCHER} hook ${PRE}` })
   // no matcher on ours: the scripts self-filter on payload shape
   expect("matcher" in data.hooks.PreToolUse[0]).toBe(false)
 })
@@ -258,8 +259,8 @@ test("codex hooks: fixture's foreign hooks survive untouched, ours appended", ()
   const orig = JSON.parse(fixture)
   expect(data.hooks.PreToolUse[0]).toEqual(orig.hooks.PreToolUse[0])
   expect(data.hooks.SessionStart).toEqual(orig.hooks.SessionStart)
-  expect(data.hooks.PreToolUse[1].hooks[0].command).toBe(`cyc hook ${PRE}`)
-  expect(data.hooks.Stop[0].hooks[0].command).toBe(`cyc hook ${STOP}`)
+  expect(data.hooks.PreToolUse[1].hooks[0].command).toBe(`${MCP_LAUNCHER} hook ${PRE}`)
+  expect(data.hooks.Stop[0].hooks[0].command).toBe(`${MCP_LAUNCHER} hook ${STOP}`)
 })
 
 test("codex hooks: merge is idempotent by launcher command", () => {
@@ -283,10 +284,10 @@ test("codex hooks: a legacy absolute-path command is migrated in place, a foreig
   const data = JSON.parse(r.text)
   // Stop migrated to the launcher, no duplicate entry added.
   expect(data.hooks.Stop.length).toBe(1)
-  expect(data.hooks.Stop[0].hooks[0].command).toBe(`cyc hook ${STOP}`)
+  expect(data.hooks.Stop[0].hooks[0].command).toBe(`${MCP_LAUNCHER} hook ${STOP}`)
   // the foreign PreToolUse hook survives, ours appended alongside it.
   expect(data.hooks.PreToolUse[0].hooks[0].command).toBe("echo mine")
-  expect(data.hooks.PreToolUse[1].hooks[0].command).toBe(`cyc hook ${PRE}`)
+  expect(data.hooks.PreToolUse[1].hooks[0].command).toBe(`${MCP_LAUNCHER} hook ${PRE}`)
   // migrated + appended form is a clean no-op on a rerun.
   expect(mergeCodexHooks(r.text, STOP, PRE).changed).toBe(false)
 })
@@ -302,7 +303,7 @@ test("claude json: empty file gains mcpServers.callyourcode on the `cyc mcp` lau
   expect(r.changed).toBe(true)
   const data = JSON.parse(r.text)
   // Path-independent: the launcher, never an absolute engine path.
-  expect(data.mcpServers.callyourcode).toEqual({ command: "cyc", args: ["mcp"] })
+  expect(data.mcpServers.callyourcode).toEqual({ command: MCP_LAUNCHER, args: ["mcp"] })
 })
 
 test("claude json: a foreign server survives, and merge is idempotent", () => {
@@ -311,7 +312,7 @@ test("claude json: a foreign server survives, and merge is idempotent", () => {
   expect(once.changed).toBe(true)
   const data = JSON.parse(once.text)
   expect(data.mcpServers.other).toEqual({ command: "node", args: ["x.js"] })
-  expect(data.mcpServers.callyourcode.command).toBe("cyc")
+  expect(data.mcpServers.callyourcode.command).toBe(MCP_LAUNCHER)
   const twice = mergeClaudeJson(once.text)
   expect(twice.changed).toBe(false)
   expect(twice.text).toBe(once.text)
@@ -322,7 +323,7 @@ test("claude json: an old installer's absolute `bun .../server.ts` is migrated t
   const r = mergeClaudeJson(legacy)
   expect(r.changed).toBe(true)
   expect(r.note).toContain("migrated")
-  expect(JSON.parse(r.text).mcpServers.callyourcode).toEqual({ command: "cyc", args: ["mcp"] })
+  expect(JSON.parse(r.text).mcpServers.callyourcode).toEqual({ command: MCP_LAUNCHER, args: ["mcp"] })
 })
 
 test("claude json: a legacy voice-channel server is dropped, an unrelated voice is kept", () => {
@@ -352,10 +353,10 @@ test("claude settings: empty file gains both hooks on `cyc hook`, with claude ma
   expect(r.changed).toBe(true)
   const data = JSON.parse(r.text)
   // Path-independent: the launcher, never an absolute path.
-  expect(data.hooks.Stop[0]).toEqual({ matcher: "*", hooks: [{ type: "command", command: `cyc hook ${CLAUDE_STOP}` }] })
+  expect(data.hooks.Stop[0]).toEqual({ matcher: "*", hooks: [{ type: "command", command: `${MCP_LAUNCHER} hook ${CLAUDE_STOP}` }] })
   expect(data.hooks.PreToolUse[0]).toEqual({
     matcher: "Bash",
-    hooks: [{ type: "command", command: `cyc hook ${CLAUDE_PRE}` }],
+    hooks: [{ type: "command", command: `${MCP_LAUNCHER} hook ${CLAUDE_PRE}` }],
   })
 })
 
@@ -366,8 +367,8 @@ test("claude settings: foreign hooks survive, ours appended, idempotent by launc
   const once = mergeClaudeSettings(seed, CLAUDE_STOP, CLAUDE_PRE)
   const data = JSON.parse(once.text)
   expect(data.hooks.PreToolUse[0].hooks[0].command).toBe("echo hi")
-  expect(data.hooks.PreToolUse[1].hooks[0].command).toBe(`cyc hook ${CLAUDE_PRE}`)
-  expect(data.hooks.Stop[0].hooks[0].command).toBe(`cyc hook ${CLAUDE_STOP}`)
+  expect(data.hooks.PreToolUse[1].hooks[0].command).toBe(`${MCP_LAUNCHER} hook ${CLAUDE_PRE}`)
+  expect(data.hooks.Stop[0].hooks[0].command).toBe(`${MCP_LAUNCHER} hook ${CLAUDE_STOP}`)
   const twice = mergeClaudeSettings(once.text, CLAUDE_STOP, CLAUDE_PRE)
   expect(twice.changed).toBe(false)
   expect(JSON.parse(twice.text)).toEqual(JSON.parse(once.text))
@@ -386,9 +387,9 @@ test("claude settings: a legacy absolute-path hook command is migrated in place 
   // migrated in place, no duplicate Stop entry, matcher preserved
   expect(data.hooks.Stop.length).toBe(1)
   expect(data.hooks.Stop[0].matcher).toBe("*")
-  expect(data.hooks.Stop[0].hooks[0].command).toBe(`cyc hook ${CLAUDE_STOP}`)
+  expect(data.hooks.Stop[0].hooks[0].command).toBe(`${MCP_LAUNCHER} hook ${CLAUDE_STOP}`)
   // PreToolUse had nothing of ours: appended fresh on the launcher
-  expect(data.hooks.PreToolUse[0].hooks[0].command).toBe(`cyc hook ${CLAUDE_PRE}`)
+  expect(data.hooks.PreToolUse[0].hooks[0].command).toBe(`${MCP_LAUNCHER} hook ${CLAUDE_PRE}`)
   // clean no-op on rerun
   expect(mergeClaudeSettings(r.text, CLAUDE_STOP, CLAUDE_PRE).changed).toBe(false)
 })
@@ -403,9 +404,9 @@ test("claude settings: the announce hook lands on SessionStart AND UserPromptSub
   expect(r.changed).toBe(true)
   const data = JSON.parse(r.text)
   expect(data.hooks.SessionStart[0]).toEqual(
-    { matcher: "*", hooks: [{ type: "command", command: `cyc hook ${ANNOUNCE}` }] })
+    { matcher: "*", hooks: [{ type: "command", command: `${MCP_LAUNCHER} hook ${ANNOUNCE}` }] })
   expect(data.hooks.UserPromptSubmit[0]).toEqual(
-    { matcher: "*", hooks: [{ type: "command", command: `cyc hook ${ANNOUNCE}` }] })
+    { matcher: "*", hooks: [{ type: "command", command: `${MCP_LAUNCHER} hook ${ANNOUNCE}` }] })
   const twice = mergeClaudeSettings(r.text, CLAUDE_STOP, CLAUDE_PRE, ANNOUNCE)
   expect(twice.changed).toBe(false)
   expect(JSON.parse(twice.text)).toEqual(JSON.parse(r.text))
@@ -454,6 +455,8 @@ test("state parity: plugin, engine, and hook all resolve the same default path",
 // ---------------------------------------------------------------------------
 // installer CLI against a scratch home
 
+const homeCyc = (home: string) => join(home, ".bun", "bin", "cyc")
+
 async function runInstaller(home: string, args: string[] = [], fake = "opencode,codex") {
   const proc = Bun.spawn(["bun", join(REPO, "scripts", "harness-integration.ts"), ...args], {
     cwd: REPO,
@@ -485,7 +488,7 @@ test("cli: fresh install writes every piece for both harnesses, then re-runs cle
   const oc = join(home, ".config", "opencode")
   const ocCfg = JSON.parse(readFileSync(join(oc, "opencode.json"), "utf-8"))
   // Path-independent: the launcher, identical on every box.
-  expect(ocCfg.mcp.callyourcode.command).toEqual(["cyc", "mcp"])
+  expect(ocCfg.mcp.callyourcode.command).toEqual([homeCyc(home), "mcp"])
   // The plugin is installed verbatim: it resolves the engine's data dir from
   // env at runtime, so nothing is stamped into it.
   const plugin = readFileSync(join(oc, "plugin", "callyourcode.ts"), "utf-8")
@@ -496,13 +499,13 @@ test("cli: fresh install writes every piece for both harnesses, then re-runs cle
   const cx = join(home, ".codex")
   const toml1 = readFileSync(join(cx, "config.toml"), "utf-8")
   expect(toml1).toContain("[mcp_servers.callyourcode]")
-  expect(toml1).toContain('command = "cyc"') // path-independent launcher, not an absolute path
+  expect(toml1).toContain(`command = ${JSON.stringify(homeCyc(home))}`) // the absolute shim, PATH-proof
   // the notify announcer is a ROOT key: first line, before any table, on the launcher
-  expect(toml1.startsWith('notify = ["cyc", "hook", "announce-session"')).toBe(true)
+  expect(toml1.startsWith(`notify = [${JSON.stringify(homeCyc(home))}, "hook", "announce-session"`)).toBe(true)
   expect(toml1).toContain("--codex-notify")
   const hooks = JSON.parse(readFileSync(join(cx, "hooks.json"), "utf-8"))
-  expect(hooks.hooks.Stop[0].hooks[0].command).toBe("cyc hook enforce-voice-reply")
-  expect(hooks.hooks.PreToolUse[0].hooks[0].command).toBe("cyc hook enforce-shell-async")
+  expect(hooks.hooks.Stop[0].hooks[0].command).toBe(`${homeCyc(home)} hook enforce-voice-reply`)
+  expect(hooks.hooks.PreToolUse[0].hooks[0].command).toBe(`${homeCyc(home)} hook enforce-shell-async`)
   expect(existsSync(join(cx, "skills", "callyourcode", "SKILL.md"))).toBe(true)
 
   const second = await runInstaller(home)
@@ -540,13 +543,13 @@ test("cli: a codex config with legacy absolute hook + notify paths is migrated t
   expect(code).toBe(0)
 
   const toml = readFileSync(join(home, ".codex", "config.toml"), "utf-8")
-  expect(toml.startsWith('notify = ["cyc", "hook", "announce-session", "--codex-notify"]')).toBe(true)
+  expect(toml.startsWith(`notify = [${JSON.stringify(homeCyc(home))}, "hook", "announce-session", "--codex-notify"]`)).toBe(true)
   expect(toml).not.toContain("announce-session.py") // the dead abspath is gone
 
   const hooks = JSON.parse(readFileSync(join(home, ".codex", "hooks.json"), "utf-8"))
   expect(hooks.hooks.Stop.length).toBe(1) // migrated in place, not duplicated
-  expect(hooks.hooks.Stop[0].hooks[0].command).toBe("cyc hook enforce-voice-reply")
-  expect(hooks.hooks.PreToolUse[0].hooks[0].command).toBe("cyc hook enforce-shell-async")
+  expect(hooks.hooks.Stop[0].hooks[0].command).toBe(`${homeCyc(home)} hook enforce-voice-reply`)
+  expect(hooks.hooks.PreToolUse[0].hooks[0].command).toBe(`${homeCyc(home)} hook enforce-shell-async`)
   expect(JSON.stringify(hooks)).not.toContain("enforce-voice-reply.py") // no dead abspath left
 
   // re-running is a clean no-op on the migrated config
@@ -565,12 +568,12 @@ test("cli: claude gets .claude.json, both hooks, the skill; re-run clean", async
 
   const cj = JSON.parse(readFileSync(join(home, ".claude.json"), "utf-8"))
   // Path-independent: the launcher, identical on every box.
-  expect(cj.mcpServers.callyourcode).toEqual({ command: "cyc", args: ["mcp"] })
+  expect(cj.mcpServers.callyourcode).toEqual({ command: homeCyc(home), args: ["mcp"] })
   const settings = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf-8"))
   expect(settings.hooks.Stop[0].matcher).toBe("*")
-  expect(settings.hooks.Stop[0].hooks[0].command).toBe("cyc hook enforce-voice-reply")
+  expect(settings.hooks.Stop[0].hooks[0].command).toBe(`${homeCyc(home)} hook enforce-voice-reply`)
   expect(settings.hooks.PreToolUse[0].matcher).toBe("Bash")
-  expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("cyc hook enforce-bash-async")
+  expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(`${homeCyc(home)} hook enforce-bash-async`)
   expect(existsSync(join(home, ".claude", "skills", "callyourcode", "SKILL.md"))).toBe(true)
 
   // second run: every merge is a skip, one hook each, no duplicates

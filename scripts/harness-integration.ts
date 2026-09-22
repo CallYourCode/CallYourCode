@@ -73,15 +73,18 @@ import * as path from "node:path"
 // Pure config transformations (unit-tested against fixtures of the real
 // formats; see scripts/harness-integration.test.ts).
 
-/* The path-INDEPENDENT MCP wiring every harness config now carries: name the
- * launcher (`cyc mcp`, a shim the installer puts on PATH), never an absolute
- * engine path. The config text is then identical on every box and always finds
- * the LOCAL engine, so a config copied across machines (or a moved engine dir)
- * no longer silently kills the cyc MCP -- which is voice self-identify + codex's
- * entire outbound reply path. `MCP_ARGS` is the args a `command`+`args` config
- * (claude, codex) uses; `MCP_COMMAND` is the single argv a `command:[...]` config
- * (opencode) uses. */
-export const MCP_LAUNCHER = "cyc"
+/* The MCP wiring every harness config carries: the ABSOLUTE path of the cyc
+ * shim (the installer always writes it at ~/.bun/bin/cyc). Bare `cyc` looked
+ * portable but relied on PATH, and harness hooks run under /bin/sh with a
+ * bare system PATH that never includes ~/.bun/bin -- live 2026-09-22, every
+ * hook and the MCP died with "cyc: command not found" on a fresh install.
+ * The shim itself resolves the local engine, so a moved engine dir still
+ * works; only the shim's home-relative location is baked in. `MCP_ARGS` is
+ * the args a `command`+`args` config (claude, codex) uses; `MCP_COMMAND` is
+ * the single argv a `command:[...]` config (opencode) uses. */
+import * as os from "node:os"
+const home = (): string => process.env.CYC_HOME ?? os.homedir()
+export const MCP_LAUNCHER = path.join(home(), ".bun", "bin", "cyc")
 export const MCP_ARGS = ["mcp"]
 export const MCP_COMMAND = [MCP_LAUNCHER, ...MCP_ARGS]
 
@@ -122,9 +125,18 @@ export function mergeCodexToml(
   text: string,
 ): { text: string; changed: boolean; note: string } {
   if (/^\s*\[mcp_servers\.callyourcode(\.|\])/m.test(text)) {
-    // TOML is not round-trippable with a naive parser, so an existing section is
-    // left byte-for-byte intact (never rewritten). An old absolute-path section
-    // is not migrated here; the boot self-check flags it if its path is dead.
+    // TOML is not round-trippable with a naive parser, so an existing section
+    // is left byte-for-byte intact -- except OUR old bare-`cyc` command line,
+    // which relied on PATH and died under /bin/sh (2026-09-22): that one line
+    // is migrated in place to the absolute shim.
+    const bare = /^(\s*command\s*=\s*)"cyc"(\s*)$/m
+    if (bare.test(text)) {
+      return {
+        text: text.replace(bare, `$1${JSON.stringify(MCP_LAUNCHER)}$2`),
+        changed: true,
+        note: "migrated [mcp_servers.callyourcode] command to the absolute cyc shim",
+      }
+    }
     return { text, changed: false, note: "[mcp_servers.callyourcode] already present" }
   }
   const section = `[mcp_servers.callyourcode]\ncommand = ${JSON.stringify(MCP_LAUNCHER)}\nargs = ${JSON.stringify(MCP_ARGS)}\n`
@@ -148,7 +160,7 @@ export function mergeCodexToml(
  * never silently chained: chaining would mean rewriting the user's program into
  * a wrapper this installer does not own). An older absolute-path OURS notify is
  * MIGRATED in place to the launcher; ours-already-launcher is idempotent. */
-const NOTIFY_LINE = `notify = ["cyc", "hook", "announce-session", "--codex-notify"]`
+const NOTIFY_LINE = `notify = [${JSON.stringify(MCP_LAUNCHER)}, "hook", "announce-session", "--codex-notify"]`
 
 export function mergeCodexNotify(
   text: string,
@@ -198,7 +210,7 @@ export function mergeCodexNotify(
  * resolves it against the LOCAL engine, so a config copied across machines (or a
  * moved engine dir) never carries a dead absolute path -- the config-portable
  * footgun that silently killed codex's outbound reply on one host. */
-export const hookCommand = (name: string): string => `cyc hook ${name}`
+export const hookCommand = (name: string): string => `${MCP_LAUNCHER} hook ${name}`
 
 /* Is `command` OUR wire for the engine hook `name`? True for the portable
  * `cyc hook <name>` form AND for a legacy `python3 <abspath>/<name>.py` form
@@ -206,7 +218,9 @@ export const hookCommand = (name: string): string => `cyc hook ${name}`
  * absolute path). A foreign hook matches neither and is never touched. */
 function isOurHookCommand(command: unknown, name: string): boolean {
   if (typeof command !== "string") return false
-  return command.includes(hookCommand(name)) || command.includes(`/${name}.py`)
+  // `cyc hook <name>` matches the bare legacy form AND the absolute-shim form
+  // (which ends in .../cyc hook <name>), so both migrate to the current wire.
+  return command.includes(`cyc hook ${name}`) || command.includes(`/${name}.py`)
 }
 
 /* Find our existing hook object (portable or legacy) for `name` under an event's
