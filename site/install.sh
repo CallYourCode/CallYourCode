@@ -210,9 +210,23 @@ _present() {
   case "$_f" in present) return 0 ;; absent) return 1 ;; esac
   command -v "$1" >/dev/null 2>&1
 }
+
+# --- mux choice (Shikher, 2026-09-22) ---
+# herdr on the machine means the person already lives in herdr, so cyc uses
+# it without being told (the field case: her agents were open in herdr and
+# the engine watched tmux). CYC_MUX still overrides both ways: =tmux forces
+# tmux on a herdr machine, =herdr forces herdr (and the prereq gate then
+# demands it).
+if [ -n "${CYC_MUX:-}" ]; then
+  MUX="$CYC_MUX"
+elif _present herdr; then
+  MUX=herdr
+else
+  MUX=tmux
+fi
 _need=""
 if [ ! -x "$BUN_BIN" ] && ! _present bun && ! _present unzip; then _need="unzip"; fi
-if [ "${CYC_MUX:-}" = "herdr" ]; then
+if [ "$MUX" = "herdr" ]; then
   if ! _present herdr; then _need="${_need:+$_need }herdr"; fi
 else
   if ! _present tmux; then _need="${_need:+$_need }tmux"; fi
@@ -415,9 +429,12 @@ echo "deps: multiplexer"
 _herdr_before=none
 _herdr_after=none
 HERDR_RESTART_NEEDED=0
-if [ "${CYC_MUX:-}" = "herdr" ]; then
-  MUX=herdr
-  echo "deps: herdr (opted in via CYC_MUX=herdr)"
+if [ "$MUX" = "herdr" ]; then
+  if [ "${CYC_MUX:-}" = "herdr" ]; then
+    echo "deps: herdr (opted in via CYC_MUX=herdr)"
+  else
+    echo "deps: herdr (already on this machine; CYC_MUX=tmux overrides)"
+  fi
   _herdr_before="$(herdr --version 2>/dev/null | head -1 || echo none)"
   if command -v brew >/dev/null 2>&1 && brew list herdr >/dev/null 2>&1; then
     run_sh "brew upgrade herdr 2>/dev/null || brew install herdr"
@@ -434,9 +451,8 @@ if [ "${CYC_MUX:-}" = "herdr" ]; then
   if [ "$_herdr_before" != "none" ] && [ "$_herdr_before" != "$_herdr_after" ]; then
     HERDR_RESTART_NEEDED=1
   fi
-  echo "mux: herdr (opt-in)"
+  echo "mux: herdr"
 else
-  MUX=tmux
   echo "deps: tmux"
   # tmux presence is guaranteed by the prereq gate above.
   if _present tmux; then echo "tmux: present"; fi

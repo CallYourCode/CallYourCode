@@ -216,9 +216,9 @@ test("--dry-run names the dependency steps: the multiplexer and the prebuilt she
   expectUntouched(home);
 });
 
-test("default mux is tmux: no CYC_MUX step, no herdr install", async () => {
+test("default mux is tmux when herdr is not on the machine: no CYC_MUX step, no herdr install", async () => {
   const home = scratchHome();
-  const { out, code } = await dryRun("Linux", home, { CYC_FAKE_TMUX: "present" });
+  const { out, code } = await dryRun("Linux", home, { CYC_FAKE_TMUX: "present", CYC_FAKE_HERDR: "absent" });
 
   expect(code).toBe(0);
   expect(out).toContain("mux: tmux (default)");
@@ -227,13 +227,25 @@ test("default mux is tmux: no CYC_MUX step, no herdr install", async () => {
   expectUntouched(home);
 });
 
+test("herdr on the machine wins without being told; CYC_MUX=tmux still overrides (2026-09-22)", async () => {
+  const home = scratchHome();
+  const auto = await dryRun("Linux", home, { CYC_FAKE_HERDR: "present" });
+  expect(auto.code).toBe(0);
+  expect(auto.out).toContain("deps: herdr (already on this machine; CYC_MUX=tmux overrides)");
+  expect(auto.out).toContain("mux: herdr");
+
+  const forced = await dryRun("Linux", scratchHome(), { CYC_MUX: "tmux", CYC_FAKE_HERDR: "present", CYC_FAKE_TMUX: "present" });
+  expect(forced.code).toBe(0);
+  expect(forced.out).toContain("mux: tmux (default)");
+});
+
 test("CYC_MUX=herdr opts into herdr: CYC_MUX=herdr named, herdr installed", async () => {
   const home = scratchHome();
   const { out, code } = await dryRun("Linux", home, { CYC_MUX: "herdr", CYC_FAKE_HERDR: "present" });
 
   expect(code).toBe(0);
   expect(out).toContain("deps: herdr (opted in via CYC_MUX=herdr)");
-  expect(out).toContain("mux: herdr (opt-in)");
+  expect(out).toContain("mux: herdr");
   expectUntouched(home);
 
   /* The env actually reaches the service templates: one Environment= line in
@@ -246,7 +258,7 @@ test("CYC_MUX=herdr opts into herdr: CYC_MUX=herdr named, herdr installed", asyn
 
 test("tmux absent on Linux: the prereq gate names tmux, never runs privileged commands", async () => {
   const home = scratchHome();
-  const { out, code } = await dryRun("Linux", home, { CYC_FAKE_TMUX: "absent", CYC_FAKE_BZIP2: "present" });
+  const { out, code } = await dryRun("Linux", home, { CYC_FAKE_TMUX: "absent", CYC_FAKE_HERDR: "absent", CYC_FAKE_BZIP2: "present" });
 
   expect(code).toBe(0); // dry-run names the stop; the real install exits 1 there
   expect(out).toContain("prereqs: missing (tmux); install would stop here");
@@ -274,7 +286,7 @@ test("bzip2 absent on Linux: the prereq gate names bzip2 (voice models unpack wi
 
 test("default mux tmux on Darwin: the plist path carries no CYC_MUX", async () => {
   const home = scratchHome();
-  const { out, code } = await dryRun("Darwin", home, { CYC_FAKE_TMUX: "present" });
+  const { out, code } = await dryRun("Darwin", home, { CYC_FAKE_TMUX: "present", CYC_FAKE_HERDR: "absent" });
 
   expect(code).toBe(0);
   expect(out).toContain("mux: tmux (default)");
