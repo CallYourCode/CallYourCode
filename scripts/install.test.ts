@@ -458,3 +458,29 @@ test("--dry-run delegates all harnesses to one harness-integration call and touc
   expect(existsSync(join(home, ".codex"))).toBe(false);
   expectUntouched(home);
 });
+
+/** A PATH with a fake `tailscale` first: `up` answers a tailnet, else it fails
+ *  like a machine without Tailscale running. */
+function fakeTailscale(up: boolean): string {
+  const dir = scratchHome();
+  const script = up
+    ? `#!/bin/sh\ncase "$1" in status) echo '{"Self":{"DNSName":"box.tail1234.ts.net."}}';; ip) echo 100.64.0.7;; esac\n`
+    : "#!/bin/sh\nexit 1\n";
+  writeFileSync(join(dir, "tailscale"), script, { mode: 0o755 });
+  return `${dir}:${process.env.PATH}`;
+}
+
+test("no tailnet: TURN host and relay IP are 127.0.0.1, never a .local hostname", async () => {
+  const home = scratchHome();
+  const { out, code } = await dryRun("Darwin", home, { PATH: fakeTailscale(false) });
+  expect(code).toBe(0);
+  expect(out).toContain("turn: host=127.0.0.1 ip=127.0.0.1");
+  expect(out).not.toMatch(/turn: host=\S*\.local/);
+});
+
+test("tailnet up: TURN host is the MagicDNS name and the relay IP its tailnet IPv4", async () => {
+  const home = scratchHome();
+  const { out, code } = await dryRun("Linux", home, { PATH: fakeTailscale(true) });
+  expect(code).toBe(0);
+  expect(out).toContain("turn: host=box.tail1234.ts.net ip=100.64.0.7");
+});

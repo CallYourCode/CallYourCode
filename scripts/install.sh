@@ -344,6 +344,9 @@ run chmod 0700 "$DATA_DIR"
 #                       existing secret (rotating it would break live creds).
 #   TURN_HOST           this box's tailnet MagicDNS name (clients STUN it there).
 #   TURN_EXTERNAL_IP    this box's tailnet IPv4 (TURN relay candidate address).
+#   Without a tailnet both are 127.0.0.1: the app runs on this machine, and a
+#   `.local` hostname can resolve IPv6-only on macOS while TURN listens on IPv4,
+#   so ICE never pairs (reported on a Mac, 2026-09-23).
 TURN_ENV="$DATA_DIR/turn.env"
 TURN_REALM=callyourcode
 
@@ -374,11 +377,15 @@ else
 fi
 
 # Tailnet identity for the ICE list: MagicDNS name (trailing dot stripped) and
-# IPv4. Both are read-only probes that fall back when tailscale is not up.
+# IPv4. Both are read-only probes; with no tailnet, localhost.
 _ts_json="$(tailscale status --json 2>/dev/null || true)"
 TURN_HOST="$(printf '%s' "$_ts_json" | "$BUN" -e 'const t=await Bun.stdin.text();let d={};try{d=JSON.parse(t)}catch{}process.stdout.write((((d.Self||{}).DNSName)||"").replace(/\.$/,""))' 2>/dev/null || true)"
-[ -n "$TURN_HOST" ] || TURN_HOST="$(hostname 2>/dev/null || echo localhost)"
-TURN_EXTERNAL_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+if [ -n "$TURN_HOST" ]; then
+  TURN_EXTERNAL_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+else
+  TURN_HOST=127.0.0.1
+  TURN_EXTERNAL_IP=127.0.0.1
+fi
 
 # The static secret: reuse the one already on disk, else mint a fresh one. In
 # dry-run we neither read nor write; a placeholder keeps the service templates
