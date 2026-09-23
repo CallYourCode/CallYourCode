@@ -59,6 +59,28 @@ const CODEX_HOOKS = `  Interrupt hooks
 
   Press esc to go back`;
 
+const CODEX_HOOK_REVIEW = `  Hooks need review
+  2 hooks are new or changed.
+  Hooks can run outside the sandbox after you trust them.
+
+› 1. Review hooks
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+
+  Press enter to confirm or esc to go back`;
+
+const CODEX_HOOK_BROWSER = `  SessionEnd            0           0           0           Right before a session ends
+  UserPromptSubmit      0           0           0           When the user submits a prompt
+  Stop                  1           0           1           Right before Codex ends its turn
+
+  Press t to trust all; enter to review hooks; esc to close`;
+
+const CODEX_QUOTED = `• The update screen said "Press enter to continue" and I skipped it.
+
+› Ask Codex to do anything
+
+  gpt-5.6-sol default · /tmp/guardtest`;
+
 const CODEX_IDLE = `› Ask Codex to do anything
 
   gpt-6-astra default · ~/qtest`;
@@ -84,6 +106,9 @@ describe("dialogScreen: real dialogs match, normal screens do not", () => {
   test("codex", () => {
     expect(codexReader.dialogScreen!(CODEX_UPDATE)).toBe(true);
     expect(codexReader.dialogScreen!(CODEX_HOOKS)).toBe(true);
+    expect(codexReader.dialogScreen!(CODEX_HOOK_REVIEW)).toBe(true);
+    expect(codexReader.dialogScreen!(CODEX_HOOK_BROWSER)).toBe(true);
+    expect(codexReader.dialogScreen!(CODEX_QUOTED)).toBe(false);
     expect(codexReader.dialogScreen!(CODEX_IDLE)).toBe(false);
   });
   test("opencode", () => {
