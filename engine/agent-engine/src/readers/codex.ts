@@ -129,6 +129,25 @@ export function codexTailEvent(line: string, off: number): SessionEvent | null {
   return ev;
 }
 
+/** The RAW joined text of a rollout user record, or null: the queued-clear's
+ *  exact-match string (readers/types.ts consumedOf). The rollout logs the
+ *  delivered message verbatim as {type:"response_item", payload:{type:
+ *  "message", role:"user", content:[{type:"input_text", text}]}} (fixture
+ *  codex-rollout.jsonl). Harness-injected user records (plugin dumps) also
+ *  match this shape; they simply never hit the awaiting index, so extracting
+ *  them is harmless. */
+export function codexConsumedOf(line: string): string | null {
+  if (!line.includes('"response_item"') || !line.includes('"user"')) return null;
+  let rec: any;
+  try { rec = JSON.parse(line); } catch { return null; }
+  const p = rec?.payload;
+  if (rec?.type !== "response_item" || p?.type !== "message" || p?.role !== "user") return null;
+  const c = p.content;
+  if (!Array.isArray(c)) return null;
+  const parts = c.filter((b: any) => b?.type === "input_text" && typeof b.text === "string").map((b: any) => b.text);
+  return parts.length ? parts.join("") : null;
+}
+
 export const codexReader: HarnessReader = {
   tag: "codex",
 
@@ -148,7 +167,7 @@ export const codexReader: HarnessReader = {
   // The activity tail: item_completed / turn_aborted -> tool / compact /
   // interrupt rows (the extraction above), behind the declared slot
   // (readers/types.ts).
-  sessionEvents: { mode: "lines", eventOf: codexTailEvent },
+  sessionEvents: { mode: "lines", eventOf: codexTailEvent, consumedOf: codexConsumedOf },
 
   contextPct: CODEX_TRANSCRIPT.contextPct,
   model: CODEX_TRANSCRIPT.model,

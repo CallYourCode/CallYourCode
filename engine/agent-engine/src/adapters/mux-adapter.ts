@@ -985,7 +985,7 @@ export class MuxAdapter implements MultiplexerAdapter {
       existing.cb = cb; // defensive re-subscribe: swap the callback, keep the watch
       return { stop: () => this.stopOverlayTail(handle), at: existing.parser.offset };
     }
-    const parser = new SessionTailParser(path, src.eventOf);
+    const parser = new SessionTailParser(path, src.eventOf, src.consumedOf);
     const size = Bun.file(path).size;
     parser.offset = from !== null && from >= 0 && from <= size ? from : size;
     const at = parser.offset;

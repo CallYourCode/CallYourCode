@@ -72,7 +72,11 @@ export type HarnessCaps = {
  * a re-read, a replay past the pointer, or a second source of the same fact
  * must map to the same key. */
 export type SessionEventSource =
-  | { mode: "lines"; eventOf(line: string, off: number): SessionEvent | null }
+  /* `consumedOf` (optional, lines mode): the RAW text of a user record this
+   * line carries, for the same queued-clear `consumed` serves in poll mode
+   * below. The claude-format side parse (tailSideOf) runs regardless; this is
+   * for a harness whose user records are not claude-shaped (codex). */
+  | { mode: "lines"; eventOf(line: string, off: number): SessionEvent | null; consumedOf?(line: string): string | null }
   /* `consumed` (optional): the RAW texts of user records this drain saw land in
    * the harness's own store -- the proof a delivered message entered the model's
    * context, which is what clears the app's "Queued" mark (chat/ingest

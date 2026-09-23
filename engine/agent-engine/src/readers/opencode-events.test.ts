@@ -78,7 +78,7 @@ describe("the sqlite poll", () => {
     mkDb(db, baseRows);
     const first = await opencodeEventsSince(`${db}#${SID}`, 0);
     const again = await opencodeEventsSince(`${db}#${SID}`, first!.cursor);
-    expect(again).toEqual({ events: [], cursor: first!.cursor });
+    expect(again).toEqual({ events: [], cursor: first!.cursor, consumed: [] });
     // and the same question twice gives the same answer (pure read)
     expect(await opencodeEventsSince(`${db}#${SID}`, 0)).toEqual(first);
   });
@@ -88,7 +88,7 @@ describe("the sqlite poll", () => {
     const db = join(dir, "opencode.db");
     mkDb(db, [["prt_run", SID, 2000, 2001, runningTool]]);
     const first = await opencodeEventsSince(`${db}#${SID}`, 0);
-    expect(first).toEqual({ events: [], cursor: 2001 });
+    expect(first).toEqual({ events: [], cursor: 2001, consumed: [] });
     // the harness finishes the call: same row id, bumped time_updated
     const d = new Database(db);
     d.run("update part set time_updated = 2050, data = ? where id = 'prt_run'",
@@ -129,5 +129,33 @@ describe("the captured-dump branch (the transcript reads' .json shape)", () => {
 describe("the declared slot", () => {
   test("opencode declares the poll source with this read", () => {
     expect(opencodeReader.sessionEvents).toEqual({ mode: "poll", since: opencodeEventsSince });
+  });
+});
+
+describe("the queued-clear consumed texts off the db", () => {
+  test("a text part under a USER message answers its raw text; assistant text and tool parts do not", async () => {
+    const dir = await tmpDir("oc-consumed");
+    const db = join(dir, "opencode.db");
+    const sq = new Database(db);
+    sq.run("create table part (id text, message_id text, session_id text, time_created integer, time_updated integer, data text)");
+    sq.run("create table message (id text, session_id text, time_created integer, time_updated integer, data text)");
+    const sid = "ses_consumedtest000000000001";
+    sq.run("insert into message values ('m-user', ?, 1, 1, ?)", [sid, JSON.stringify({ role: "user", time: { created: 1 } })]);
+    sq.run("insert into message values ('m-asst', ?, 2, 2, ?)", [sid, JSON.stringify({ role: "assistant" })]);
+    const sent = "TEXT: status please  ";
+    sq.run("insert into part values ('p1','m-user',?,10,10,?)", [sid, JSON.stringify({ type: "text", text: sent })]);
+    sq.run("insert into part values ('p2','m-asst',?,11,11,?)", [sid, JSON.stringify({ type: "text", text: "the answer" })]);
+    sq.run("insert into part values ('p3','m-asst',?,12,12,?)", [sid, JSON.stringify({ type: "tool", tool: "bash",
+      callID: "b1", state: { status: "completed", input: { command: "ls" }, title: "ls" } })]);
+    sq.close();
+
+    const got = await opencodeEventsSince(`${db}#${sid}`, 0);
+    expect(got).not.toBeNull();
+    expect(got!.consumed, "the user's raw text, exactly as stored").toEqual([sent]);
+    expect(got!.events.map((e) => e.kind), "rows are unchanged by the consumed read").toEqual(["tool"]);
+
+    // past the cursor: nothing more to consume
+    const again = await opencodeEventsSince(`${db}#${sid}`, got!.cursor);
+    expect(again!.consumed).toEqual([]);
   });
 });

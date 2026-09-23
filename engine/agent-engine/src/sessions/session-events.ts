@@ -1097,7 +1097,10 @@ export class SessionTailParser {
    * the exact function every existing caller got, so a parser built without the
    * argument is byte-identical to before (the TurnStatusParser edgeOf shape). */
   constructor(readonly path: string,
-    readonly eventOf: (line: string, off: number) => SessionEvent | null = tailEventOf) {}
+    readonly eventOf: (line: string, off: number) => SessionEvent | null = tailEventOf,
+    /** the reader's own raw-user-text extraction (readers/types.ts consumedOf),
+     *  beside the claude-format side parse, for the queued-clear */
+    readonly consumedOf?: (line: string) => string | null) {}
 
   // queue operations seen in the last drain (the overlay ignores these; the
   // engine uses them to mark which messages Claude has taken into context)
@@ -1132,6 +1135,8 @@ export class SessionTailParser {
       const off = this.offset + lineStart;
       const line = decoder.decode(buf.subarray(lineStart, i)).trim();
       tailSideOf(line, off, this);
+      const raw = this.consumedOf?.(line);
+      if (raw) this.consumed.push(raw);
       const ev = this.eventOf(line, off);
       if (ev) out.push(ev);
       lineStart = i + 1;

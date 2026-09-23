@@ -139,7 +139,8 @@ describe("everything else maps to nothing", () => {
 
 describe("the declared slot", () => {
   test("codex declares the lines source with this extraction; claude's slot IS the tailEventOf the parser always used (byte-identical move)", () => {
-    expect(codexReader.sessionEvents).toEqual({ mode: "lines", eventOf: codexTailEvent });
+    expect(codexReader.sessionEvents!.mode).toBe("lines");
+    expect((codexReader.sessionEvents as { eventOf: unknown }).eventOf).toBe(codexTailEvent);
     expect(claudeReader.sessionEvents!.mode).toBe("lines");
     expect((claudeReader.sessionEvents as { eventOf: unknown }).eventOf).toBe(tailEventOf);
   });
@@ -173,5 +174,33 @@ describe("through the SessionTailParser (the tail the adapter runs)", () => {
     expect(second).toHaveLength(1);
     expect(second[0]).toMatchObject({ uuid: "comp-t1", kind: "compact", off: l1.length + 1 });
     expect(await parser.drain()).toEqual([]); // level: nothing re-drains
+  });
+});
+
+describe("codexConsumedOf: the queued-clear raw text off a rollout user record", () => {
+  const userLine = (text: string): string =>
+    JSON.stringify({ timestamp: TS, type: "response_item", payload: {
+      type: "message", id: "msg_x", role: "user",
+      content: [{ type: "input_text", text }] } });
+
+  test("a delivered user record answers its raw text; everything else null", async () => {
+    const { codexConsumedOf } = await import("./codex.ts");
+    const sent = "TEXT: try again  "; // raw, whitespace kept
+    expect(codexConsumedOf(userLine(sent))).toBe(sent);
+    // an assistant record, an event_msg, and junk all answer null
+    expect(codexConsumedOf(JSON.stringify({ timestamp: TS, type: "response_item",
+      payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] } }))).toBeNull();
+    expect(codexConsumedOf(itemLine({ id: "item_1", item_type: "AgentMessage", text: "x" }))).toBeNull();
+    expect(codexConsumedOf("{not json")).toBeNull();
+  });
+
+  test("the tail parser collects it into `consumed` beside the claude side parse", async () => {
+    const { codexConsumedOf } = await import("./codex.ts");
+    const dir = await tmpDir("codex-consumed");
+    const path = join(dir, "rollout.jsonl");
+    writeFileSync(path, userLine("TEXT: what now?") + "\n");
+    const parser = new SessionTailParser(path, codexTailEvent, codexConsumedOf);
+    await parser.drain();
+    expect(parser.consumed).toEqual(["TEXT: what now?"]);
   });
 });

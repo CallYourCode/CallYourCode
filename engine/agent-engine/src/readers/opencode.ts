@@ -48,7 +48,7 @@ function ocCap(s: string): string {
   return t.length > OC_TEXT_CAP ? t.slice(0, OC_TEXT_CAP) + "…" : t;
 }
 
-type OcPartRow = { id: string; time_created: number; time_updated: number; data: any };
+type OcPartRow = { id: string; time_created: number; time_updated: number; data: any; message_id?: string };
 
 function ocToolEvent(row: OcPartRow): SessionEvent | null {
   const d = row.data;
@@ -68,11 +68,12 @@ function ocToolEvent(row: OcPartRow): SessionEvent | null {
  *  Accepts the locate's `db#sessionId` shape, and a captured `.json#sessionId`
  *  dump the way the transcript reads do. Exported for the fixture tests. */
 export async function opencodeEventsSince(path: string, cursor: number):
-  Promise<{ events: SessionEvent[]; cursor: number } | null> {
+  Promise<{ events: SessionEvent[]; cursor: number; consumed: string[] } | null> {
   const { db, sessionId } = splitOpenCodePath(path);
   if (!sessionId) return null;
   const f = Bun.file(db);
   if (!(await f.exists())) return null;
+  const consumed: string[] = [];
   let rows: OcPartRow[];
   if (db.endsWith(".json")) {
     let dump: any;
@@ -80,7 +81,8 @@ export async function opencodeEventsSince(path: string, cursor: number):
     rows = (Array.isArray(dump?.parts) ? dump.parts : [])
       .filter((p: any) => (p?.session_id ?? sessionId) === sessionId)
       .map((p: any) => ({ id: String(p.id ?? ""), time_created: Number(p.time_created ?? 0),
-        time_updated: Number(p.time_updated ?? p.time_created ?? 0), data: p.data }))
+        time_updated: Number(p.time_updated ?? p.time_created ?? 0), data: p.data,
+        message_id: typeof p.message_id === "string" ? p.message_id : undefined }))
       .filter((r: OcPartRow) => r.id && r.time_updated > cursor)
       .sort((a: OcPartRow, b: OcPartRow) => a.time_updated - b.time_updated || (a.id < b.id ? -1 : 1));
   } else {
@@ -89,13 +91,38 @@ export async function opencodeEventsSince(path: string, cursor: number):
       const sqlite = new Database(db, { readonly: true });
       try {
         rows = (sqlite.query(
-          "select id, time_created, time_updated, data from part where session_id = ? and time_updated > ? order by time_updated, id",
-        ).all(sessionId, cursor) as Array<{ id: string; time_created: number; time_updated: number; data: string }>)
+          "select id, message_id, time_created, time_updated, data from part where session_id = ? and time_updated > ? order by time_updated, id",
+        ).all(sessionId, cursor) as Array<{ id: string; message_id: string; time_created: number; time_updated: number; data: string }>)
           .map((r) => {
             let data: any = null;
             try { data = JSON.parse(r.data); } catch { /* an unparsable row maps to no event */ }
-            return { id: r.id, time_created: r.time_created, time_updated: r.time_updated, data };
+            return { id: r.id, message_id: r.message_id, time_created: r.time_created, time_updated: r.time_updated, data };
           });
+        /* THE QUEUED-CLEAR SOURCE: a text part under a USER message is the
+         * delivered message landing in opencode's store, so its RAW text is
+         * what clears the app's "Queued" mark (chat/ingest markInContext,
+         * exact match). The role lives on the message row, not the part
+         * (message.data JSON carries {"role":"user"}, verified on this box's
+         * ~/.local/share/opencode/opencode.db), so the candidate parts' roles
+         * are read in one IN query. */
+        const textParts = rows.filter((r) => r.data?.type === "text" && typeof r.data.text === "string" && r.message_id);
+        if (textParts.length) {
+          /* Its own try: a store without the message table (an old schema, a
+           * pruned capture) means no consumed this drain, never a failed poll
+           * -- the rows above still ship. */
+          try {
+            const ids = [...new Set(textParts.map((r) => r.message_id as string))];
+            const marks = ids.map(() => "?").join(",");
+            const roleOf = new Map<string, string>();
+            for (const m of sqlite.query(`select id, data from message where id in (${marks})`)
+              .all(...ids) as Array<{ id: string; data: string }>) {
+              try { roleOf.set(m.id, JSON.parse(m.data)?.role ?? ""); } catch { /* no role, no consume */ }
+            }
+            for (const r of textParts) {
+              if (roleOf.get(r.message_id as string) === "user") consumed.push(r.data.text as string);
+            }
+          } catch { /* role source missing: consumed stays empty */ }
+        }
       } finally {
         sqlite.close();
       }
@@ -110,7 +137,7 @@ export async function opencodeEventsSince(path: string, cursor: number):
     const ev = ocToolEvent(row);
     if (ev) events.push(ev);
   }
-  return { events, cursor: next };
+  return { events, cursor: next, consumed };
 }
 
 export const opencodeReader: HarnessReader = {
