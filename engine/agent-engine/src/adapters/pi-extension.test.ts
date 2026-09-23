@@ -360,6 +360,18 @@ describe("the pi output extension", () => {
 
   afterEach(() => { announce.announcedSessions.clear(); });
 
+  test("CYC_ENGINE_URL wins over AGENT_PORT (a second user's engine on another port)", async () => {
+    const s = serveCapture();
+    const env = { CYC_ENGINE_URL: `http://127.0.0.1:${s.port}`, AGENT_PORT: "1", HERDR_PANE_ID: "w1:p2" };
+    try {
+      await announce.announceSession("sess-pi-url", "/home/other/proj", env);
+    } finally {
+      s.stop();
+    }
+    expect(s.captured.length).toBe(1);
+    expect(s.captured[0].body).toMatchObject({ sessionId: "sess-pi-url", herdrPane: "w1:p2", harness: "pi" });
+  });
+
   test("session start POSTs exactly one /harness/announce with the pi body", async () => {
     const s = serveCapture();
     const env = { AGENT_PORT: String(s.port), HERDR_PANE_ID: "w1:p3", TMUX_PANE: "%7" };
@@ -495,3 +507,4 @@ describe("the foreground guard (claude's enforce-bash-async, ported)", () => {
     expect(fire(pi, {})).toBeUndefined();
   });
 });
+

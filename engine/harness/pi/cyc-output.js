@@ -28,7 +28,7 @@
 // pi loads it with no build step.
 
 const net = require("node:net");
-const { registerReplyTools } = require("./reply-channel.js");
+const { registerReplyTools, _internal: engineIO } = require("./reply-channel.js");
 
 const TOOL_CAP = 200; // one-line tool summaries, matches the engine's TEXT_CAP
 const BODY_CAP = 20000; // prompts/replies keep their body (engine BODY_CAP)
@@ -58,14 +58,15 @@ const announcedSessions = new Set();
  *  closed port, timeout). The witnesses ride the pane's own environment --
  *  HERDR_PANE_ID is set by herdr in each pane it opens, TMUX_PANE by tmux --
  *  exactly the source the opencode plugin and claude hook read, so no engine
- *  env-add is needed. AGENT_PORT defaults to the loopback engine port 10101. */
+ *  env-add is needed. The engine is found the way the reply tools find it
+ *  (CYC_ENGINE_URL, else the local socket, else AGENT_PORT/10101): an engine
+ *  on another port (a second user's stack) must get its own panes' announces. */
 async function announceSession(sessionId, cwd, env, model, force) {
   const e = env || process.env;
   try {
     if (!sessionId || (announcedSessions.has(sessionId) && !force)) return;
     announcedSessions.add(sessionId);
-    const port = e.AGENT_PORT || "10101";
-    const body = JSON.stringify({
+    const body = {
       sessionId,
       pid: process.pid,
       cwd: cwd == null ? null : cwd,
@@ -74,13 +75,8 @@ async function announceSession(sessionId, cwd, env, model, force) {
       harness: "pi",
       model: model || null,
       event: "session_start",
-    });
-    await fetch(`http://127.0.0.1:${port}/harness/announce`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body,
-      signal: AbortSignal.timeout(ANNOUNCE_TIMEOUT_MS),
-    });
+    };
+    await engineIO.postJson(engineIO.resolveEngineTarget(e), "/harness/announce", body, ANNOUNCE_TIMEOUT_MS);
   } catch {
     /* fails silent, always */
   }
