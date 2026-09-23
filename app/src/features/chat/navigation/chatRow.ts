@@ -152,12 +152,19 @@ function deriveBadges(s: CycSession, opts: ChatRowOpts): BadgeDesc {
 // One chip face for the host, harness and model chips on a session row (the
 // same face pluginCard.ts paints for its host chips).
 const ROW_CHIP_UTILS =
-  'flex-[0_1_auto] ms-1.5 px-1.5 rounded-md bg-[var(--cyc-text-muted-tint)] text-[var(--cyc-text-muted)] text-xs font-normal leading-[1.35] whitespace-nowrap overflow-hidden text-ellipsis';
+  'flex-[0_1_auto] ms-1.5 px-1.5 rounded-md bg-[var(--cyc-text-muted-tint)] text-[var(--cyc-text-muted)] text-[0.6875rem] font-normal leading-[1.45] whitespace-nowrap overflow-hidden text-ellipsis';
 
 const SUBTITLE_CLASS =
   'cyc-list-row-subtitle relative pointer-events-none overflow-hidden text-ellipsis whitespace-nowrap min-w-0 flex-[0_1_auto] text-[color:var(--cyc-text-muted)]';
 const MUTE_ICON_UTILS = 'flex-none ms-0.5 text-[1.125rem] text-[var(--cyc-session-quiet-color)]';
-const SESSION_BADGE_UTILS = 'block! ms-2 flex-none relative [transition:none]! rounded-[6px]!';
+/* pointer-events-none, like the title and subtitle: the unread badge is
+ * repainted by live broadcasts, and a tap that lands ON it while it is being
+ * replaced retargets the click to the list background, which reads as
+ * "deselect everything". Decoration must never be a click target. */
+const SESSION_BADGE_UTILS = 'block! ms-2 flex-none relative [transition:none]! rounded-[6px]! pointer-events-none';
+// the row's own unread pill: a step under the chrome badge (BADGE_PROMINENT),
+// sized to sit beside the row-two chips (owner: "the [1] can be smaller too")
+const ROW_BADGE_SIZE = 'h-[1.375rem] min-w-[1.375rem] leading-[1.375rem] px-1.5';
 
 export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElement {
   const a = h(
@@ -186,7 +193,8 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
   // first row (long names were truncating to "CYC Bu..." while row two sat
   // empty). Each chip keeps the shared face's start margin, spacing it from
   // the time and its neighbours alike.
-  const chipsWrap = h('div', 'cyc-list-row-chips flex flex-none min-w-0 items-center');
+  // ms-auto pins the shelf to the row's right edge (owner: right-aligned).
+  const chipsWrap = h('div', 'cyc-list-row-chips flex flex-none min-w-0 items-center ms-auto pointer-events-none');
   const subtitle = h('div', SUBTITLE_CLASS);
   // One size in every state (idle "19m", busy "thinking · 3m"): 0.875rem is 14px at
   // the 16px base, a step under the 1rem title. line-height stays 1.375rem so the
@@ -196,7 +204,7 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
   subtitle.style.setProperty('margin-top', '0', 'important');
   // the left cluster: elapsed/status first, chips after it; the cluster (not
   // the subtitle) takes the row's spare width so the chips hug the time.
-  const subLeft = h('div', 'flex min-w-0 flex-auto items-center');
+  const subLeft = h('div', 'flex min-w-0 flex-auto items-center pointer-events-none');
   subLeft.append(subtitle, chipsWrap);
   subtitleRow.append(subLeft);
   const titleRow = h(
@@ -251,7 +259,7 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
       const badge = h(
         'div',
         'cyc-session-badge cyc-session-badge-unread ' +
-          BADGE_PROMINENT +
+          ROW_BADGE_SIZE +
           ' ' +
           BADGE_FACE +
           ' ' +
