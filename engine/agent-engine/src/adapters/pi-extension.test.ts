@@ -237,7 +237,7 @@ describe("the pi output extension", () => {
     try {
       const pi = stubPi();
       activate(pi as any);
-      expect([...pi.handlers.keys()]).toEqual(["session_start"]);
+      expect([...pi.handlers.keys()]).toEqual(["tool_call", "session_start"]);
       pi.emit("session_start", { type: "session_start", reason: "startup" }, ctxFor());
       const body = await posted;
       expect(posts).toHaveLength(1);
@@ -452,5 +452,40 @@ describe("the pi output extension", () => {
     expect(pi.handlers.has("session_start")).toBe(true);
     expect(pi.handlers.has("message_end")).toBe(true);
     expect(pi.handlers.has("tool_call")).toBe(false);
+  });
+});
+
+
+describe("the foreground guard (claude's enforce-bash-async, ported)", () => {
+  const fire = (pi: ReturnType<typeof stubPi>, input: Record<string, unknown>) => {
+    let out: unknown;
+    pi.handlers.get("tool_call")!(
+      { toolName: "bash", input },
+      {},
+    );
+    // the handler is sync in the extension; re-invoke capturing the return
+    out = (pi.handlers.get("tool_call") as (e: unknown, c: unknown) => unknown)(
+      { toolName: "bash", input }, {},
+    );
+    return out as { block?: boolean; reason?: string } | undefined;
+  };
+
+  test("no timeout blocks; a bounded timeout passes; backgrounded passes", () => {
+    delete process.env.CYC_PI_EVENT_SOCK;
+    const pi = stubPi();
+    activate(pi as any);
+    expect(fire(pi, { command: "sleep 999" })?.block).toBe(true);
+    expect(fire(pi, { command: "sleep 999", timeout: 3600 })?.block).toBe(true);
+    expect(fire(pi, { command: "echo hi", timeout: 10 })).toBeUndefined();
+    expect(fire(pi, { command: "bun test > /tmp/o.log 2>&1 &" })).toBeUndefined();
+    expect(fire(pi, { command: "nohup long-build" })).toBeUndefined();
+  });
+
+  test("non-bash tools and empty commands pass untouched", () => {
+    delete process.env.CYC_PI_EVENT_SOCK;
+    const pi = stubPi();
+    activate(pi as any);
+    expect((pi.handlers.get("tool_call") as any)({ toolName: "read", input: { path: "/x" } }, {})).toBeUndefined();
+    expect(fire(pi, {})).toBeUndefined();
   });
 });

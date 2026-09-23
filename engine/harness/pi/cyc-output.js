@@ -307,6 +307,35 @@ function activate(pi, deps) {
     }
   };
 
+  /* THE FOREGROUND GUARD, the pi port of claude's enforce-bash-async hook: a
+   * bash call with no timeout holds the whole conversation, and in a voice
+   * chat a silent agent is indistinguishable from a dead one. Same rule:
+   * timeout <= 60s, or background it. Veto only; never throws. */
+  try {
+    pi.on("tool_call", (event) => {
+      try {
+        if (!event || event.toolName !== "bash" || !event.input) return undefined;
+        const cmd = String(event.input.command || "");
+        if (!cmd) return undefined;
+        // backgrounded work is exempt: it returns immediately
+        if (/(^|[;&|]\s*)(nohup|setsid)\s/.test(cmd) || /&\s*$/.test(cmd)) return undefined;
+        const t = Number(event.input.timeout);
+        if (Number.isFinite(t) && t > 0 && t <= 60) return undefined;
+        return {
+          block: true,
+          reason:
+            "BLOCKED: this bash call has no timeout (or one over 60s), so it could hold the conversation for an unbounded time. " +
+            "Re-run it EITHER backgrounded (append ' > /tmp/out.log 2>&1 &', or use nohup/setsid; preferred for anything slow: installs, builds, test suites) " +
+            "OR with timeout <= 60 (seconds) if it is genuinely fast.",
+        };
+      } catch {
+        return undefined; // the guard must never take pi down
+      }
+    });
+  } catch {
+    // an old pi without tool_call veto: no guard, no crash
+  }
+
   const sockPath = process.env.CYC_PI_EVENT_SOCK;
   if (!sockPath) {
     /* NOT LAUNCHED BY CYC (a plain `pi` typed into a pane, loading this file
