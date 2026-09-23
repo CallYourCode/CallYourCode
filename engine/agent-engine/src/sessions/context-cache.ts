@@ -13,6 +13,7 @@
 
 import { realClock, type Clock } from "../runtime/clock.ts";
 import { modelDisplayName } from "./model-names.ts";
+import { liveModelOf } from "../terminal/hook-announce.ts";
 
 export const CONTEXT_POLL_MS = 8000;
 
@@ -39,7 +40,7 @@ const claudeSidOf = (s: CtxSession): string | null =>
 
 type CtxDeps = {
   sessions(): Iterable<CtxSession>;
-  transcriptFile(muxHandle: string): { path: string } | null;
+  transcriptFile(muxHandle: string): { path: string; sessionId?: string } | null;
   contextRead(muxHandle: string): Promise<{ pct: number | null; model: string | null } | null>;
   /* THE CLAUDE READER SEAM. Instead of value-importing session-events.ts,
    * this module reaches claude's transcript path, its context/model reading and
@@ -175,7 +176,9 @@ export async function refreshContext(s: CtxSession): Promise<boolean> {
   const key = contextKey(s);
   const size = Bun.file(statPathOf(located.path)).size;
   const had = contextByKey.get(key);
-  if (had && had.size === size) return false;
+  // an announced model switch is news even when the transcript has not grown
+  const live = located.sessionId ? liveModelOf(located.sessionId) : null;
+  if (had && had.size === size && (live === null || live === had.modelId)) return false;
   const read = await deps.contextRead(s.muxHandle);
   if (!read) return false;
   // The generic read hands back the transcript's RAW model id (a pi pane on the

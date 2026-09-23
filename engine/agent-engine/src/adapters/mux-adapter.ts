@@ -20,7 +20,7 @@ import { opencodeReader } from "../readers/opencode.ts";
 import { piReader } from "../readers/pi.ts";
 import type { DirectInputEndpoint } from "./pi-direct.ts";
 import { piEventSockPath, programToken } from "./pi-launch.ts";
-import { recordHookBind } from "../terminal/hook-announce.ts";
+import { liveModelOf, recordHookBind } from "../terminal/hook-announce.ts";
 import { carryDirectHandleBind } from "../sessions/carry.ts";
 import { isHarnessSessionId } from "../runtime/ids.ts";
 import { preTrustLaunchFolder } from "./trust-folder.ts";
@@ -1473,7 +1473,7 @@ export class MuxAdapter implements MultiplexerAdapter {
       reader.contextPct(located.path),
       reader.model(located.path),
     ]);
-    return { pct, model };
+    return { pct, model: liveModelOf(located.sessionId) ?? model };
   }
 
   /** The adapter's session-shaped guard, from its own agent snapshot. */

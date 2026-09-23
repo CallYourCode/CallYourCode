@@ -59,10 +59,10 @@ const announcedSessions = new Set();
  *  HERDR_PANE_ID is set by herdr in each pane it opens, TMUX_PANE by tmux --
  *  exactly the source the opencode plugin and claude hook read, so no engine
  *  env-add is needed. AGENT_PORT defaults to the loopback engine port 10101. */
-async function announceSession(sessionId, cwd, env) {
+async function announceSession(sessionId, cwd, env, model, force) {
   const e = env || process.env;
   try {
-    if (!sessionId || announcedSessions.has(sessionId)) return;
+    if (!sessionId || (announcedSessions.has(sessionId) && !force)) return;
     announcedSessions.add(sessionId);
     const port = e.AGENT_PORT || "10101";
     const body = JSON.stringify({
@@ -72,6 +72,7 @@ async function announceSession(sessionId, cwd, env) {
       herdrPane: e.HERDR_PANE_ID != null ? e.HERDR_PANE_ID : null,
       tmuxPane: e.TMUX_PANE != null ? e.TMUX_PANE : null,
       harness: "pi",
+      model: model || null,
       event: "session_start",
     });
     await fetch(`http://127.0.0.1:${port}/harness/announce`, {
@@ -274,6 +275,15 @@ function modelOf(ctx) {
   }
 }
 
+/** A model switch re-announces, so the app's model chip follows the running
+ *  model instead of waiting for the next reply to land in the transcript. */
+function onModelSelect(on) {
+  on("model_select", (event, ctx) => {
+    const m = event && event.model && typeof event.model.id === "string" ? event.model.id : modelOf(ctx);
+    void announceSession(sessionIdOf(ctx), cwdOf(ctx), undefined, m, true);
+  });
+}
+
 /** The extension factory pi calls with its API. Exported as default AND as a
  *  named `activate` so a test can drive it against a stub pi without pi. */
 function activate(pi, deps) {
@@ -344,8 +354,9 @@ function activate(pi, deps) {
      * and the chat shows replies with no session rows. The announce is an
      * HTTP POST, independent of the socket, so it runs here too. */
     on("session_start", (_event, ctx) => {
-      void announceSession(sessionIdOf(ctx), cwdOf(ctx));
+      void announceSession(sessionIdOf(ctx), cwdOf(ctx), undefined, modelOf(ctx));
     });
+    onModelSelect(on);
     return;
   }
 
@@ -382,8 +393,9 @@ function activate(pi, deps) {
     // the RELIABLE identity path: POST the session id to /harness/announce,
     // the same race-free way claude/codex/opencode capture theirs. Fire-and-
     // forget, fail-silent; the socket re-send above is the backstop.
-    void announceSession(sessionId, cwd);
+    void announceSession(sessionId, cwd, undefined, frame.model);
   });
+  onModelSelect(on);
 
   // live working/idle: the agent loop is the turn. turn_start opens it,
   // agent_end closes it. The consumer feeds these to the same jsonl-status

@@ -237,12 +237,18 @@ describe("the pi output extension", () => {
     try {
       const pi = stubPi();
       activate(pi as any);
-      expect([...pi.handlers.keys()]).toEqual(["tool_call", "session_start"]);
+      expect([...pi.handlers.keys()]).toEqual(["tool_call", "session_start", "model_select"]);
       pi.emit("session_start", { type: "session_start", reason: "startup" }, ctxFor());
       const body = await posted;
       expect(posts).toHaveLength(1);
       expect(posts[0].path).toBe("/harness/announce");
       expect(body).toMatchObject({ sessionId: "sess-abc", cwd: "/work", harness: "pi" });
+      // a model switch re-announces the same session with the new model
+      let again: (b: any) => void = () => {};
+      const reposted = new Promise<any>((r) => { again = r; });
+      got = again;
+      pi.emit("model_select", { type: "model_select", model: { id: "claude-opus-5-5" } }, ctxFor());
+      expect(await reposted).toMatchObject({ sessionId: "sess-abc", model: "claude-opus-5-5" });
     } finally {
       process.env.AGENT_PORT = prevPort;
       server.stop(true);

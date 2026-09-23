@@ -11,7 +11,8 @@
  */
 
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { manualClock } from "../runtime/clock.ts";
 import { tmpDir } from "../test-utils/tmp.ts";
@@ -20,6 +21,7 @@ import {
   contextPctOf, contextEntryOf, modelOf, modelAcronymOf, claudeTitleOf,
   type CtxSession,
 } from "./context-cache.ts";
+import { handleAnnounce, liveModelOf, resetHookAnnounce } from "../terminal/hook-announce.ts";
 
 const CWD = "/tmp/ctx-seam";
 const CSID = "aa11bb22-cc33-4d44-8e55-ff6677889900";
@@ -101,6 +103,40 @@ test("a non-claude session's raw model id is mapped to its display name", async 
   await pollOnce();
   expect(contextPctOf(piSession)).toBe(26);
   expect(modelOf(piSession)).toBe("Fable 5");
+});
+
+test("an announced model switch re-reads an unchanged pi transcript (chip follows the switch)", async () => {
+  const piSession: CtxSession = {
+    id: "pi-live", harnessSessionId: null, agent: { id: "pi" }, hasTranscript: true,
+    cwd: CWD, muxHandle: "w1:pA", alive: true,
+  };
+  let model = "claude-haiku-4-5";
+  let reads = 0;
+  const prevDir = process.env.CYC_DATA_DIR;
+  process.env.CYC_DATA_DIR = mkdtempSync(join(tmpdir(), "ctx-live-")); // the announce persists
+  resetHookAnnounce();
+  resetForTest();
+  initContextCache({
+    sessions: () => [piSession],
+    transcriptFile: () => ({ path, sessionId: "sess-live-chip" }),
+    contextRead: async () => { reads++; return { pct: 1, model: liveModelOf("sess-live-chip") ?? model }; },
+    claudeTranscriptPath: () => null,
+    claudeContextRead: async () => null,
+    claudeTitleRead: async () => null,
+    broadcastSessions: () => {},
+    clock: manualClock(),
+  });
+  await pollOnce();
+  expect(modelOf(piSession)).toBe("Haiku 4.5");
+  await handleAnnounce({ sessionId: "sess-live-chip", pid: 999, cwd: "/w", model: "claude-sonnet-5" },
+    { resolveAgentChain: async () => ({ agentPid: 4242, nested: false }) });
+  await pollOnce(); // same bytes, but the announced model moved
+  expect(reads).toBe(2);
+  expect(modelOf(piSession)).toBe("Sonnet 5");
+  await pollOnce(); // settled: no further reads
+  expect(reads).toBe(2);
+  resetHookAnnounce();
+  process.env.CYC_DATA_DIR = prevDir;
 });
 
 test("a grown file is re-read and the new answer replaces the old", async () => {

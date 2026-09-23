@@ -84,6 +84,45 @@ export type PendingAnnounce = {
 type Bind = { sessionId: string; pid: number; at: number; link?: SessionLink };
 
 const pending: PendingAnnounce[] = [];
+/* The model a harness last announced for a session (pi's extension sends it on
+ * start and on every model switch). Fresher than the transcript, which only
+ * names a model once a reply lands. */
+let liveModels: Map<string, string> | null = null; // lazy: loaded from disk on first use
+const MODEL_RE = /^[A-Za-z0-9._:\/\[\]-]{1,120}$/;
+const LIVE_MODELS_MAX = 500;
+const modelsFile = () => stateFile("live-models.json");
+
+// persisted: an engine restart must not drop the chip back to a stale transcript
+function loadModels(): Map<string, string> {
+  if (liveModels) return liveModels;
+  liveModels = new Map();
+  try {
+    if (existsSync(modelsFile())) {
+      for (const [k, v] of Object.entries(JSON.parse(readFileSync(modelsFile(), "utf-8")) ?? {})) {
+        if (typeof v === "string" && MODEL_RE.test(v)) liveModels.set(k, v);
+      }
+    }
+  } catch { /* a bad file only costs the chip its freshness */ }
+  return liveModels;
+}
+
+function recordModel(sessionId: string, model: string): void {
+  const m = loadModels();
+  if (m.get(sessionId) === model) return;
+  m.delete(sessionId);
+  m.set(sessionId, model);
+  while (m.size > LIVE_MODELS_MAX) m.delete(m.keys().next().value!);
+  try {
+    ensureDirSync(stateDir());
+    writeFileSync(modelsFile(), JSON.stringify(Object.fromEntries(m)) + "\n");
+  } catch (e) {
+    console.error("[announce] could not write live-models.json:", e);
+  }
+}
+
+export function liveModelOf(sessionId: string): string | null {
+  return loadModels().get(sessionId) ?? null;
+}
 let binds: Map<string, Bind> | null = null; // lazy: loaded from disk on first use
 const listeners: Array<() => void> = [];
 
@@ -317,6 +356,7 @@ export async function handleAnnounce(
   const cwd = typeof b.cwd === "string" ? b.cwd : "";
   const harness = typeof b.harness === "string" && HARNESS_RE.test(b.harness) ? b.harness : null;
   const link = parseAnnounceLink(b);
+  if (typeof b.model === "string" && MODEL_RE.test(b.model)) recordModel(sessionId, b.model);
   /* A CHILD SESSION IS NOT AN AGENT (opencode `parentID`: a subagent of a
    * top-level session). It is acknowledged and never parked: binding it would
    * put a subagent's id on the parent's pane. */
@@ -411,6 +451,7 @@ export async function resolveAgentChain(pid: number): Promise<{ agentPid: number
  *  after this, so a test that re-points CYC_DATA_DIR gets a fresh store. */
 export function resetHookAnnounce(): void {
   pending.length = 0;
+  liveModels = null;
   binds = null;
   listeners.length = 0;
 }
