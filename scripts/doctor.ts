@@ -187,8 +187,34 @@ export async function runDoctor(env: EngineEnv, io: DoctorIO): Promise<DoctorRes
 
   for (const l of legs) out.push(l.line);
 
-  const failed = legs.some((l) => !l.ok) || diffs.length > 0;
+  // --- 4. PI BRIDGE: the oneMByDefault setting must have code behind it ------
+  const bridge = await bridgeLine(io)
+  if (bridge) {
+    out.push("");
+    out.push("PI BRIDGE");
+    out.push(bridge.line);
+  }
+
+  const failed = legs.some((l) => !l.ok) || diffs.length > 0 || bridge?.ok === false;
   return { text: out.join("\n"), code: failed ? 1 : 0 };
+}
+
+/* A pi reinstall/update can replace the bridge with one that lacks the
+ * oneMByDefault patch; the setting then does nothing and unmeasured models
+ * drop to 200K without a word. Null when there is no bridge to judge. */
+export async function bridgeLine(io: DoctorIO): Promise<{ line: string; ok: boolean } | null> {
+  const agent = `${io.home}/.pi/agent`;
+  const models = await io.readFile(`${agent}/npm/node_modules/pi-claude-bridge/src/models.ts`);
+  if (models === null) return null;
+  let wanted = false;
+  try {
+    wanted = JSON.parse((await io.readFile(`${agent}/claude-bridge.json`)) ?? "{}")?.provider?.oneMByDefault === true;
+  } catch { /* an unreadable config asks for nothing */ }
+  const has = /\boneMByDefault\b/.test(models);
+  if (wanted && !has) {
+    return { line: "  FAIL oneMByDefault is set but the installed bridge lacks it (reinstalled?): run `cyc install`", ok: false };
+  }
+  return { line: `  PASS oneMByDefault ${wanted ? "on" : "off"}, bridge ${has ? "supports it" : "unpatched"}`, ok: true };
 }
 
 function probePost(): RequestInit {

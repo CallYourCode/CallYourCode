@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  unitEnvFromCat, showEnvironment, diffLines, bunVersionNote, runDoctor,
+  unitEnvFromCat, showEnvironment, diffLines, bunVersionNote, runDoctor, bridgeLine,
   type DoctorIO,
 } from "./doctor.ts";
 
@@ -156,4 +156,17 @@ test("the bun WARN surfaces in RESOLVED for the known-bad 1.4.2", async () => {
   const env = { CYC_ENGINE_SOCK: fake.sock, CYC_ENGINE_URL: `unix:${fake.sock}` };
   const res = await runDoctor(env, io(fake.sock, { bunVersion: "1.4.2" }));
   expect(res.text).toContain("known-bad");
+});
+
+test("pi bridge: the setting without the patched code FAILs; patched or unset passes; no bridge, no line", async () => {
+  const BR = "/home/tester/.pi/agent/npm/node_modules/pi-claude-bridge/src/models.ts";
+  const CFG = "/home/tester/.pi/agent/claude-bridge.json";
+  const files = (models: string | null, cfg: string | null) => io("", {
+    readFile: async (p) => (p === BR ? models : p === CFG ? cfg : null),
+  });
+  const on = JSON.stringify({ provider: { oneMByDefault: true } });
+  expect((await bridgeLine(files("const x = 1", on)))!.ok).toBe(false);
+  expect((await bridgeLine(files("settings.oneMByDefault &&", on)))!.ok).toBe(true);
+  expect((await bridgeLine(files("const x = 1", null)))!.ok).toBe(true);
+  expect(await bridgeLine(files(null, on))).toBeNull();
 });

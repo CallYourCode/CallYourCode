@@ -23,6 +23,9 @@ import {
   mergeClaudeJson,
   mergeClaudeSettings,
   mergePiSettings,
+  mergeBridgeConfig,
+  bridgeHasOneM,
+  PI_BRIDGE_PATCH,
   MCP_LAUNCHER,
 } from "./harness-integration.ts"
 import { CallYourCode } from "../engine/harness/opencode/callyourcode.ts"
@@ -1112,4 +1115,61 @@ test("cli: pi install writes the repo's extension path into pi settings, then re
   expect(second.code).toBe(0)
   expect(second.out).toContain("skip  settings.json")
   expect(JSON.parse(readFileSync(file, "utf-8")).extensions).toEqual([ext])
+})
+
+// ---------------------------------------------------------------------------
+// pi-claude-bridge oneMByDefault
+
+test("bridge config: Max plan gets oneMByDefault; others and explicit values are left alone", () => {
+  const max = mergeBridgeConfig(JSON.stringify({ provider: { plan: "max", plan2: 1 }, startupNoticeShown: "x" }))
+  expect(max.changed).toBe(true)
+  expect(JSON.parse(max.text)).toEqual({ provider: { plan: "max", plan2: 1, oneMByDefault: true }, startupNoticeShown: "x" })
+  expect(mergeBridgeConfig(max.text).changed).toBe(false)
+  expect(mergeBridgeConfig(JSON.stringify({ provider: { plan: "pro" } })).changed).toBe(false)
+  expect(mergeBridgeConfig("").changed).toBe(false)
+  const off = JSON.stringify({ provider: { plan: "max", oneMByDefault: false } })
+  expect(mergeBridgeConfig(off).changed).toBe(false)
+  expect(() => mergeBridgeConfig("{nope")).toThrow()
+  expect(() => mergeBridgeConfig(JSON.stringify({ provider: [] }))).toThrow()
+})
+
+/* A bridge the patch applies to: each file is the pre-image of its hunks,
+ * which is all `patch` matches against. */
+function seedBridge(agentDir: string): string {
+  const dir = join(agentDir, "npm", "node_modules", "pi-claude-bridge")
+  const patch = readFileSync(join(REPO, PI_BRIDGE_PATCH), "utf-8")
+  for (const part of patch.split(/^diff --git /m).slice(1)) {
+    const file = part.match(/^\+\+\+ b\/(\S+)/m)![1]
+    const pre = part.split("\n").filter((l) => /^[ -]/.test(l) && !l.startsWith("---")).map((l) => l.slice(1))
+    mkdirSync(join(dir, file, ".."), { recursive: true })
+    writeFileSync(join(dir, file), pre.join("\n") + "\n")
+  }
+  return dir
+}
+
+test("cli pi: patches an unpatched bridge once, sets oneMByDefault for Max, then no-ops", async () => {
+  const home = scratch()
+  const agentDir = join(home, ".pi", "agent")
+  const bridge = seedBridge(agentDir)
+  writeFileSync(join(agentDir, "claude-bridge.json"), JSON.stringify({ provider: { plan: "max" } }))
+  expect(bridgeHasOneM(readFileSync(join(bridge, "src", "models.ts"), "utf-8"))).toBe(false)
+  const first = await runInstaller(home, [], "pi")
+  expect(first.code).toBe(0)
+  expect(first.out).toContain("applied the oneMByDefault patch")
+  expect(bridgeHasOneM(readFileSync(join(bridge, "src", "models.ts"), "utf-8"))).toBe(true)
+  expect(JSON.parse(readFileSync(join(agentDir, "claude-bridge.json"), "utf-8")).provider.oneMByDefault).toBe(true)
+  const second = await runInstaller(home, [], "pi")
+  expect(second.out).toContain("already supports oneMByDefault")
+  expect(second.out).toContain("provider.oneMByDefault already true")
+})
+
+test("cli pi: a bridge the patch does not fit is reported and left untouched", async () => {
+  const home = scratch()
+  const bridge = join(home, ".pi", "agent", "npm", "node_modules", "pi-claude-bridge")
+  mkdirSync(join(bridge, "src"), { recursive: true })
+  writeFileSync(join(bridge, "src", "models.ts"), "export const other = 1\n")
+  const r = await runInstaller(home, [], "pi")
+  expect(r.code).toBe(0)
+  expect(r.out).toContain("does not apply to this version")
+  expect(readFileSync(join(bridge, "src", "models.ts"), "utf-8")).toBe("export const other = 1\n")
 })

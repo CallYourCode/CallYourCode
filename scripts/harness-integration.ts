@@ -157,6 +157,73 @@ export function mergePiSettings(
   }
 }
 
+/* pi-claude-bridge 1M default. Upstream serves an unmeasured model at 200K
+ * until it is added to a hardcoded list; provider.oneMByDefault (our upstream
+ * PR, elidickinson/pi-claude-bridge#126) gives any model pi-ai declares at 1M
+ * its [1m] id. Until a release carries it, the installer re-applies the shipped
+ * patch to the installed bridge, so a reinstall does not quietly drop it. */
+export const PI_BRIDGE_PATCH = path.join("engine", "harness", "pi", "bridge-one-m.patch")
+
+export function bridgeDirOf(agentDir: string): string {
+  return path.join(agentDir, "npm", "node_modules", "pi-claude-bridge")
+}
+
+export function bridgeHasOneM(modelsTs: string): boolean {
+  return /\boneMByDefault\b/.test(modelsTs)
+}
+
+/* claude-bridge.json: turn oneMByDefault on for a Max plan only. An unentitled
+ * [1m] request fails every turn, so a Pro/unset plan is left alone, and an
+ * explicit value (true or false) is never overwritten. */
+export function mergeBridgeConfig(text: string): { text: string; changed: boolean; note: string } {
+  const data = text.trim() ? JSON.parse(text) : {}
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new Error("claude-bridge.json root is not an object")
+  }
+  const provider = data.provider
+  if (provider !== undefined && (typeof provider !== "object" || provider === null || Array.isArray(provider))) {
+    throw new Error("claude-bridge.json provider is not an object")
+  }
+  if (provider && typeof provider.oneMByDefault === "boolean") {
+    return { text, changed: false, note: `provider.oneMByDefault already ${provider.oneMByDefault}` }
+  }
+  if (!provider || provider.plan !== "max") {
+    return { text, changed: false, note: "plan is not max: oneMByDefault left off" }
+  }
+  provider.oneMByDefault = true
+  return { text: JSON.stringify(data, null, 2) + "\n", changed: true, note: "set provider.oneMByDefault (Max plan)" }
+}
+
+/* Apply the shipped patch to the installed bridge when its code lacks the
+ * setting. Dry-run first: a bridge that moved on (or already merged it in
+ * another shape) is reported, never half-patched. */
+function ensureBridgeOneM(bridgeDir: string, repo: string, dry: boolean): void {
+  const modelsTs = path.join(bridgeDir, "src", "models.ts")
+  const text = fs.readFileSync(modelsTs, "utf-8")
+  if (bridgeHasOneM(text)) {
+    console.log("  skip  pi-claude-bridge: already supports oneMByDefault")
+    return
+  }
+  const patchFile = path.join(repo, PI_BRIDGE_PATCH)
+  const run = (extra: string[]) =>
+    Bun.spawnSync(["patch", "-p1", "--forward", "--batch", "--no-backup-if-mismatch", ...extra, "-i", patchFile], {
+      cwd: bridgeDir, stdout: "pipe", stderr: "pipe",
+    })
+  const check = run(["--dry-run"])
+  if (check.exitCode !== 0) {
+    console.log("  WARN  pi-claude-bridge: oneMByDefault patch does not apply to this version; unmeasured models stay at 200K")
+    return
+  }
+  if (dry) {
+    console.log(`  would patch ${bridgeDir} (oneMByDefault)`)
+    return
+  }
+  const res = run([])
+  console.log(res.exitCode === 0
+    ? "  ok    pi-claude-bridge: applied the oneMByDefault patch"
+    : "  WARN  pi-claude-bridge: oneMByDefault patch failed; unmeasured models stay at 200K")
+}
+
 /* config.toml: append [mcp_servers.callyourcode]. Shape captured from a real
  * `codex mcp add` run. Append-if-absent keeps every existing byte intact;
  * TOML is not round-trippable with a naive parser, so nothing is rewritten. */
@@ -581,6 +648,16 @@ export function installPi(opts: { home: string; repo: string; dry: boolean }): v
     console.log(`  ok    settings.json: ${merged.note}`)
   } else {
     console.log(`  skip  settings.json: ${merged.note}`)
+  }
+
+  const bridgeDir = bridgeDirOf(agentDir)
+  if (fs.existsSync(path.join(bridgeDir, "src", "models.ts"))) {
+    ensureBridgeOneM(bridgeDir, repo, dry)
+    const cfgFile = path.join(agentDir, "claude-bridge.json")
+    const cfgText = fs.existsSync(cfgFile) ? fs.readFileSync(cfgFile, "utf-8") : ""
+    const cfg = mergeBridgeConfig(cfgText) // invalid JSON crashes loud
+    if (cfg.changed) writeMerged(cfgFile, cfg.text, dry)
+    console.log(`  ${cfg.changed ? "ok   " : "skip "} claude-bridge.json: ${cfg.note}`)
   }
 }
 
