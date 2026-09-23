@@ -94,8 +94,8 @@ describe('harness and model chips on a session row', () => {
   });
 });
 
-describe('chip placement (owner pick 2026-09-23): row two, bottom left', () => {
-  test('every chip sits in the row-two shelf before the subtitle; the title holds only the name', () => {
+describe('chip placement (owner pick 2026-09-23): row two, after the time', () => {
+  test('every chip sits in the row-two shelf right after the subtitle; the title holds only the name', () => {
     const row = chatRow(sess(), {
       now: NOW,
       mergedTab: 'homebox',
@@ -104,9 +104,10 @@ describe('chip placement (owner pick 2026-09-23): row two, bottom left', () => {
     });
     const shelf = row.querySelector<HTMLElement>('.cyc-list-row-chips')!;
     expect(shelf, 'the row-two chip shelf exists').not.toBeNull();
-    // the shelf leads row two: first child of the subtitle row, before the text
-    const subRow = row.querySelector<HTMLElement>('.cyc-session-sub')!;
-    expect(subRow.firstElementChild).toBe(shelf);
+    // the shelf FOLLOWS the elapsed/status text on row two (owner: "after the
+    // time"), inside the same left cluster
+    const subtitle = row.querySelector<HTMLElement>('.cyc-list-row-subtitle')!;
+    expect(subtitle.nextElementSibling).toBe(shelf);
     // all three chips live in it, in tab -> harness -> model order
     expect(
       [...shelf.children].map((c) => c.className.split(' ')[0])

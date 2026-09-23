@@ -155,7 +155,7 @@ const ROW_CHIP_UTILS =
   'flex-[0_1_auto] ms-1.5 px-1.5 rounded-md bg-[var(--cyc-text-muted-tint)] text-[var(--cyc-text-muted)] text-xs font-normal leading-[1.35] whitespace-nowrap overflow-hidden text-ellipsis';
 
 const SUBTITLE_CLASS =
-  'cyc-list-row-subtitle relative pointer-events-none overflow-hidden text-ellipsis whitespace-nowrap min-w-0 flex-auto text-[color:var(--cyc-text-muted)]';
+  'cyc-list-row-subtitle relative pointer-events-none overflow-hidden text-ellipsis whitespace-nowrap min-w-0 flex-[0_1_auto] text-[color:var(--cyc-text-muted)]';
 const MUTE_ICON_UTILS = 'flex-none ms-0.5 text-[1.125rem] text-[var(--cyc-session-quiet-color)]';
 const SESSION_BADGE_UTILS = 'block! ms-2 flex-none relative [transition:none]! rounded-[6px]!';
 
@@ -182,10 +182,11 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
     'cyc-session-sub col-start-2 row-start-2 flex min-w-0 items-center justify-between self-start'
   );
   // Row-two chip shelf (owner pick, 2026-09-23): the tab/harness/model chips
-  // live at the BOTTOM LEFT, before the elapsed text, so the name has the whole
+  // follow the elapsed text at the BOTTOM LEFT, so the name has the whole
   // first row (long names were truncating to "CYC Bu..." while row two sat
-  // empty). First chip drops the ms the shared face carries between chips.
-  const chipsWrap = h('div', 'cyc-list-row-chips flex flex-none min-w-0 items-center [&>:first-child]:ms-0');
+  // empty). Each chip keeps the shared face's start margin, spacing it from
+  // the time and its neighbours alike.
+  const chipsWrap = h('div', 'cyc-list-row-chips flex flex-none min-w-0 items-center');
   const subtitle = h('div', SUBTITLE_CLASS);
   // One size in every state (idle "19m", busy "thinking · 3m"): 0.875rem is 14px at
   // the 16px base, a step under the 1rem title. line-height stays 1.375rem so the
@@ -193,7 +194,11 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
   subtitle.style.setProperty('font-size', '0.875rem', 'important');
   subtitle.style.setProperty('line-height', '1.375rem', 'important');
   subtitle.style.setProperty('margin-top', '0', 'important');
-  subtitleRow.append(chipsWrap, subtitle);
+  // the left cluster: elapsed/status first, chips after it; the cluster (not
+  // the subtitle) takes the row's spare width so the chips hug the time.
+  const subLeft = h('div', 'flex min-w-0 flex-auto items-center');
+  subLeft.append(subtitle, chipsWrap);
+  subtitleRow.append(subLeft);
   const titleRow = h(
     'div',
     'cyc-session-title col-start-2 row-start-1 flex min-w-0 items-center justify-between self-end pointer-events-none'
@@ -295,8 +300,6 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
       chips.push(chip);
     }
     chipsWrap.replaceChildren(...chips);
-    // the chips borrow start-margin room from the subtitle when both are up
-    subtitle.classList.toggle('ms-1.5', chips.length > 0);
     if (ss.muted) kids.push(makeIcon('speakerMuted', 'cyc-session-mute-icon ' + MUTE_ICON_UTILS));
     if (o.notifyOff) {
       const bell = makeIcon(
