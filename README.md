@@ -171,7 +171,9 @@ From a checkout already on disk: `sh scripts/install.sh --local`
   (`CYC_MUX=tmux`); [herdr](https://herdr.dev) is the opt-in upgrade
   (`CYC_MUX=herdr`).
 - A path from phone to machine: a [Tailscale](https://tailscale.com) tailnet
-  away from the desk, or plain localhost on one machine.
+  away from the desk, or plain localhost on one machine. Localhost without
+  Tailscale needs a TURN tweak if pairing hangs; see
+  [docs/troubleshooting/pairing-stuck-without-tailscale.md](docs/troubleshooting/pairing-stuck-without-tailscale.md).
 - At least one coding agent: Claude Code, Codex, OpenCode or Pi.
 
 ## What is inside
