@@ -200,7 +200,10 @@ export const piReader: HarnessReader = {
   // reads-only, the same shape as codex / opencode: model + pct off the
   // transcript read, so pi's usage/context bar degrades cleanly instead of pi
   // being silently absent from the capability domain.
-  capabilities: { context: "transcript" },
+  // usage: pi runs the host's claude account through the bridge, so it
+  // answers the same account-level LimitsReport claude does. Without it, an
+  // all-pi engine has no usage harness and the card can never refresh.
+  capabilities: { context: "transcript", usage: true },
 
   detect(input) {
     return input.kindStamp === "pi";
