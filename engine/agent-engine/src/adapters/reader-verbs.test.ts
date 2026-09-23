@@ -176,11 +176,11 @@ test("harnessProfiles is the READERS table's tags + declared capabilities, pi in
     { tag: "claude", caps: { context: "native", compact: true, usage: true } },
     { tag: "codex", caps: { context: "transcript" } },
     { tag: "opencode", caps: { context: "transcript" } },
-    { tag: "pi", caps: { context: "transcript" } },
+    { tag: "pi", caps: { context: "transcript", usage: true } },
   ]);
   // claude is the one native-context harness (its own windowed read + compact + usage);
   // pi degrades cleanly like codex/opencode instead of being absent.
   const byTag = new Map(a.harnessProfiles().map((p) => [p.tag, p.caps]));
   expect(byTag.get("claude")!.context).toBe("native");
-  expect(byTag.get("pi")).toEqual({ context: "transcript" });
+  expect(byTag.get("pi")).toEqual({ context: "transcript", usage: true });
 });

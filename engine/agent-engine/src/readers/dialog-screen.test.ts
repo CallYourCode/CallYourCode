@@ -90,6 +90,14 @@ describe("dialogScreen: real dialogs match, normal screens do not", () => {
     expect(opencodeReader.dialogScreen!(OC_MODELS)).toBe(true);
     expect(opencodeReader.dialogScreen!(OC_IDLE)).toBe(false);
   });
+  test("pi busyScreen: the compaction indicator, not a quote of it", () => {
+    expect(piReader.busyScreen!(` ⠋ Compacting context... (Escape to cancel)\n~/x\n0.0%/1.0M`)).toBe(true);
+    expect(piReader.busyScreen!(` ⠙ Auto-compacting... (Escape to cancel)`)).toBe(true);
+    expect(piReader.busyScreen!(` ⠙ Context overflow detected, Auto-compacting... (Escape to cancel)`)).toBe(true);
+    expect(piReader.busyScreen!(`pi shows "Auto-compacting..." while it compacts`)).toBe(false);
+    expect(piReader.busyScreen!(PI_IDLE)).toBe(false);
+    expect(piReader.busyScreen!(PI_SELECTOR)).toBe(false);
+  });
   test("claude keeps parseScreen, not dialogScreen", () => {
     expect(claudeReader.dialogScreen).toBeUndefined();
     expect(claudeReader.parseScreen).toBeDefined();

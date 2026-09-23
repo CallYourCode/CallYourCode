@@ -765,6 +765,9 @@ export class MuxAdapter implements MultiplexerAdapter {
    * drives the existing askUnknown -> waiting-in-terminal surface. Claude is
    * untouched: its reader declares parseScreen, not dialogScreen. */
   private readonly dialogPanes = new Set<string>();
+  /* Panes the screen watch saw busy outside a turn (busyScreen): a working
+   * edge went out on the status tail, and an idle one follows when it clears. */
+  private readonly busyPanes = new Set<string>();
   private dialogReading = false;
 
   private applyDialog(info: MuxAgentInfo): MuxAgentInfo {
@@ -782,22 +785,34 @@ export class MuxAdapter implements MultiplexerAdapter {
     try {
       const mapped = this.latest.map(toInfo);
       for (const info of mapped) {
-        const detect = readerFor(info.kind)?.dialogScreen;
+        const reader = readerFor(info.kind);
+        const detect = reader?.dialogScreen;
+        const busyDetect = reader?.busyScreen;
         const handle = info.handle;
-        if (!detect) { changed = this.dialogPanes.delete(handle) || changed; continue; }
+        if (!detect && !busyDetect) { changed = this.dialogPanes.delete(handle) || changed; continue; }
         /* A working pane is producing output, and output can QUOTE dialog
          * text (an agent pasting a captured screen flagged itself blocked);
          * a mux-blocked pane needs no help. Only settled panes are read, and
          * only the bottom rows are matched: a real modal's markers sit there. */
         let up = false;
-        if (info.statusHint !== "working" && info.statusHint !== "blocked") {
+        let busy = false;
+        // a pane already flagged busy is re-read whatever the mux says, or the
+        // flag could never clear (and a mux "working" would clear it falsely)
+        if ((info.statusHint !== "working" && info.statusHint !== "blocked") || this.busyPanes.has(handle)) {
           try {
             const { text, truncated } = await this.mux.readPane(handle, DIALOG_READ_LINES);
             // plain text for the match: keybind hints are colour-styled, and SGR
             // codes mid-phrase would split every marker
             const plain = text.replace(SGR, "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-            up = !truncated && detect(plain.split("\n").slice(-DIALOG_TAIL_ROWS).join("\n"));
-          } catch { up = false; } // an unreadable pane is not evidence of a dialog
+            const tail = plain.split("\n").slice(-DIALOG_TAIL_ROWS).join("\n");
+            up = !truncated && !!detect?.(tail);
+            busy = !truncated && !up && !!busyDetect?.(tail);
+          } catch { up = false; busy = false; } // an unreadable pane is not evidence
+        }
+        if (busy !== this.busyPanes.has(handle)) {
+          if (busy) this.busyPanes.add(handle); else this.busyPanes.delete(handle);
+          console.log(`[screen] ${handle} (${info.kind}): ${busy ? "busy outside a turn -> working" : "busy cleared -> idle"}`);
+          this.statusTails.get(handle)?.cb(busy ? "working" : "idle");
         }
         const had = this.dialogPanes.has(handle);
         if (up !== had) {
@@ -808,6 +823,7 @@ export class MuxAdapter implements MultiplexerAdapter {
       }
       const live = new Set(mapped.map((i) => i.handle));
       for (const h of [...this.dialogPanes]) if (!live.has(h)) { this.dialogPanes.delete(h); changed = true; }
+      for (const h of [...this.busyPanes]) if (!live.has(h)) this.busyPanes.delete(h);
     } finally {
       this.dialogReading = false;
     }

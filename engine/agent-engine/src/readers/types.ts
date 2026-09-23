@@ -169,6 +169,12 @@ export interface HarnessReader {
    *  "blocked" is worse than a missed one. */
   dialogScreen?(text: string): boolean;
 
+  /** Whether this plain screen text shows the harness busy OUTSIDE a turn (pi's
+   *  compaction runs after agent_end, so no transcript edge covers it). The
+   *  adapter's screen watch turns a match into a working edge on the status
+   *  tail, and its end into an idle one. Same rule: known text only. */
+  busyScreen?(text: string): boolean;
+
   launch?: { command: string; resume(sessionId: string): string };
 
   /* HOW LONG THIS HARNESS TAKES TO QUIT (the restart ladder's gone-wait,

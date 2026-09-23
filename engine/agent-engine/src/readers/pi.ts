@@ -297,6 +297,13 @@ export const piReader: HarnessReader = {
     return /Enter to select|Will auto-deny in \d+s|Allow anyway \(dangerous\)/.test(text);
   },
 
+  /* pi's compaction indicator (status-indicator.js): "Compacting context..." for
+   * /compact, "Auto-compacting..." for the threshold/overflow path, always with
+   * the "(<key> to cancel)" hint, which keeps a quoted phrase from matching. */
+  busyScreen(text: string): boolean {
+    return /(Compacting context|Auto-compacting)\.\.\. \(\S+ to cancel\)/.test(text);
+  },
+
   // pi input can be delivered DIRECTLY (design Gap 1, product spec), through
   // pi's supported RPC `prompt` command rather than mux keystrokes. Declared
   // here; the adapter routes pi input through the direct path when a live pi
