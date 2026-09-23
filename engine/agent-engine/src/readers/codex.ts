@@ -195,6 +195,12 @@ export const codexReader: HarnessReader = {
       `codex resume --dangerously-bypass-approvals-and-sandbox ${CODEX_NO_UPDATE} ${sessionId}`,
   },
 
+  /* Known codex dialog text, captured live: the update prompt ("Press enter
+   * to continue") and the hooks/settings screens ("Press esc to go back"). */
+  dialogScreen(text: string): boolean {
+    return /Press enter to continue|Press esc to go back/.test(text);
+  },
+
   // Not implemented for codex: no title reader, no agent-run parser.
   async title() { return null; },
   async runs() { return []; },

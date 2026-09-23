@@ -187,6 +187,13 @@ export const opencodeReader: HarnessReader = {
   },
 
   // Not implemented for opencode: no title reader, no agent-run parser.
+  /* Known opencode dialog text, captured live: the model dialog footer
+   * ("Connect provider ctrl+a  Favorite ctrl+f"). Extended per captured
+   * dialog, never guessed. */
+  dialogScreen(text: string): boolean {
+    return /Connect provider ctrl\+a|Favorite ctrl\+f/.test(text);
+  },
+
   async title() { return null; },
   async runs() { return []; },
 };

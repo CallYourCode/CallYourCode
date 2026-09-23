@@ -161,6 +161,14 @@ export interface HarnessReader {
 
   parseScreen?(ansi: string): ScreenBox | null;
 
+  /** Whether this plain screen text shows a modal dialog waiting on a human
+   *  (a selector, an update/trust prompt). Drives the adapter's dialog watch:
+   *  a match overrides the pane's status to "blocked" so the app's
+   *  waiting-in-terminal surface fires for muxes that do not detect this
+   *  harness's dialogs themselves. Match only KNOWN dialog text: a false
+   *  "blocked" is worse than a missed one. */
+  dialogScreen?(text: string): boolean;
+
   launch?: { command: string; resume(sessionId: string): string };
 
   /* HOW LONG THIS HARNESS TAKES TO QUIT (the restart ladder's gone-wait,

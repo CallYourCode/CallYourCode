@@ -31,7 +31,7 @@ const net = require("node:net");
 const { registerReplyTools } = require("./reply-channel.js");
 
 const TOOL_CAP = 200; // one-line tool summaries, matches the engine's TEXT_CAP
-const BODY_CAP = 2000; // prompts/replies keep their body (engine BODY_CAP)
+const BODY_CAP = 20000; // prompts/replies keep their body (engine BODY_CAP)
 
 // -------------------------------------------------------------------------
 // HTTP SESSION-ID ANNOUNCE. pi's identity now reaches the engine the SAME

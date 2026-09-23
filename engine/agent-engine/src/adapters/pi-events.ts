@@ -20,7 +20,7 @@ import { chmodSync, unlinkSync } from "node:fs";
 import type { SessionEvent } from "../sessions/session-events.ts";
 
 const TOOL_CAP = 200;
-const BODY_CAP = 2000;
+const BODY_CAP = 20000; // engine BODY_CAP (session-events.ts): full prompt/reply bodies
 
 /** The identity frame: who this pi pane is, so cyc can bind from the extension
  *  as well as from the transcript/hook. */

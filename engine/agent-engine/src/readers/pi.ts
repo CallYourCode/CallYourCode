@@ -62,7 +62,7 @@ import { isFromApp, type SessionEvent } from "../sessions/session-events.ts";
 // caps pinned to cyc-output.js / adapters/pi-events.ts so the tail row and the
 // socket row for the same record carry identical text.
 const PI_TOOL_CAP = 200;
-const PI_BODY_CAP = 2000;
+const PI_BODY_CAP = 20000; // engine BODY_CAP: prompt/reply bodies keep their text
 const capText = (t: string, n: number): string => (t.length > n ? t.slice(0, n) + "…" : t);
 
 /** The joined text blocks of a pi message content, trimmed ("" when none). */
@@ -288,6 +288,13 @@ export const piReader: HarnessReader = {
   // augmented command is byte-for-byte what it was for the same launch + sock.
   launchAugment(command, ctx) {
     return augmentPiLaunch(command, { extensionPath: PI_EXTENSION_PATH, sockPath: ctx.sockPath }).command;
+  },
+
+  /* Known pi dialog text, captured live: the selector footer ("Enter to
+   * select · ... Escape/Ctrl+C to cancel") and the pi-defender confirm
+   * ("Allow anyway", "Will auto-deny in Ns"). */
+  dialogScreen(text: string): boolean {
+    return /Enter to select|Will auto-deny in \d+s|Allow anyway \(dangerous\)/.test(text);
   },
 
   // pi input can be delivered DIRECTLY (design Gap 1, product spec), through

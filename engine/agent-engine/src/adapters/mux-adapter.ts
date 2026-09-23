@@ -8,7 +8,7 @@
 // The adapter OWNS its Multiplexer/HerdrClient instance (a fresh HerdrClient by
 // default, injectable in tests). Nothing here imports server.ts.
 
-import { classifyPaneBox, parseAsk, type PaneBox } from "../terminal/blocked.ts";
+import { SGR, classifyPaneBox, parseAsk, type PaneBox } from "../terminal/blocked.ts";
 import { runDeliveryMachine } from "../chat/delivery-machine.ts";
 import { agentLabel, PREMINT_SOURCE, PARKED_SOURCE, type AgentSessionRef } from "../runtime/agents.ts";
 import { HerdrClient } from "../terminal/herdr.ts";
@@ -445,6 +445,11 @@ type PollTail = {
  * 47-row panes that refused every message sent on this host. (Moved from
  * server.ts alongside readPaneScreen.) */
 const BOX_READ_LINES = 500;
+/* Dialog-watch cadence and read size: dialog footers sit in the last rows,
+ * and a dozen panes at one short read per beat is cheap herdr RPC. */
+const DIALOG_POLL_MS = 5000;
+const DIALOG_READ_LINES = 500; // BOX_READ_LINES parity: smaller asks come back truncated on tall panes
+const DIALOG_TAIL_ROWS = 15; // modal markers sit in the bottom rows; scrollback can quote them
 /* How much screen a dialog can occupy (the ask-state read). The same number
  * server.ts readAskNow used before this move: the plan approval fits inside 40, 60
  * is that with room, and still one small RPC. */
@@ -751,8 +756,69 @@ export class MuxAdapter implements MultiplexerAdapter {
     this.mux.start();
   }
 
+  /* THE DIALOG WATCH. Some harness dialogs (pi's selectors, opencode's model
+   * dialog, codex's update prompt) never reach the mux's own blocked
+   * detection: the pane sits "idle" while a modal waits for a human and the
+   * app shows nothing. Every DIALOG_POLL_MS the watch reads the tail of each
+   * live pane whose reader declares dialogScreen; a match overrides that
+   * pane's statusHint to "blocked" (the reducer lets blocked win), which
+   * drives the existing askUnknown -> waiting-in-terminal surface. Claude is
+   * untouched: its reader declares parseScreen, not dialogScreen. */
+  private readonly dialogPanes = new Set<string>();
+  private dialogReading = false;
+
+  private applyDialog(info: MuxAgentInfo): MuxAgentInfo {
+    return this.dialogPanes.has(info.handle) ? { ...info, statusHint: "blocked" } : info;
+  }
+
+  private infos(): MuxAgentInfo[] {
+    return this.latest.map((a) => this.applyDialog(toInfo(a)));
+  }
+
+  private async pollDialogs(): Promise<void> {
+    if (this.dialogReading) return;
+    this.dialogReading = true;
+    let changed = false;
+    try {
+      const mapped = this.latest.map(toInfo);
+      for (const info of mapped) {
+        const detect = readerFor(info.kind)?.dialogScreen;
+        const handle = info.handle;
+        if (!detect) { changed = this.dialogPanes.delete(handle) || changed; continue; }
+        /* A working pane is producing output, and output can QUOTE dialog
+         * text (an agent pasting a captured screen flagged itself blocked);
+         * a mux-blocked pane needs no help. Only settled panes are read, and
+         * only the bottom rows are matched: a real modal's markers sit there. */
+        let up = false;
+        if (info.statusHint !== "working" && info.statusHint !== "blocked") {
+          try {
+            const { text, truncated } = await this.mux.readPane(handle, DIALOG_READ_LINES);
+            // plain text for the match: keybind hints are colour-styled, and SGR
+            // codes mid-phrase would split every marker
+            const plain = text.replace(SGR, "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+            up = !truncated && detect(plain.split("\n").slice(-DIALOG_TAIL_ROWS).join("\n"));
+          } catch { up = false; } // an unreadable pane is not evidence of a dialog
+        }
+        const had = this.dialogPanes.has(handle);
+        if (up !== had) {
+          if (up) this.dialogPanes.add(handle); else this.dialogPanes.delete(handle);
+          console.log(`[dialog] ${handle} (${info.kind}): ${up ? "modal up -> blocked" : "modal gone"}`);
+          changed = true;
+        }
+      }
+      const live = new Set(mapped.map((i) => i.handle));
+      for (const h of [...this.dialogPanes]) if (!live.has(h)) { this.dialogPanes.delete(h); changed = true; }
+    } finally {
+      this.dialogReading = false;
+    }
+    if (changed) {
+      const infos = this.infos();
+      for (const cb of this.agentCbs) cb(infos);
+    }
+  }
+
   listAgents(): MuxAgentInfo[] {
-    return this.latest.map(toInfo);
+    return this.infos();
   }
 
   onAgents(cb: (agents: MuxAgentInfo[]) => void): void {
@@ -760,7 +826,7 @@ export class MuxAdapter implements MultiplexerAdapter {
     this.agentCbs.push(cb);
     // the mux's own "emit now if we already have a snapshot" semantics: a late
     // subscriber gets the last refined snapshot at once rather than waiting a lap
-    if (this.latest.length) cb(this.latest.map(toInfo));
+    if (this.latest.length) cb(this.infos());
   }
 
   /** Bind ONE listener to the underlying mux, lazily on the first onAgents so
@@ -769,15 +835,17 @@ export class MuxAdapter implements MultiplexerAdapter {
   private ensureMuxListener(): void {
     if (this.muxBound) return;
     this.muxBound = true;
+    const t = setInterval(() => void this.pollDialogs(), DIALOG_POLL_MS);
+    (t as { unref?: () => void }).unref?.();
     this.mux.onAgents((agents) => {
       this.latest = this.refine(agents);
-      const infos = this.latest.map(toInfo);
+      const infos = this.infos();
       for (const cb of this.agentCbs) cb(infos);
     });
   }
 
   private infoFor(handle: string): MuxAgentInfo | undefined {
-    return this.latest.map(toInfo).find((a) => a.handle === handle);
+    return this.infos().find((a) => a.handle === handle);
   }
 
   /* The MCP register resolution. The raw HERDR_PANE_ID / TMUX_PANE is a
@@ -792,7 +860,7 @@ export class MuxAdapter implements MultiplexerAdapter {
      * the env id resolves too; only live panes are in `latest`, so at most one
      * generation of a %N can match. The `~` separator never appears in a herdr
      * pane id, so the prefix rule cannot misfire there. */
-    const info = this.latest.map(toInfo).find((a) =>
+    const info = this.infos().find((a) =>
       a.handle === envId || a.handle.startsWith(`${envId}~`));
     return info ? info.handle : null;
   }
@@ -850,7 +918,7 @@ export class MuxAdapter implements MultiplexerAdapter {
    * by cwd + harness session id instead, so a dead session's transcript still
    * resolves after its pane leaves the mux snapshot. */
   private resolvePath(handle: string): { harnessSessionId: string | null; path: string | null } {
-    const info = this.latest.map(toInfo).find((a) => a.handle === handle);
+    const info = this.infos().find((a) => a.handle === handle);
     const harnessSessionId = info?.harnessSessionId ?? null;
     const path = harnessSessionId && info ? sessionFilePath(info.cwd, harnessSessionId) : null;
     return { harnessSessionId, path };
