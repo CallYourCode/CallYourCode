@@ -93,3 +93,26 @@ describe('harness and model chips on a session row', () => {
     expect(chipOf(row, 'cyc-list-row-harness')).toBeNull();
   });
 });
+
+describe('chip placement (owner pick 2026-09-23): row two, bottom left', () => {
+  test('every chip sits in the row-two shelf before the subtitle; the title holds only the name', () => {
+    const row = chatRow(sess(), {
+      now: NOW,
+      mergedTab: 'homebox',
+      harnessChip: 'Pi',
+      modelChip: 'Fable 5'
+    });
+    const shelf = row.querySelector<HTMLElement>('.cyc-list-row-chips')!;
+    expect(shelf, 'the row-two chip shelf exists').not.toBeNull();
+    // the shelf leads row two: first child of the subtitle row, before the text
+    const subRow = row.querySelector<HTMLElement>('.cyc-session-sub')!;
+    expect(subRow.firstElementChild).toBe(shelf);
+    // all three chips live in it, in tab -> harness -> model order
+    expect(
+      [...shelf.children].map((c) => c.className.split(' ')[0])
+    ).toEqual(['cyc-list-row-tab', 'cyc-list-row-harness', 'cyc-list-row-model']);
+    // and the title row carries none of them: the name gets the whole line
+    const title = row.querySelector<HTMLElement>('.cyc-list-row-title')!;
+    expect(title.querySelector('.cyc-list-row-tab, .cyc-list-row-harness, .cyc-list-row-model')).toBeNull();
+  });
+});

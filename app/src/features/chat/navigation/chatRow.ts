@@ -181,6 +181,11 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
     'div',
     'cyc-session-sub col-start-2 row-start-2 flex min-w-0 items-center justify-between self-start'
   );
+  // Row-two chip shelf (owner pick, 2026-09-23): the tab/harness/model chips
+  // live at the BOTTOM LEFT, before the elapsed text, so the name has the whole
+  // first row (long names were truncating to "CYC Bu..." while row two sat
+  // empty). First chip drops the ms the shared face carries between chips.
+  const chipsWrap = h('div', 'cyc-list-row-chips flex flex-none min-w-0 items-center [&>:first-child]:ms-0');
   const subtitle = h('div', SUBTITLE_CLASS);
   // One size in every state (idle "19m", busy "thinking · 3m"): 0.875rem is 14px at
   // the 16px base, a step under the 1rem title. line-height stays 1.375rem so the
@@ -188,7 +193,7 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
   subtitle.style.setProperty('font-size', '0.875rem', 'important');
   subtitle.style.setProperty('line-height', '1.375rem', 'important');
   subtitle.style.setProperty('margin-top', '0', 'important');
-  subtitleRow.append(subtitle);
+  subtitleRow.append(chipsWrap, subtitle);
   const titleRow = h(
     'div',
     'cyc-session-title col-start-2 row-start-1 flex min-w-0 items-center justify-between self-end pointer-events-none'
@@ -271,23 +276,27 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
       peerTitle.textContent = ss.name;
       kids.push(peerTitle);
     }
+    const chips: Node[] = [];
     if (o.mergedTab) {
       const chip = h('span', 'cyc-list-row-tab ' + ROW_CHIP_UTILS);
       chip.textContent = o.mergedTab;
-      kids.push(chip);
+      chips.push(chip);
     }
     if (o.harnessChip) {
       const chip = h('span', 'cyc-list-row-harness ' + ROW_CHIP_UTILS);
       chip.textContent = o.harnessChip;
-      kids.push(chip);
+      chips.push(chip);
     }
     if (o.modelChip) {
-      // max-w keeps a long model name from squeezing the title off the row;
+      // max-w keeps a long model name from squeezing the subtitle off the row;
       // the chip's own overflow-hidden text-ellipsis truncates it.
       const chip = h('span', 'cyc-list-row-model max-w-[7rem] ' + ROW_CHIP_UTILS);
       chip.textContent = o.modelChip;
-      kids.push(chip);
+      chips.push(chip);
     }
+    chipsWrap.replaceChildren(...chips);
+    // the chips borrow start-margin room from the subtitle when both are up
+    subtitle.classList.toggle('ms-1.5', chips.length > 0);
     if (ss.muted) kids.push(makeIcon('speakerMuted', 'cyc-session-mute-icon ' + MUTE_ICON_UTILS));
     if (o.notifyOff) {
       const bell = makeIcon(
