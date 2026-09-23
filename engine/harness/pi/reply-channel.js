@@ -211,6 +211,7 @@ const defaultProcResolver = {
 // ------------------------------------------------------------ the loopback POST
 
 const REPLY_PATH = "/agent/reply";
+const INFO_PATH = "/agent/info";
 
 /** How long a POST waits for the engine to confirm (server.ts #447). The HTTP
  *  response IS the ack; a dead engine is refused at connect and fails fast, so
@@ -397,6 +398,33 @@ function registerReplyTools(pi, opts) {
     }
   }
 
+  /* The MCP's `info` tool, ported verbatim in behaviour (server.ts
+   * handleInfo): ask the engine WHO this pane's agent is. The pi fleet needs
+   * it for `cyc plugin ... --session <agentId>`; without it a migrated agent
+   * reaches for a stale id from its history (live 2026-09-23: Shalu filed a
+   * cron under its old claude identity and the app's crons panel could not
+   * show it). */
+  async function handleInfo() {
+    try {
+      if (!paneId) {
+        throw new Error("this session has no HERDR_PANE_ID, so the engine cannot identify it.");
+      }
+      let m;
+      try {
+        m = await post(target, INFO_PATH, { pane: paneId });
+      } catch {
+        const label = engineLabel(target);
+        throw new Error(`agent engine unreachable at ${label}${INFO_PATH}.`);
+      }
+      if (!m.ok) throw new Error(m.message);
+      const identity = JSON.stringify({ agentId: m.agentId, name: m.name, cwd: m.cwd, harness: m.harness });
+      return { content: [{ type: "text", text: identity }], details: {} };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`info failed: ${msg}`);
+    }
+  }
+
   async function handleShow(args) {
     try {
       const path = String((args && args.path) != null ? args.path : "").trim();
@@ -434,6 +462,14 @@ function registerReplyTools(pi, opts) {
       execute: (_id, params) => handleSay("chat", params),
     },
     {
+      name: "info",
+      label: "Info",
+      description:
+        "Get this agent's identity from the engine: agentId (the stable ag-... id every cyc command takes), name, cwd and harness. Call it whenever a cyc command needs your own agent id, and pass that id explicitly.",
+      parameters: { type: "object", properties: {} },
+      execute: async () => handleInfo(),
+    },
+    {
       name: "show",
       label: "Show",
       description: SHOW_DESCRIPTION,
@@ -451,7 +487,7 @@ function registerReplyTools(pi, opts) {
     }
   }
 
-  return { handleSay, handleShow, paneId, target, unconfirmed };
+  return { handleSay, handleShow, handleInfo, paneId, target, unconfirmed };
 }
 
 module.exports = { registerReplyTools };
@@ -475,4 +511,5 @@ module.exports._internal = {
   SHOW_DESCRIPTION,
   SPEAK_DESCRIPTION,
   CHAT_DESCRIPTION,
+  INFO_PATH,
 };

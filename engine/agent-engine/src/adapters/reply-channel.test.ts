@@ -95,9 +95,9 @@ function wire(opts: Partial<Parameters<typeof registerReplyTools>[1]> = {}) {
 }
 
 describe("the reply channel mirrors the MCP tool set", () => {
-  test("registers exactly speak, chat and show with the MCP descriptions and schemas", () => {
+  test("registers exactly speak, chat, info and show with the MCP descriptions and schemas", () => {
     const { pi } = wire();
-    expect([...pi.tools.keys()].sort()).toEqual(["chat", "show", "speak"]);
+    expect([...pi.tools.keys()].sort()).toEqual(["chat", "info", "show", "speak"]);
 
     const speak = pi.tools.get("speak")!;
     expect(speak.description).toBe(rc.SPEAK_DESCRIPTION);
@@ -403,4 +403,29 @@ describe("resolvePaneId is pinned to mcp/src/paneid.ts resolvePaneId", () => {
       expect(mine).toBe(shared);
     });
   }
+});
+
+describe("the info tool (the MCP's identity question, ported)", () => {
+  test("asks /agent/info for the pane and answers the identity JSON", async () => {
+    const got: any[] = [];
+    const { pi } = wire({
+      post: async (_t: unknown, path: string, body: unknown) => {
+        got.push({ path, body });
+        return { ok: true, agentId: "ag-x1", name: "Shalu AI", cwd: "/home/u/shaluai", harness: "pi" };
+      },
+    } as any);
+    const out: any = await pi.tools.get("info")!.execute("id1", {});
+    expect(got).toEqual([{ path: "/agent/info", body: { pane: "w1:p3" } }]);
+    expect(JSON.parse(out.content[0].text)).toEqual({
+      agentId: "ag-x1", name: "Shalu AI", cwd: "/home/u/shaluai", harness: "pi",
+    });
+  });
+
+  test("no pane identity, and an unreachable engine, both throw the MCP's message", async () => {
+    const none = wire({ paneId: null } as any);
+    await expect(none.pi.tools.get("info")!.execute("id2", {})).rejects.toThrow(/no HERDR_PANE_ID/);
+
+    const dead = wire({ post: async () => { throw new Error("refused"); } } as any);
+    await expect(dead.pi.tools.get("info")!.execute("id3", {})).rejects.toThrow(/agent engine unreachable/);
+  });
 });
