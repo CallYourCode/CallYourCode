@@ -74,6 +74,28 @@ describe('markSeen', () => {
     hp.markSeen('s1');
     expect(sightings).toEqual([{mid: 'mr-2', msgId: undefined, ts: 200}]);
   });
+  test('a trailing session record is skipped: the newest MESSAGE is sighted', () => {
+    /* The rendered log interleaves session records (faint activity rows) with
+     * messages, and a turn ends with `status: done` AFTER its last reply. A
+     * record has no mid and is not in the engine's message log, so sighting
+     * one is ignored and the chat stays unread forever (live 2026-09-23). */
+    const {hp, sightings} = makeWorld({
+      messages: [
+        msg({id: 1, ts: 150, mid: 'mr-1'}),
+        msg({id: 2, ts: 200, mid: 'mr-2'}),
+        msg({id: 3, ts: 201, kind: 'status', text: 'status: done', mid: undefined, role: undefined as never})
+      ]
+    });
+    hp.markSeen('s1');
+    expect(sightings).toEqual([{mid: 'mr-2', msgId: undefined, ts: 200}]);
+  });
+  test('a log of records only has nothing to sight', () => {
+    const {hp, sightings} = makeWorld({
+      messages: [msg({id: 1, ts: 10, kind: 'status', text: 'status: idle', mid: undefined, role: undefined as never})]
+    });
+    hp.markSeen('s1');
+    expect(sightings).toEqual([]);
+  });
   test('an empty log has nothing to sight', () => {
     const {hp, sightings} = makeWorld({messages: []});
     hp.markSeen('s1');

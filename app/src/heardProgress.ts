@@ -39,14 +39,29 @@ export function createHeardProgress(deps: HeardProgressDeps) {
    * a client clock, so it cannot drift the way the old heardTs did. */
   const heardTsOf = (s: CycSession): number => readMarkerOf(s)?.ts ?? 0;
 
-  // The newest row this device has rendered, as a sighting: its durable
-  // identity plus instant. Undefined when the log is empty.
+  /* The newest MESSAGE this device has rendered, as a sighting: its durable
+   * identity plus instant. Undefined when the log holds no message.
+   *
+   * NOT simply the newest row. The rendered log interleaves messages with
+   * SESSION RECORDS (the faint activity rows: status, tool, prompt), and a
+   * record carries no `mid` and is not in the engine's message log, so a
+   * sighting that names one resolves to nothing and is ignored ("heard
+   * sighting names no row we hold") -- the chat then stays unread however
+   * many times it is opened. A turn ends with status records AFTER its last
+   * reply, so the newest row is routinely a record (live 2026-09-23: CC
+   * Vision stuck at 1 unread, newest row `status: done`). The marker is a
+   * position among MESSAGES (unreadOf counts only those), so sight the
+   * newest message and let the records ride along behind it. */
   const newestSighting = (
     s: CycSession & {messages: CycMessage[]}
   ): {mid?: string; msgId?: string; ts: number} | undefined => {
-    const row = s.messages.at(-1) as (CycMessage & EngineFields) | undefined;
-    if (!row) return undefined;
-    return {mid: row.mid, msgId: row.msgId, ts: row.ts};
+    const rows = s.messages as (CycMessage & EngineFields)[];
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i];
+      if (!row.mid) continue; // a session record: no durable identity to sight
+      return {mid: row.mid, msgId: row.msgId, ts: row.ts};
+    }
+    return undefined;
   };
 
   /* A new row rendered while the chat is open, or the chat being closed: sight
