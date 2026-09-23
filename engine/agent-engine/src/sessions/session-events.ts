@@ -1021,7 +1021,11 @@ export async function readSessionTitle(path: string): Promise<string | null> {
  * evidence and the agent should be able to tell. Listing the prefixes once
  * means the next one added does not silently leak into the overlay. */
 const APP_PREFIXES = ["VOICE: ", "TEXT: "] as const;
-const isFromApp = (s: string) => APP_PREFIXES.some((p) => s.startsWith(p));
+/** Whether a transcript user text is the cyc app's own send. Exported for the
+ *  non-claude readers: their prompt-row extraction skips these the same way
+ *  the claude extractor does (the text is already a user bubble in the chat;
+ *  a faint session row of it would be a duplicate). */
+export const isFromApp = (s: string): boolean => APP_PREFIXES.some((p) => s.startsWith(p));
 export type QueueOp = { op: "enqueue" | "consumed"; content: string; ts: number };
 
 /* The authoritative "claude has read it" signal is the message's own `user`

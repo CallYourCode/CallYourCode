@@ -80,10 +80,10 @@ test("the drain: backfill, cursor advance, torn trailing line, consumed", async 
 
   const first = await piEventsSince(path, 0);
   expect(first).not.toBeNull();
-  expect(first!.events.map((e) => [e.kind, e.uuid])).toEqual([
-    ["prompt", "u1"], ["reply", "a1"],
-  ]);
-  // consumed is the RAW text, exactly as the user record holds it
+  // the TEXT:-prefixed record is the app's own message: no prompt row (the
+  // chat already shows it as a bubble), but consumed still carries its RAW
+  // text for the queued-clear
+  expect(first!.events.map((e) => [e.kind, e.uuid])).toEqual([["reply", "a1"]]);
   expect(first!.consumed).toEqual([sent]);
   expect(first!.cursor).toBe(Bun.file(path).size);
 
@@ -119,4 +119,11 @@ test("pi's tail starts at the end of the file when nothing was read before", asy
   const src = piReader.sessionEvents;
   expect(src?.mode).toBe("poll");
   expect(src && src.mode === "poll" && src.startAtEnd).toBe(true);
+});
+
+test("a terminal-typed or cron prompt (no app prefix) still gets its row", () => {
+  const rec = userRec("u9", "CRON:morning-plan fire");
+  expect(piRecordEvents(rec, 0).map((e) => e.kind)).toEqual(["prompt"]);
+  const app = userRec("u10", "VOICE: hello there");
+  expect(piRecordEvents(app, 0)).toEqual([]);
 });

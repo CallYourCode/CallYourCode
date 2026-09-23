@@ -39,7 +39,7 @@
 import { PI_TRANSCRIPT } from "../chat/transcripts.ts";
 import { augmentPiLaunch, PI_EXTENSION_PATH } from "../adapters/pi-launch.ts";
 import type { HarnessReader } from "./types.ts";
-import type { SessionEvent } from "../sessions/session-events.ts";
+import { isFromApp, type SessionEvent } from "../sessions/session-events.ts";
 
 /* THE pi ACTIVITY TAIL (sessionEvents, poll mode). Until now pi was the ONE
  * harness with no transcript tail into the chat log: its session records only
@@ -110,7 +110,12 @@ export function piRecordEvents(rec: unknown, off: number): SessionEvent[] {
   const out: SessionEvent[] = [];
   if (m.role === "user") {
     const text = capText(piContentText(m.content), PI_BODY_CAP);
-    if (text) out.push({ uuid, ts, kind: "prompt", text, off });
+    /* The app's own utterance (VOICE:/TEXT:) is already a user bubble in the
+     * chat; a prompt row of it would paint the same text twice, faint above
+     * the bubble (live 2026-09-23). Same skip the claude extractor keeps;
+     * crons and terminal-typed prompts stay visible. The queued-clear still
+     * sees it: piEventsSince reads consumed off the raw record, not off rows. */
+    if (text && !isFromApp(text)) out.push({ uuid, ts, kind: "prompt", text, off });
   } else if (m.role === "assistant") {
     // tool rows first (that is the order the turn ran them in), each on the
     // toolCallId the socket frame and the transcript share; then the reply
