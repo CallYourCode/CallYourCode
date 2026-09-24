@@ -61,12 +61,15 @@ const CHAT_ARM_PX = 12;
 // past this fraction of the surface width, OR a flick faster than this velocity
 // (px/ms), commits; anything short snaps back. Fraction-of-travel (not a fixed
 // px) is what stops a partial edge swipe committing on a narrow phone.
-const CHAT_COMMIT_PCT = 0.5;
-const CHAT_FLICK_VELOCITY = 0.5;
+// Loosened 2026-09-24 (owner: "requires swiping too wide", misses sometimes):
+// a quarter-width drag or a gentler, slower flick now commits.
+const CHAT_COMMIT_PCT = 0.25;
+const CHAT_FLICK_VELOCITY = 0.3;
+const CHAT_FLICK_MS = 400;
 // A back-swipe must begin within this many px of the surface's left edge. Sized
-// for a thumb contact near the bezel: generous enough that a real edge swipe
-// still commits, tight enough that a mid-surface drag never navigates back.
-const CHAT_EDGE_INSET_PX = 32;
+// for a thumb that lands a little inside the bezel, still well short of the
+// message column so a mid-surface drag never navigates back.
+const CHAT_EDGE_INSET_PX = 56;
 const CHAT_COMMIT_PX = 60;
 const CHAT_WHEEL_COMMIT_PX = CHAT_COMMIT_PX * 1.5;
 const CHAT_WHEEL_QUIET_MS = 160;
@@ -403,6 +406,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
         direction: 1,
         thresholdPct: CHAT_COMMIT_PCT,
         velocityCommit: CHAT_FLICK_VELOCITY,
+        flickMs: CHAT_FLICK_MS,
         armPx: CHAT_ARM_PX,
         travelWidth: surfaceWidth,
         canStart: startEligible,
@@ -416,6 +420,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
         direction: -1,
         thresholdPct: CHAT_COMMIT_PCT,
         velocityCommit: CHAT_FLICK_VELOCITY,
+        flickMs: CHAT_FLICK_MS,
         armPx: CHAT_ARM_PX,
         travelWidth: surfaceWidth,
         canStart: (start) => startEligible(start) && !!deps.jumpTarget(1),

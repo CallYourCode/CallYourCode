@@ -50,6 +50,8 @@ export interface HorizontalSwipeOptions {
   thresholdPct: number;
   /** Minimum release velocity (px/ms) that commits early, regardless of distance. */
   velocityCommit: number;
+  /** Longest gesture (ms) that can still count as a flick. Defaults to 250. */
+  flickMs?: number;
   /** Movement before the gesture arms and its axis locks. Defaults to 12px. */
   armPx?: number;
   /** The width the threshold fraction and progress are measured against. */
@@ -96,6 +98,7 @@ export function onHorizontalSwipe(
     direction,
     thresholdPct,
     velocityCommit,
+    flickMs = 250,
     armPx = DEFAULT_ARM_PX,
     travelWidth,
     canStart,
@@ -177,7 +180,7 @@ export function onHorizontalSwipe(
     preventDefault: false,
     eventOptions: {passive: false},
     // The library owns velocity: a fast enough release past the arm slop flicks.
-    swipe: {velocity: velocityCommit, distance: armPx, duration: 250}
+    swipe: {velocity: velocityCommit, distance: armPx, duration: flickMs}
   };
 
   const gesture = new DragGesture(target, handler, config as UserDragConfig);

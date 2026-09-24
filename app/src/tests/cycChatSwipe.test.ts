@@ -233,18 +233,36 @@ describe('chat swipe paging thresholds (touch build)', () => {
     expect(deps.backToList).not.toHaveBeenCalled();
     expect(deps.jumpTo).not.toHaveBeenCalled();
   });
-  test('a partial (~25%) edge back-swipe SNAPS BACK below the threshold (G2)', () => {
-    // The old fixed 60px commit line committed this ~100px/25% release; the
-    // fraction-of-travel rule (50%) now snaps it back.
+  test('a short (~15%) slow edge back-swipe SNAPS BACK below the threshold (G2)', () => {
     const {cs, deps} = mk();
     drag(
       cs.messageListScroll,
       {x: 10, y: 100, t: 0},
-      [at(SLOW[0], 60, 100), at(SLOW[1], 110, 100)], // 100px raw = 25% of 400
-      {x: 110, y: 100, t: 360}
+      [at(SLOW[0], 40, 100), at(SLOW[1], 70, 100)], // 60px raw = 15% of 400
+      {x: 70, y: 100, t: 360}
     );
     expect(deps.backToList).not.toHaveBeenCalled();
     expect(cs.messageListInner.style.transform).toBe('');
+  });
+  test('a quarter-width slow edge back-swipe now commits (2026-09-24: was 50%)', () => {
+    const {cs, deps} = mk();
+    drag(
+      cs.messageListScroll,
+      {x: 10, y: 100, t: 0},
+      [at(SLOW[0], 60, 100), at(SLOW[1], 115, 100)], // 105px raw = 26% of 400
+      {x: 115, y: 100, t: 360}
+    );
+    expect(deps.backToList).toHaveBeenCalledTimes(1);
+  });
+  test('a back-swipe starting a thumb-width in (50px) still counts as an edge swipe', () => {
+    const {cs, deps} = mk();
+    drag(
+      cs.messageListScroll,
+      {x: 50, y: 100, t: 0},
+      [at(SLOW[0], 120, 100), at(SLOW[1], 200, 100)], // 150px raw
+      {x: 200, y: 100, t: 360}
+    );
+    expect(deps.backToList).toHaveBeenCalledTimes(1);
   });
   test('a past-threshold edge back-swipe commits back to the list (G1)', () => {
     const {cs, deps} = mk();

@@ -339,3 +339,66 @@ describe('settings close on outside pointer (desktop)', () => {
     expect(nav.settingsOpen()).toBe(true);
   });
 });
+
+describe('coming back after a long absence opens the chats list (phone)', () => {
+  const setHidden = (hidden: boolean) => {
+    Object.defineProperty(document, 'hidden', {configurable: true, get: () => hidden});
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  beforeEach(() => {
+    localStorage.clear();
+    Object.defineProperty(window, 'innerWidth', {configurable: true, value: 390});
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    setHidden(false);
+  });
+
+  test('resume after more than a minute away leaves the chat for the list', () => {
+    const {nav, mainColumns, disposers} = mk();
+    sessionState.activeId = 's1';
+    nav.setView('chat');
+    setHidden(true);
+    vi.advanceTimersByTime(61_000);
+    setHidden(false);
+    expect(mainColumns.dataset.view).toBe('list');
+    disposers.forEach((d) => d());
+  });
+
+  test('a quick hop away keeps the chat', () => {
+    const {nav, mainColumns, disposers} = mk();
+    sessionState.activeId = 's1';
+    nav.setView('chat');
+    setHidden(true);
+    vi.advanceTimersByTime(10_000);
+    setHidden(false);
+    expect(mainColumns.dataset.view).toBe('chat');
+    disposers.forEach((d) => d());
+  });
+
+  test('wide screens keep the chat however long the absence', () => {
+    Object.defineProperty(window, 'innerWidth', {configurable: true, value: 1200});
+    const {nav, mainColumns, disposers} = mk();
+    sessionState.activeId = 's1';
+    nav.setView('chat');
+    setHidden(true);
+    vi.advanceTimersByTime(10 * 60_000);
+    setHidden(false);
+    expect(mainColumns.dataset.view).toBe('chat');
+    disposers.forEach((d) => d());
+  });
+
+  test('a relaunch after a long absence drops the ?chat= restore; a fresh reload keeps it', () => {
+    bootUrlNav.chat = OPAQUE;
+    localStorage.setItem('cyc-hidden-at', String(Date.now() - 5 * 60_000));
+    const away = mk();
+    expect(away.nav.restorePending.has('chat')).toBe(false);
+    away.disposers.forEach((d) => d());
+
+    localStorage.setItem('cyc-hidden-at', String(Date.now() - 500)); // a reload's own pagehide
+    const reload = mk();
+    expect(reload.nav.restorePending.has('chat')).toBe(true);
+    reload.disposers.forEach((d) => d());
+  });
+});
