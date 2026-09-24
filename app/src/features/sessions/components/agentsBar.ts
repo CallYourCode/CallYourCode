@@ -1,7 +1,5 @@
 import type {EngineAgentRun} from '../../../engine/contract';
 import {h} from '../../../components/domHelpers';
-import {makeIconButton} from '../../../components/iconGlyphs';
-import {confirmPopup} from '../../../components/widgets';
 
 // Title/subtitle line box. Arbitrary properties keep transform/transition animatable.
 // `overflow-hidden` is what lets `text-ellipsis` engage: a visible-overflow nowrap
@@ -134,7 +132,7 @@ function fmtElapsed(ms: number): string {
   return `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ''}`;
 }
 
-export function createAgentsBar(opts: {onStopPi?: (agentId: string) => void} = {}): AgentsBar {
+export function createAgentsBar(): AgentsBar {
   // `min-h-13` (3.25rem == the populated wrapper's 44px + p-1 8px) keeps a stable
   // strip height whether it shows the running-agents wrapper or only the jump pill;
   // it is inert when `cyc-off` (display:none) and when populated (already 52px).
@@ -153,12 +151,12 @@ export function createAgentsBar(opts: {onStopPi?: (agentId: string) => void} = {
       'fine:hover:bg-(--cyc-accent-tint)! fine:active:bg-(--cyc-accent-tint)!'
   );
   const rail = new AgentsRunRail();
-  // Content column; extra end padding when the stop button is present. `min-w-0`
+  // Content column. `min-w-0`
   // lets the column shrink to the wrap (a flex item's default min-width is its
   // nowrap text width), so the title and subtitle lines truncate inside it.
   const content = h(
     'div',
-    'cyc-bar-content cyc-agents-strip-content pointer-events-none [.cyc-agents-has-stop_&]:pe-9 ' +
+    'cyc-bar-content cyc-agents-strip-content pointer-events-none ' +
       'flex flex-col justify-end overflow-visible! min-w-0 ms-2 h-10 relative'
   );
   // Idle title uses muted ink; `!` beats the accent base.
@@ -183,30 +181,6 @@ export function createAgentsBar(opts: {onStopPi?: (agentId: string) => void} = {
   content.append(title, subtitle);
   wrapper.append(rail.el, content);
 
-  const stopBtn = makeIconButton(
-    'hand',
-    'cyc-agents-stop cyc-force-show cyc-off absolute! end-1 top-1/2 -translate-y-1/2 w-8 h-8 z-[1] ' +
-      'pointer-events-auto text-[var(--cyc-danger)]! [&_.cyc-icon]:text-[1.25rem]'
-  );
-  stopBtn.title = 'stop this agent';
-  stopBtn.setAttribute('aria-label', 'stop this agent');
-  stopBtn.addEventListener('click', (ev) => {
-    ev.stopPropagation();
-    const e = entries[cycleIndex];
-    if (!e || !e.running || e.run.source !== 'pi' || !e.run.agentId) return;
-    const agentId = e.run.agentId;
-    const desc = e.run.desc || 'this agent';
-    confirmPopup({
-      title: 'Stop this agent?',
-      description: `Stop ${desc}. Whatever it is doing stops where it is, and that cannot be undone.`,
-      className: 'cyc-confirm-stop',
-      buttons: [
-        {text: 'Cancel'},
-        {text: 'Stop', danger: true, callback: () => opts.onStopPi?.(agentId)}
-      ]
-    });
-  });
-  wrapper.append(stopBtn);
 
   const slot = h(
     'div',
@@ -266,10 +240,6 @@ export function createAgentsBar(opts: {onStopPi?: (agentId: string) => void} = {
       subtitle.replaceChildren(task, age);
     }
     subtitle.classList.toggle('cyc-agents-entry-done', !e.running);
-
-    const canStop = e.running && isPi && !!run.agentId;
-    stopBtn.classList.toggle('cyc-off', !canStop);
-    wrapper.classList.toggle('cyc-agents-has-stop', canStop);
 
     rail.update({total: Math.max(1, entries.length), active: cycleIndex});
   }

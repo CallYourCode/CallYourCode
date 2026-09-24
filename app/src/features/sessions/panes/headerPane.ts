@@ -421,20 +421,7 @@ export function createHeaderPane(deps: HeaderPaneDeps) {
       .catch(() => {});
   };
 
-  const agentsBar = createAgentsBar({
-    onStopPi: (agentId) => {
-      const s = active() as CycEngineSession | null;
-      if (dataState.mode !== 'live' || !s) return;
-      void engine.stopAgent(s.id, agentId).then((r) => {
-        if (!r.ok)
-          toast(
-            r.error === 'not running'
-              ? 'That agent is no longer running'
-              : 'Could not stop the agent'
-          );
-      });
-    }
-  });
+  const agentsBar = createAgentsBar();
   // Producer-owned reservation: the strip floats over the message list, so the
   // list must pad its top by the strip's height (3.25rem == the wrapper's
   // `h-11`/44px + the root `p-1`/8px) plus a small 0.375rem breathing gap so the

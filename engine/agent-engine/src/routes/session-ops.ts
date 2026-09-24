@@ -24,6 +24,7 @@ import { programToken } from "../adapters/pi-launch.ts";
 import { broadcastSessions, sessionList } from "../sessions/sessions-frame.ts";
 import { titleOf } from "../sessions/title.ts";
 import { broadcast } from "../transport/wire.ts";
+import { readPiSubagentRuns } from "../readers/pi-subagent-runs.ts";
 
 /* THE RESTART PRE-FLIGHT, factored out of the /restart route as a pure function
  * so the mode/sid/command decision is unit-testable without restartPane's
@@ -90,6 +91,12 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
     if (denied) return denied;
     const s = sessions.get(decodeURIComponent(sag[1]));
     if (!s) return json({ error: "no session file" }, 404);
+    // pi keeps its subagents' state beside pi-subagents, keyed by its session file
+    if (s.agent.id === "pi") {
+      const located = ctx.adapter.transcriptFile(s.muxHandle);
+      if (!located) return json({ error: "no session file" }, 404);
+      return json({ sessionAgentId: s.agentId, runs: await readPiSubagentRuns(located.path) });
+    }
     /* The pinned-bar read moves behind the adapter (conversationRuns). The
      * runs live in the CLAUDE jsonl, so the id passed is claude's own or null
      * (the old claudeSessionId, derived from the agent kind);
@@ -139,8 +146,8 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
   if (sagStop && req.method === "POST") {
     const denied = await requireOwner(req, server);
     if (denied) return denied;
-    if (!ctx.agentStopHandler) return json({ error: "not found" }, 404);
     const s = sessions.get(decodeURIComponent(sagStop[1]));
+    if (!ctx.agentStopHandler) return json({ error: "not found" }, 404);
     /* Resolve+read the runs behind the adapter (conversationRuns does
      * exactly the sessionFilePath + exists + readAgentRuns this route used to
      * do inline). A missing session or absent transcript is the same 404. */

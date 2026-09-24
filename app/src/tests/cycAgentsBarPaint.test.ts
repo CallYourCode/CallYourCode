@@ -33,10 +33,10 @@ describe('agents-strip static utilities current from sessions.css', () => {
     expect(wrap).toContain('relative');
   });
 
-  test('bar-content carries the pointer gate, has-stop gutter and the current content-column box', () => {
+  test('bar-content carries the pointer gate and the current content-column box', () => {
     const content = cls(el.querySelector('.cyc-agents-strip-content'));
     expect(content).toContain('pointer-events-none');
-    expect(content).toContain('[.cyc-agents-has-stop_&]:pe-9');
+    expect(content).not.toContain('has-stop');
     for (const tok of [
       'flex',
       'flex-col',
@@ -128,22 +128,8 @@ describe('agents-strip static utilities current from sessions.css', () => {
     expect(badge.className).not.toContain('mr-[0.4em]');
   });
 
-  test('stop control carries the absolute danger box and glyph size', () => {
-    const stop = cls(el.querySelector('.cyc-agents-stop'));
-    for (const tok of [
-      'absolute',
-      'end-1',
-      'top-1/2',
-      '-translate-y-1/2',
-      'w-8',
-      'h-8',
-      'z-[1]',
-      'pointer-events-auto',
-      'text-[var(--cyc-danger)]',
-      '[&_.cyc-icon]:text-[1.25rem]'
-    ]) {
-      expect(stop).toContain(tok);
-    }
+  test('the bar draws no stop control (owner, 2026-09-24: ask the agent instead)', () => {
+    expect(el.querySelector('.cyc-agents-stop')).toBeNull();
   });
 
   test('the rail box carries the idle-dim variant plus the fixed geometry and base name', () => {
@@ -213,14 +199,10 @@ describe('agents-strip static utilities current from sessions.css', () => {
 });
 
 describe('agents-strip product-state classes the current variants key off', () => {
-  test('a running pi agent is not idle and reveals the stop gutter', () => {
+  test('a running pi agent is not idle, and no stop control appears', () => {
     bar.update([run({source: 'pi'})]);
     expect(el.classList.contains('cyc-agents-idle')).toBe(false);
-    const wrap = el.querySelector('.cyc-agents-strip-wrap') as HTMLElement;
-    expect(wrap.classList.contains('cyc-agents-has-stop')).toBe(true);
-    expect(
-      (el.querySelector('.cyc-agents-stop') as HTMLElement).classList.contains('cyc-off')
-    ).toBe(false);
+    expect(el.querySelector('.cyc-agents-stop')).toBeNull();
   });
 
   test('a freshly-done agent goes idle and fades the entry', () => {

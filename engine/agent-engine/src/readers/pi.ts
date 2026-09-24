@@ -37,6 +37,7 @@
 // parseScreen is omitted (no pi TUI dialog parser yet), exactly as codex.
 
 import { PI_TRANSCRIPT } from "../chat/transcripts.ts";
+import { readPiSubagentRuns } from "./pi-subagent-runs.ts";
 import { augmentPiLaunch, PI_EXTENSION_PATH } from "../adapters/pi-launch.ts";
 import type { HarnessReader } from "./types.ts";
 import { isFromApp, type SessionEvent } from "../sessions/session-events.ts";
@@ -230,7 +231,8 @@ export const piReader: HarnessReader = {
   // Not implemented for pi: no title reader, no agent-run parser (piagent.ts is
   // a separate background-lane recognizer, not this pane reader).
   async title() { return null; },
-  async runs() { return []; },
+  // Background subagents (pi-subagents), read from their run state files.
+  async runs(path) { return readPiSubagentRuns(path); },
 
   // How to spawn / resume a pi pane. `pi` is the shipped binary end users have
   // on PATH; auth and providers are pi's own config, so there is no wrapper and

@@ -82,8 +82,7 @@ function producedClasses(): {
     model: 'opus'
   };
   bar.update([base]);
-  const stop = bar.el.querySelector<HTMLElement>('.cyc-agents-stop')!;
-  const stopClass = stop.className;
+  const stopClass = ''; // the bar draws no stop control
   const runningRootClass = bar.el.className;
   const content = bar.el.querySelector<HTMLElement>('.cyc-agents-strip-content')!;
   const contentClass = content.className;
@@ -215,22 +214,18 @@ afterAll(async () => {
 });
 
 describe('agents-bar cascade: producer paints must beat the un-layered shell skin', () => {
-  test('day: idle title dims to secondary, live title keeps current primary, content stays visible, stop is absolute/danger', async () => {
+  test('day: idle title dims to secondary, live title keeps current primary, content stays visible', async () => {
     const s = await measure(producedClasses(), 'day');
     expect(s.titleColor).toBe('rgb(4, 5, 6)'); // --cyc-text-muted, not primary
     expect(s.liveTitleColor).toBe('rgb(1, 2, 3)'); 
     expect(s.contentOverflow).toBe('visible'); // not the un-layered `hidden`
-    expect(s.stopPosition).toBe('absolute'); // not the un-layered `relative`
-    expect(s.stopColor).toBe('rgb(7, 8, 9)'); // --cyc-danger, not secondary-text
   });
 
-  test('night: idle title dims to secondary, live title keeps current primary, content stays visible, stop is absolute/danger', async () => {
+  test('night: idle title dims to secondary, live title keeps current primary, content stays visible', async () => {
     const s = await measure(producedClasses(), 'night');
     expect(s.titleColor).toBe('rgb(13, 14, 15)'); // --cyc-text-muted (dark)
     expect(s.liveTitleColor).toBe('rgb(10, 11, 12)'); 
     expect(s.contentOverflow).toBe('visible');
-    expect(s.stopPosition).toBe('absolute');
-    expect(s.stopColor).toBe('rgb(16, 17, 18)'); // --cyc-danger (dark)
   });
 });
 
