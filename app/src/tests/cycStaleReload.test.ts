@@ -33,6 +33,7 @@ describe('staleTargetFor', () => {
     expect(staleTargetFor('100', 'Build stamp: 100\n')).toBe('');
     expect(staleTargetFor('', 'Build stamp: 200\n')).toBe(''); // own unknown (dev, pre-boot-read)
     expect(staleTargetFor('100', '')).toBe(''); // fetch failed / offline
+    expect(staleTargetFor('200', 'Build stamp: 100\n')).toBe(''); // older served build: never chase a rollback
   });
 });
 

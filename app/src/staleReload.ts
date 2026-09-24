@@ -21,11 +21,18 @@ export function parseServedStamp(text: string): string {
   return parts[parts.length - 1] ?? '';
 }
 
-// The build the server is on, when it differs from the one this page runs.
-// Empty string means "not stale" (also when either side is unknown).
+// The build the server is on, when it is NEWER than the one this page runs.
+// Empty string means "not stale" (also when either side is unknown). An older
+// served build (a rollback) is never a target: the worker serves the newest
+// cached bucket, so a reload lands back on this page's build, and an iOS
+// standalone launch resets the once-per-stamp mark, so it reloaded on every
+// open (2026-09-24). Stamps are epoch seconds, compared as numbers.
 export function staleTargetFor(own: string, served: string): string {
   const s = parseServedStamp(served);
   if (!own || !s || s === own) return '';
+  const o = Number(own);
+  const n = Number(s);
+  if (Number.isFinite(o) && Number.isFinite(n) && n < o) return '';
   return s;
 }
 

@@ -23,7 +23,7 @@
 // re-activates (drops old caches + clients.claim). In app/public it stays the
 // literal placeholder; nothing at runtime reads CYC_BUILD, it exists only to make
 // the bytes unique. cyc-precache.json's version still drives the cache name.
-const CYC_BUILD = '1790160498';
+const CYC_BUILD = '1790209080';
 
 const CYC_CACHE_PREFIX = 'cyc-precache-';
 const CYC_MANIFEST_URL = '/cyc-precache.json';
