@@ -276,6 +276,28 @@ const announcedSessions = new Set<string>()
  * knows `opencode`) and matches that against the pane's detected agent, exactly
  * as it does for the claude hook's pid. `eventName` records which plugin event
  * triggered the announce (observability only; the engine does not read it). */
+/* Where this machine's engine listens, found the way the reply tools and the
+ * claude hook find it: CYC_ENGINE_URL (http(s):// or unix:<path>), else the
+ * local engine socket if it exists, else loopback AGENT_PORT (CYC_PORT_BASE+1,
+ * 10101). A hardcoded 10101 sent a second user's stack (engine on 20101) its
+ * announces to nobody (2026-09-24, the pi extension had the same bug).
+ * Self-contained: opencode loads a copy of this file, so it imports nothing. */
+function engineTarget(env: Record<string, string | undefined>): { origin: string; unix?: string } {
+  const home = env.HOME || os.homedir()
+  const tilde = (p: string) => (p.startsWith("~/") ? path.join(home, p.slice(2)) : p)
+  const raw = (env.CYC_ENGINE_URL || "").trim()
+  if (raw.startsWith("unix:")) return { origin: "http://localhost", unix: tilde(raw.slice(5)) }
+  if (raw) return { origin: new URL(raw).origin }
+  const num = (v?: string) => (v && Number.isFinite(Number(v)) ? Number(v) : null)
+  const port = num(env.AGENT_PORT) ?? ((num(env.CYC_PORT_BASE) ?? null) !== null ? num(env.CYC_PORT_BASE)! + 1 : 10101)
+  const dataDir = (env.CYC_DATA_DIR || "").trim() || path.join(home, ".callyourcode")
+  const sock = (env.CYC_ENGINE_SOCK || "").trim()
+    ? tilde(env.CYC_ENGINE_SOCK!.trim())
+    : path.join(dataDir, port === 10101 ? "engine.sock" : `engine-${port}.sock`)
+  if (fs.existsSync(sock)) return { origin: "http://localhost", unix: sock }
+  return { origin: `http://127.0.0.1:${port}` }
+}
+
 async function announceSession(
   sessionID: string,
   cwd: string | null,
@@ -285,7 +307,6 @@ async function announceSession(
   try {
     if (!sessionID || announcedSessions.has(sessionID)) return
     announcedSessions.add(sessionID)
-    const port = env.AGENT_PORT || "10101"
     const body = JSON.stringify({
       sessionId: sessionID,
       pid: process.pid,
@@ -295,12 +316,14 @@ async function announceSession(
       harness: "opencode",
       event: eventName,
     })
-    await fetch(`http://127.0.0.1:${port}/harness/announce`, {
+    const target = engineTarget(env)
+    await fetch(`${target.origin}/harness/announce`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body,
       signal: AbortSignal.timeout(ANNOUNCE_TIMEOUT_MS),
-    })
+      ...(target.unix ? { unix: target.unix } : {}),
+    } as RequestInit)
   } catch {
     /* fails silent, always */
   }
@@ -409,6 +432,7 @@ export const CallYourCode = async ({ client, directory }: any) => {
   reasonFor,
   judge,
   announceSession,
+  engineTarget,
   announcedSessions,
   STATE_FILE,
   ACK_DIR,

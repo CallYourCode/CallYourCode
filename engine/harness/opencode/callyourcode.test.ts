@@ -16,6 +16,7 @@ const t = (CallYourCode as any).testables as {
     env?: Record<string, string | undefined>,
   ) => Promise<void>
   announcedSessions: Set<string>
+  engineTarget: (env: Record<string, string | undefined>) => { origin: string; unix?: string }
 }
 
 type Captured = { path: string; body: any }
@@ -272,4 +273,32 @@ test("a dead port swallows silently (no throw)", async () => {
   await expect(
     t.announceSession("ses_dead", "/x", "session.created", env),
   ).resolves.toBeUndefined()
+})
+
+test("CYC_ENGINE_URL wins over AGENT_PORT (a second user's engine on another port)", async () => {
+  const s = serveCapture()
+  try {
+    await t.announceSession("ses_url", "/home/other/proj", "session.created", {
+      CYC_ENGINE_URL: `http://127.0.0.1:${s.port}`,
+      AGENT_PORT: "1",
+    })
+  } finally {
+    s.stop()
+  }
+  expect(s.captured.length).toBe(1)
+  expect(s.captured[0].body).toMatchObject({ sessionId: "ses_url", harness: "opencode" })
+})
+
+test("engine target: CYC_ENGINE_URL, then an existing local socket, then loopback", () => {
+  const dir = require("node:fs").mkdtempSync(require("node:path").join(require("node:os").tmpdir(), "oc-eng-"))
+  expect(t.engineTarget({ CYC_ENGINE_URL: "http://127.0.0.1:20101", HOME: dir })).toEqual({ origin: "http://127.0.0.1:20101" })
+  expect(t.engineTarget({ CYC_ENGINE_URL: "unix:/run/x.sock", HOME: dir })).toEqual({ origin: "http://localhost", unix: "/run/x.sock" })
+  expect(t.engineTarget({ HOME: dir, AGENT_PORT: "20101" })).toEqual({ origin: "http://127.0.0.1:20101" })
+  const sockDir = require("node:path").join(dir, ".callyourcode")
+  require("node:fs").mkdirSync(sockDir)
+  require("node:fs").writeFileSync(require("node:path").join(sockDir, "engine-20101.sock"), "")
+  expect(t.engineTarget({ HOME: dir, AGENT_PORT: "20101" })).toEqual({
+    origin: "http://localhost",
+    unix: require("node:path").join(sockDir, "engine-20101.sock"),
+  })
 })
