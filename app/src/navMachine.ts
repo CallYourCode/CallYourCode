@@ -50,8 +50,10 @@ export function createNavMachine(deps: NavMachineDeps) {
     ...(bootUrlNav.profile ? (['profile'] as const) : []),
     ...(bootUrlNav.doc ? (['doc'] as const) : [])
   ]);
-  // A launch (not our own reload): open on the list, not the restored chat.
-  if (!consumeSelfReload() && onPhone() && restorePending.has('chat')) {
+  // A launch (not our own reload) on a phone opens on the list: no URL restore
+  // and no reopening of the last engaged chat (storeBindings reads bootToList).
+  const bootToList = !consumeSelfReload() && onPhone();
+  if (bootToList) {
     for (const k of ['chat', 'list', 'profile', 'doc'] as const) restorePending.delete(k);
     cyclog('nav.away-reset', {at: 'launch'});
   }
@@ -206,6 +208,7 @@ export function createNavMachine(deps: NavMachineDeps) {
     setCloseSettingsSubPage,
     settingsOpen: () => settingsOpen,
     isUserNavigated: () => userNavigated,
+    bootToList: () => bootToList,
     wantedHost: () => wantedHost,
     clearWantedHost: () => {
       wantedHost = null;

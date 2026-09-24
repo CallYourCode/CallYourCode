@@ -54,6 +54,8 @@ export interface StoreBindingsDeps {
   settleBoot(): void;
   requestOpen(source: 'restore' | 'notification' | 'newSession' | 'usageLink', id: string): boolean;
   isUserNavigated(): boolean;
+  /** This boot is a launch on a phone: start on the chats list, restore nothing. */
+  bootToList?(): boolean;
   rebuildToolbarSettings(): void;
   profileRefreshToolbar(): void;
   settingsOpen(): boolean;
@@ -308,7 +310,7 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
   }
 
   function tryRestoreActive(): 'opened' | 'none' | 'wait' {
-    if (sessionState.activeId || deps.isUserNavigated()) {
+    if (sessionState.activeId || deps.isUserNavigated() || deps.bootToList?.()) {
       restoredActive = true;
       deps.restored('chat');
       deps.restored('list');

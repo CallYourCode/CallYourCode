@@ -278,6 +278,14 @@ describe('the boot restore', () => {
     expect(deps.requestOpen).toHaveBeenCalledWith('restore', 's1');
     expect(deps.settleBoot).toHaveBeenCalled();
   });
+  test('a phone launch (bootToList) reopens nothing, not even the last engaged chat', () => {
+    const {sb, deps} = mk({bootToList: () => true});
+    fake.sessions.set('s1', {id: 's1'});
+    localStorage.setItem('cyc-engaged', 's1');
+    expect(sb.tryRestoreActive()).toBe('none');
+    expect(deps.requestOpen).not.toHaveBeenCalled();
+    expect(deps.restored).toHaveBeenCalledWith('chat');
+  });
   test('the replay settle runs only for the open chat', () => {
     const {cs} = mk();
     sessionState.activeId = 's1';

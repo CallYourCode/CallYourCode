@@ -695,6 +695,7 @@ function buildApp() {
     settleBoot,
     requestOpen,
     isUserNavigated: nav.isUserNavigated,
+    bootToList: nav.bootToList,
     rebuildToolbarSettings: () => rebuildToolbarSettings(),
     profileRefreshToolbar: () => profile.refreshToolbar(),
     settingsOpen: nav.settingsOpen,
