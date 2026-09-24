@@ -4,6 +4,7 @@ import {pipeline} from './audio/pipeline';
 import {toast} from './components/widgets';
 import {unsentWork, vaultHolds} from './sessionState';
 import {createStaleReloadController, parseServedStamp} from './staleReload';
+import {markSelfReload} from './shared/selfReload';
 
 export const bundleInfo = {stamp: ''};
 
@@ -103,6 +104,7 @@ export function installStaleTabReload(): void {
       cyclog('reload.go', {waited});
       const url = new URL(location.href);
       url.searchParams.set('b', String(Date.now()));
+      markSelfReload();
       location.replace(url.toString());
     };
     window.setTimeout(tick, 1200);

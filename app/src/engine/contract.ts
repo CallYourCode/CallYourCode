@@ -1,6 +1,7 @@
 import {setAppAuth} from './appFetch';
 import {setLogAutoShip} from '../shared/logging';
 import {hostnameOf} from './hostNames';
+import {markSelfReload} from '@/shared/selfReload';
 import {
   cachedImageBlob,
   cachedImagesMatching,
@@ -477,6 +478,7 @@ export function clearEnginePinAndReload(): void {
   } catch {}
   const url = new URL(location.href);
   url.searchParams.delete('engine');
+  markSelfReload();
   location.replace(url.toString());
 }
 

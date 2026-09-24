@@ -1,4 +1,5 @@
 import {cyclog} from './logging';
+import {markSelfReload} from './selfReload';
 
 // Every dynamic import() in the app goes through lazy(). The engine serves
 // app/dist from disk, and a rebuild swaps in new hashed chunk names; a page
@@ -51,6 +52,7 @@ export function lazy<T>(load: () => Promise<T>, what: string): Promise<T> {
     reloadRequested = true;
     markReloaded();
     notify('The app was updated; reloading');
+    markSelfReload();
     location.reload();
     throw err;
   });

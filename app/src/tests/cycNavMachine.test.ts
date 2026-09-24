@@ -347,6 +347,7 @@ describe('coming back after a long absence opens the chats list (phone)', () => 
   };
   beforeEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
     Object.defineProperty(window, 'innerWidth', {configurable: true, value: 390});
     vi.useFakeTimers();
   });
@@ -389,14 +390,13 @@ describe('coming back after a long absence opens the chats list (phone)', () => 
     disposers.forEach((d) => d());
   });
 
-  test('a relaunch after a long absence drops the ?chat= restore; a fresh reload keeps it', () => {
+  test('a launch (even seconds after a force close) drops the ?chat= restore; our own reload keeps it', () => {
     bootUrlNav.chat = OPAQUE;
-    localStorage.setItem('cyc-hidden-at', String(Date.now() - 5 * 60_000));
-    const away = mk();
-    expect(away.nav.restorePending.has('chat')).toBe(false);
-    away.disposers.forEach((d) => d());
+    const launch = mk();
+    expect(launch.nav.restorePending.has('chat')).toBe(false);
+    launch.disposers.forEach((d) => d());
 
-    localStorage.setItem('cyc-hidden-at', String(Date.now() - 500)); // a reload's own pagehide
+    sessionStorage.setItem('cyc-self-reload', String(Date.now() - 500));
     const reload = mk();
     expect(reload.nav.restorePending.has('chat')).toBe(true);
     reload.disposers.forEach((d) => d());
