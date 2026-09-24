@@ -44,7 +44,12 @@ const BODY_CAP = 20000; // prompts/replies keep their body (engine BODY_CAP)
 // callyourcode.ts announceSession exactly: once per session id per process,
 // fail-silent, a short AbortSignal timeout, witnesses off the process env.
 
-const ANNOUNCE_TIMEOUT_MS = 2000;
+const ANNOUNCE_TIMEOUT_MS = 5000;
+// Resuming a large session blocks pi's event loop for seconds right after
+// session_start, so the first POST can time out before its reply is read
+// (Hunter, 2026-09-24: "AbortError: aborted", no bind, a fresh row minted).
+// The identity is too important to drop: retry on these delays.
+const ANNOUNCE_RETRY_MS = [3000, 10000, 30000];
 
 // One announce per pi session id per extension process. The engine's
 // recordHookBind is idempotent (hook-announce.ts recordHookBind, latest-wins),
@@ -76,9 +81,20 @@ async function announceSession(sessionId, cwd, env, model, force) {
       model: model || null,
       event: "session_start",
     };
-    await engineIO.postJson(engineIO.resolveEngineTarget(e), "/harness/announce", body, ANNOUNCE_TIMEOUT_MS);
+    await postAnnounce(e, body, 0);
   } catch {
     /* fails silent, always */
+  }
+}
+
+async function postAnnounce(env, body, attempt) {
+  try {
+    await engineIO.postJson(engineIO.resolveEngineTarget(env), "/harness/announce", body, ANNOUNCE_TIMEOUT_MS);
+  } catch {
+    const delay = ANNOUNCE_RETRY_MS[attempt];
+    if (delay === undefined) return; // out of retries: fail silent
+    const t = setTimeout(() => void postAnnounce(env, body, attempt + 1), delay);
+    if (t.unref) t.unref();
   }
 }
 
@@ -280,15 +296,25 @@ function onModelSelect(on) {
   });
 }
 
-/** Only the pane's own pi speaks for the pane. A subagent child (pi-subagents
- *  runs `pi --mode json -p`) inherits HERDR_PANE_ID and CYC_PI_EVENT_SOCK; its
- *  announce re-bound the parent's pane to the child's session, the engine then
- *  tailed a finished child transcript, and the row sat "working" for hours
- *  (Hunter, 2026-09-24). A pi with no mode (older builds) still counts. */
-function ownsPane(ctx) {
-  const mode = ctx && ctx.mode;
-  return !mode || mode === "tui" || mode === "rpc";
+/** Only the pane's own pi speaks for the pane. A subagent child inherits
+ *  HERDR_PANE_ID and CYC_PI_EVENT_SOCK; its announce re-bound the parent's pane
+ *  to the child's session, the engine then tailed a finished child transcript,
+ *  and the row read "working" for hours (Hunter, 2026-09-24). The pane's pi owns
+ *  the terminal; a child runs on pipes (pi-subagents spawns `pi --mode json -p`
+ *  or an in-process runner script), so a non-TTY stdout or a print/json command
+ *  line is a child. Not ctx.mode: pi binds the TUI mode after session_start
+ *  fires, so ctx.mode still reads "print" there even for the interactive pi. */
+function ownsPane(argv, stdoutIsTTY) {
+  const a = argv || process.argv;
+  const tty = stdoutIsTTY === undefined ? !!(process.stdout && process.stdout.isTTY) : stdoutIsTTY;
+  if (!tty) return false;
+  if (a.includes("-p") || a.includes("--print")) return false;
+  const i = a.indexOf("--mode");
+  const mode = i >= 0 ? a[i + 1] : null;
+  return mode !== "json" && mode !== "print";
 }
+// a test seam: CYC_PI_OWNS_PANE=1 stands in for the pane's terminal
+const ownsThisPane = () => process.env.CYC_PI_OWNS_PANE === "1" || ownsPane();
 
 /** The extension factory pi calls with its API. Exported as default AND as a
  *  named `activate` so a test can drive it against a stub pi without pi. */
@@ -309,7 +335,7 @@ function activate(pi, deps) {
   // hiccup can never crash pi or abort its turn.
   const safe = (fn) => (event, ctx) => {
     try {
-      if (!ownsPane(ctx)) return;
+      if (!ownsThisPane()) return;
       fn(event, ctx);
     } catch {
       // swallow: the transcript path is the source of truth
@@ -480,5 +506,6 @@ module.exports._internal = {
   BODY_CAP,
   announceSession,
   announcedSessions,
+  ANNOUNCE_RETRY_MS,
   ANNOUNCE_TIMEOUT_MS,
 };
