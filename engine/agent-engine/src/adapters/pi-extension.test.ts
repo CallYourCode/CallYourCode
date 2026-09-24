@@ -508,3 +508,38 @@ describe("the foreground guard (claude's enforce-bash-async, ported)", () => {
   });
 });
 
+
+describe("only the pane's own pi speaks for the pane", () => {
+  test("a subagent child (json/print mode) never announces; tui, rpc and a mode-less pi do", async () => {
+    const posts: any[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        posts.push(await req.json().catch(() => null));
+        return new Response("{}");
+      },
+    });
+    const prevPort = process.env.AGENT_PORT;
+    process.env.AGENT_PORT = String(server.port);
+    delete process.env.CYC_PI_EVENT_SOCK;
+    try {
+      const pi = stubPi();
+      activate(pi as any);
+      const withMode = (mode: string | undefined, sid: string) => ({
+        ...ctxFor(), ...(mode ? { mode } : {}),
+        sessionManager: { ...ctxFor().sessionManager, getSessionId: () => sid },
+      });
+      pi.emit("session_start", { type: "session_start" }, withMode("json", "child-json"));
+      pi.emit("session_start", { type: "session_start" }, withMode("print", "child-print"));
+      pi.emit("session_start", { type: "session_start" }, withMode("tui", "pane-tui"));
+      pi.emit("session_start", { type: "session_start" }, withMode("rpc", "pane-rpc"));
+      pi.emit("session_start", { type: "session_start" }, withMode(undefined, "pane-old"));
+      await new Promise((r) => setTimeout(r, 300));
+      expect(posts.map((p) => p.sessionId).sort()).toEqual(["pane-old", "pane-rpc", "pane-tui"]);
+    } finally {
+      process.env.AGENT_PORT = prevPort;
+      server.stop(true);
+      announce.announcedSessions.clear();
+    }
+  });
+});

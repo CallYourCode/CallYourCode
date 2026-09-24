@@ -374,7 +374,7 @@ test("a pi pane's conversation enters the chat stream; non-turns do not", async 
     "a non-turn record became a chat row").toBe(true);
 });
 
-test("Stop on a non-claude pane sends a mux ctrl+c, not a claude hook", async () => {
+test("Stop on a pi pane sends the mux its interrupt key (Escape), not a claude hook", async () => {
   /* Stop is a MULTIPLEXER verb. The claude lane has a hook that can end a turn
    * politely, and reaching for it on a pane running something else would stop
    * nothing at all while looking, on this side, exactly like success. */
@@ -388,8 +388,10 @@ test("Stop on a non-claude pane sends a mux ctrl+c, not a claude hook", async ()
   const client = c.client();
 
   await dispatchClientFrame(client.sock, { t: "interrupt", id: wireId("w1:p2") });
-  await until(() => c.herdr.keys.some((k) => k.paneId === "w1:p2" && k.keys.includes("ctrl+c")),
-    { timeoutMs: LOADED_MS, what: "the interrupt to reach the pane as ctrl+c" });
+  await until(() => c.herdr.keys.some((k) => k.paneId === "w1:p2" && k.keys.includes("escape")),
+    { timeoutMs: LOADED_MS, what: "the interrupt to reach the pi pane as escape" });
+  // ctrl+c only clears pi's input box; it must not be what Stop sends
+  expect(c.herdr.keys.some((k) => k.paneId === "w1:p2" && k.keys.includes("ctrl+c"))).toBe(false);
 
   // and nothing was TYPED at it: an interrupt is keys, never text
   expect(c.herdr.texts.filter((t) => t.paneId === "w1:p2")).toEqual([]);

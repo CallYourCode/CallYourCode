@@ -199,6 +199,10 @@ export interface HarnessReader {
    * ladder. */
   readonly quit?: { waitMs?: number; keys?: string[] };
 
+  /** The key(s) that stop a running turn (the app's Stop). Absent means
+   *  "ctrl+c". pi interrupts on Escape; ctrl+c there only clears the input. */
+  readonly interruptKeys?: string[];
+
   /** How this harness prefers to take input. Absent means "keystroke" (the
    *  adapter's default). "direct" is honoured only when a live endpoint is
    *  registered for the pane; otherwise the adapter uses keystrokes. */

@@ -865,7 +865,7 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
                 tell: e instanceof PaneNotReady ? e.tell : "that pane would not take the keystrokes" };
             }
           },
-          interrupt: async (ref) => { await adapter.interrupt(ref.handle); return { ok: true, tell: "sent ctrl-c" }; },
+          interrupt: async (ref) => { await adapter.interrupt(ref.handle); return { ok: true, tell: "sent the interrupt key" }; },
         },
       });
       const hostWiring: HostWiring = {

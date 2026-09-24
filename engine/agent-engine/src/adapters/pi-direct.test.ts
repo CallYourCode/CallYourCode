@@ -229,3 +229,15 @@ test("adapter: a pi pane with a live endpoint takes input DIRECTLY; no endpoint 
   expect(mux.rpcs.filter((r) => r.pane === CLAUDE_PANE && r.method === "pane.send_text"))
     .toEqual([{ method: "pane.send_text", pane: CLAUDE_PANE, text: "typed hello" }]);
 });
+
+test("Stop interrupts pi with Escape (its interrupt key) and claude with ctrl+c", async () => {
+  const PI_PANE = "w1:pi";
+  const CLAUDE_PANE = "w1:cl";
+  const mux = fakeMux([paneOf(PI_PANE, "pi"), paneOf(CLAUDE_PANE, "claude")]);
+  const adapter = new MuxAdapter(mux);
+  adapter.onAgents(() => {});
+  await adapter.interrupt(PI_PANE);
+  await adapter.interrupt(CLAUDE_PANE);
+  const keys = mux.rpcs.filter((r) => r.method === "pane.send_keys").map((r) => [r.pane, r.keys]);
+  expect(keys).toEqual([[PI_PANE, ["escape"]], [CLAUDE_PANE, ["ctrl+c"]]]);
+});

@@ -265,6 +265,10 @@ export const piReader: HarnessReader = {
   // there would close the pane itself.
   quit: { waitMs: 40_000, keys: ["ctrl+c", "ctrl+d"] },
 
+  // pi's app.interrupt is Escape (keybindings.js); ctrl+c only clears the box,
+  // so the app's Stop did nothing to a running pi turn.
+  interruptKeys: ["escape"],
+
   // PI STREAMS LIVE EVENTS + ITS OWN SESSION ID over a per-pane unix socket
   // (adapters/pi-events.ts). Declaring eventSocket has the adapter's spawn bind
   // a PiEventServer before pi starts, decorate the launch through launchAugment

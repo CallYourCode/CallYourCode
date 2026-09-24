@@ -1283,7 +1283,9 @@ export class MuxAdapter implements MultiplexerAdapter {
   }
 
   async interrupt(handle: string): Promise<void> {
-    await this.mux.sendKeys(handle, "ctrl+c");
+    const info = this.infoFor(handle);
+    const keys = (info && readerFor(info.kind)?.interruptKeys) || ["ctrl+c"];
+    await this.mux.sendKeys(handle, ...keys);
   }
 
   /* The raw typed-input pass-throughs (see the interface note): the shell-typing

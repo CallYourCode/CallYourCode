@@ -280,6 +280,16 @@ function onModelSelect(on) {
   });
 }
 
+/** Only the pane's own pi speaks for the pane. A subagent child (pi-subagents
+ *  runs `pi --mode json -p`) inherits HERDR_PANE_ID and CYC_PI_EVENT_SOCK; its
+ *  announce re-bound the parent's pane to the child's session, the engine then
+ *  tailed a finished child transcript, and the row sat "working" for hours
+ *  (Hunter, 2026-09-24). A pi with no mode (older builds) still counts. */
+function ownsPane(ctx) {
+  const mode = ctx && ctx.mode;
+  return !mode || mode === "tui" || mode === "rpc";
+}
+
 /** The extension factory pi calls with its API. Exported as default AND as a
  *  named `activate` so a test can drive it against a stub pi without pi. */
 function activate(pi, deps) {
@@ -299,6 +309,7 @@ function activate(pi, deps) {
   // hiccup can never crash pi or abort its turn.
   const safe = (fn) => (event, ctx) => {
     try {
+      if (!ownsPane(ctx)) return;
       fn(event, ctx);
     } catch {
       // swallow: the transcript path is the source of truth
@@ -457,6 +468,7 @@ function activate(pi, deps) {
 module.exports = activate;
 module.exports.activate = activate;
 module.exports.default = activate;
+module.exports.ownsPane = ownsPane;
 // test seams (pure, no socket): the frame builders the handlers use, plus the
 // HTTP announce and its once-per-sid guard (driven by pi-extension.test.ts
 // against a local Bun.serve, exactly as the opencode plugin test does).
