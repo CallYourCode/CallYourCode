@@ -562,6 +562,28 @@ export function createRenderHub(deps: RenderHubDeps) {
     ) {
       cs.clearOpenPaint();
       const painted = s.messages;
+      // Order check: the chat must read oldest to newest. Name the first place
+      // it does not, with enough of each row to trace (2026-09-24: August rows
+      // painted after today's on two devices; a fresh client was fine).
+      const inv = painted.findIndex((m, i) => i > 0 && m.ts < painted[i - 1].ts);
+      if (inv > 0) {
+        const brief = (m: (typeof painted)[number]) => ({
+          ts: m.ts,
+          seq: (m as {seq?: number}).seq ?? null,
+          id: String((m as {id?: string}).id ?? '').slice(0, 24),
+          mid: (m as {mid?: string}).mid ?? null,
+          cid: (m as {cid?: string}).cid ?? null,
+          role: m.role
+        });
+        cyclog('chat.order.broken', {
+          session: s.id,
+          at: inv,
+          count: painted.length,
+          inversions: painted.filter((m, i) => i > 0 && m.ts < painted[i - 1].ts).length,
+          before: JSON.stringify(brief(painted[inv - 1])),
+          after: JSON.stringify(brief(painted[inv]))
+        });
+      }
       cyclog('chat.painted', {
         session: s.id,
         source: es.paintSource,
