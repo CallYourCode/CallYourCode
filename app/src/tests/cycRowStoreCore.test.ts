@@ -11,6 +11,7 @@ import {
   rowIdOfMessage,
   upsertMirror,
   WINDOW_FLOOR_ALL,
+  inTimeOrder,
   type StoreRow
 } from '../engine/store/rows/core';
 import type {CycEngineMessage} from '../engine/store/types';
@@ -101,5 +102,23 @@ describe('projection merges messages and events on the seq axis', () => {
     const {messages, events} = project(m);
     expect(messages.map((x) => x.text)).toEqual(['m1', 'm3']);
     expect(events.map((e) => e.uuid)).toEqual(['se-2']);
+  });
+});
+
+describe('inTimeOrder: the chat always reads oldest to newest', () => {
+  test('an out-of-order run (August after today) is put back in time order', () => {
+    const rows = [
+      {ts: 100, id: 'aug-1'},
+      {ts: 900, id: 'today'},
+      {ts: 150, id: 'aug-2'},
+      {ts: 160, id: 'aug-3'}
+    ];
+    expect(inTimeOrder(rows).map((r) => r.id)).toEqual(['aug-1', 'aug-2', 'aug-3', 'today']);
+  });
+  test('equal times keep their order, and an ordered list is returned as is', () => {
+    const tie = [{ts: 5, id: 'a'}, {ts: 5, id: 'b'}, {ts: 4, id: 'c'}];
+    expect(inTimeOrder(tie).map((r) => r.id)).toEqual(['c', 'a', 'b']);
+    const ok = [{ts: 1}, {ts: 2}];
+    expect(inTimeOrder(ok)).toBe(ok);
   });
 });

@@ -844,7 +844,10 @@ export function olderWindowIds(m: Mirror, size: number): string[] {
 
 // Build the messages and events arrays the renderer reads from the loaded
 // payloads, each in ascending seq/ts order.
-export function project(m: Mirror): {messages: CycEngineMessage[]; events: CycSessionEvent[]} {
+export function project(
+  m: Mirror,
+  onRepair?: (info: {at: number; before: RowTuple; after: RowTuple}) => void
+): {messages: CycEngineMessage[]; events: CycSessionEvent[]} {
   const messages: CycEngineMessage[] = [];
   const events: CycSessionEvent[] = [];
   for (const t of m.idx) {
@@ -853,5 +856,26 @@ export function project(m: Mirror): {messages: CycEngineMessage[]; events: CycSe
     if (row.kind === 'msg' && row.msg) messages.push(row.msg);
     else if (row.kind === 'event' && row.event) events.push(row.event);
   }
-  return {messages, events};
+  if (onRepair) {
+    const tuples = m.idx.filter((t) => m.loaded.has(t.id));
+    const at = tuples.findIndex((t, i) => i > 0 && m.loaded.get(t.id)!.ts < m.loaded.get(tuples[i - 1].id)!.ts);
+    if (at > 0) onRepair({at, before: tuples[at - 1], after: tuples[at]});
+  }
+  return {messages: inTimeOrder(messages), events: inTimeOrder(events)};
+}
+
+// The chat reads oldest to newest by the time each row carries, whatever order
+// the index holds them in: two devices painted August rows after today's
+// (2026-09-24). A stable sort, so equal times keep the index's order; a no-op
+// (same array) when already in order.
+export function inTimeOrder<T extends {ts: number}>(rows: T[]): T[] {
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i].ts < rows[i - 1].ts) {
+      return rows
+        .map((r, j) => ({r, j}))
+        .sort((a, b) => a.r.ts - b.r.ts || a.j - b.j)
+        .map((x) => x.r);
+    }
+  }
+  return rows;
 }

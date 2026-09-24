@@ -335,7 +335,7 @@ export async function openWindow(
   // resnap, re-anchors on the tail).
   m.windowSize = size;
   m.extended = false;
-  return project(m);
+  return projectChecked(sessionId, m);
 }
 
 // Extend the window upward from the store: load the next `size` older rows.
@@ -349,7 +349,7 @@ export async function extendWindow(
   const m = await ensureIdx(sessionId);
   const ids = olderWindowIds(m, size);
   if (!ids.length) {
-    return {...project(m), dry: true};
+    return {...projectChecked(sessionId, m), dry: true};
   }
   await loadPayloads(sessionId, m, ids);
   // The new floor is the OLDEST row just loaded (olderWindowIds returns ascending
@@ -365,7 +365,22 @@ export async function extendWindow(
     // on screen back to the newest windowSize.
     m.extended = true;
   }
-  return {...project(m), dry: !hasMoreBelow(m)};
+  return {...projectChecked(sessionId, m), dry: !hasMoreBelow(m)};
+}
+
+// The display is always put in time order (core inTimeOrder); when the index
+// disagreed, say so once per session per page so the cause can be traced.
+const orderReported = new Set<string>();
+function projectChecked(sessionId: string, m: Mirror) {
+  return project(m, ({at, before, after}) => {
+    if (orderReported.has(sessionId)) return;
+    orderReported.add(sessionId);
+    const brief = (t: RowTuple) => {
+      const r = m.loaded.get(t.id);
+      return JSON.stringify({id: t.id.slice(0, 40), tupleTs: t.ts, rowTs: r?.ts ?? null, seq: t.seq, kind: t.kind});
+    };
+    cyclog('rows.order.repaired', {session: sessionId, at, idx: m.idx.length, before: brief(before), after: brief(after)});
+  });
 }
 
 export function projection(sessionId: string): {
@@ -373,7 +388,7 @@ export function projection(sessionId: string): {
   events: CycSessionEvent[];
 } {
   const m = mirrors.get(sessionId);
-  return m ? project(m) : {messages: [], events: []};
+  return m ? projectChecked(sessionId, m) : {messages: [], events: []};
 }
 
 export function windowHasMoreBelow(sessionId: string): boolean {
