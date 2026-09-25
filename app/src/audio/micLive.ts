@@ -40,7 +40,12 @@ export function decideMicFix(s: MicSnapshot): MicFix {
 
   const trackDead = s.trackReadyState !== 'live' || s.trackMuted;
   const contextGone = !s.contextState || s.contextState === 'closed';
-  if (trackDead || contextGone) return 'reacquire';
+  // Re-acquiring asks the OS for the mic again, and an iPhone web app shows its
+  // permission prompt every time. Only a press on the mic earns that: iOS mutes
+  // an idle warm track, and treating that as broken on focus/mute/context edges
+  // re-prompted every few seconds (2026-09-25). An idle dead mic waits for the
+  // next press, which re-acquires it once.
+  if (trackDead || contextGone) return s.engaging ? 'reacquire' : 'none';
   if (s.contextState !== 'running') return 'resume';
   return 'none';
 }

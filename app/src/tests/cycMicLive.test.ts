@@ -78,7 +78,7 @@ describe('mic live state machine', () => {
   test('RED: without applyMicFix an ended or muted track stays dead', () => {
     const ended = world({trackReadyState: 'ended'});
     const muted = world({trackMuted: true});
-    expect(decideMicFix(inspectOf(ended, {visible: true, engaging: false}))).toBe('reacquire');
+    expect(decideMicFix(inspectOf(ended, {visible: true, engaging: true}))).toBe('reacquire');
     expect(decideMicFix(inspectOf(muted, {visible: false, engaging: true}))).toBe('reacquire');
     expect(isMicLive(ended)).toBe(false);
     expect(isMicLive(muted)).toBe(false);
@@ -114,9 +114,9 @@ describe('mic live state machine', () => {
     expect(byTap.resumes).toBe(1);
     expect(byTap.reacquires).toBe(0);
   });
-  test('GREEN: visibility or a mic tap re-acquires an ended track', async () => {
+  test('GREEN: a mic tap re-acquires an ended track', async () => {
     const w = world({trackReadyState: 'ended'});
-    expect(await recover(w, {visible: true, engaging: false})).toBe(true);
+    expect(await recover(w, {visible: true, engaging: true})).toBe(true);
     expect(w.reacquires).toBe(1);
     expect(w.resumes).toBe(0);
     expect(w.trackReadyState).toBe('live');
@@ -130,8 +130,8 @@ describe('mic live state machine', () => {
   });
   test('GREEN: a closed context is re-acquired, not merely resumed', async () => {
     const w = world({contextState: 'closed'});
-    expect(decideMicFix(inspectOf(w, {visible: true, engaging: false}))).toBe('reacquire');
-    expect(await recover(w, {visible: true, engaging: false})).toBe(true);
+    expect(decideMicFix(inspectOf(w, {visible: true, engaging: true}))).toBe('reacquire');
+    expect(await recover(w, {visible: true, engaging: true})).toBe(true);
     expect(w.reacquires).toBe(1);
     expect(w.contextState).toBe('running');
   });
@@ -145,5 +145,26 @@ describe('mic live state machine', () => {
   test('a live running pipeline asks for no fix', () => {
     expect(decideMicFix(snap({visible: true, engaging: true}))).toBe('none');
     expect(isMicLive(snap({}))).toBe(true);
+  });
+});
+
+describe('an idle mic never re-prompts (iPhone web apps prompt on every re-acquire)', () => {
+  test('focus, mute or a context edge with no press leaves a muted, ended or closed mic alone', async () => {
+    for (const dead of [{trackMuted: true}, {trackReadyState: 'ended' as const}, {contextState: 'closed' as const}]) {
+      const w = world(dead);
+      expect(decideMicFix(inspectOf(w, {visible: true, engaging: false}))).toBe('none');
+      expect(await recover(w, {visible: true, engaging: false})).toBe(false);
+      expect(w.reacquires).toBe(0);
+    }
+  });
+  test('the next press re-acquires it once', async () => {
+    const w = world({trackMuted: true});
+    expect(await recover(w, {visible: true, engaging: true})).toBe(true);
+    expect(w.reacquires).toBe(1);
+  });
+  test('a suspended context still resumes on focus: no prompt involved', async () => {
+    const w = world({contextState: 'suspended'});
+    expect(await recover(w, {visible: true, engaging: false})).toBe(true);
+    expect(w.reacquires).toBe(0);
   });
 });
