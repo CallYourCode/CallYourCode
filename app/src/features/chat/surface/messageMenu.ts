@@ -92,14 +92,35 @@ export function installMessageMenu(deps: MessageMenuDeps) {
   const openMessageMenu = (
     target: HTMLElement,
 
-    at: {clientX: number; clientY: number; pageX: number; pageY: number}
+    at: {clientX: number; clientY: number; pageX: number; pageY: number},
+    link?: HTMLAnchorElement | null
   ) => {
     const s = active();
     if (!target.dataset.mid || !s) return;
     const m = messageOfNode(s, target);
     if (!m) return;
+    // A right-click on a link leads with what a browser's own menu would offer.
+    const href = link?.href;
     openMenu(
       [
+        ...(href
+          ? [
+              {
+                icon: 'next' as const,
+                text: 'Open link',
+                onClick: (): void => {
+                  window.open(href, '_blank', 'noopener,noreferrer');
+                }
+              },
+              {
+                icon: 'copy' as const,
+                text: 'Copy link',
+                onClick: (): void => {
+                  void copyText(href).then((ok) => toast(ok ? 'Link copied' : 'Could not copy'));
+                }
+              }
+            ]
+          : []),
         ...(m.role === 'user' && m.status === 'failed'
           ? [
               {
@@ -127,7 +148,7 @@ export function installMessageMenu(deps: MessageMenuDeps) {
       const target = ((e.target as HTMLElement).closest?.('.cyc-message') ??
         null) as HTMLElement | null;
       if (!target) return;
-      openMessageMenu(target, e);
+      openMessageMenu(target, e, (e.target as HTMLElement).closest?.('a[href]') as HTMLAnchorElement | null);
     };
     messageListInner.addEventListener('contextmenu', onContextMenu);
     onTeardown(() => messageListInner.removeEventListener('contextmenu', onContextMenu));
@@ -159,8 +180,12 @@ export function installMessageMenu(deps: MessageMenuDeps) {
       })
     );
 
+    // A link keeps the phone's own long-press menu (copy, open); the rest of a
+    // bubble has the app's.
     const noNativeMenu = (e: Event) => {
-      if ((e.target as HTMLElement)?.closest?.('.cyc-message')) e.preventDefault();
+      const t = e.target as HTMLElement;
+      if (t?.closest?.('a[href]')) return;
+      if (t?.closest?.('.cyc-message')) e.preventDefault();
     };
     messageListInner.addEventListener('contextmenu', noNativeMenu);
     onTeardown(() => messageListInner.removeEventListener('contextmenu', noNativeMenu));

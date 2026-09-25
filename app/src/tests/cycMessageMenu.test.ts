@@ -361,3 +361,51 @@ describe('highlightMessage', () => {
     expect(el.querySelector(':scope > .cyc-msg-highlight')).toBeNull();
   });
 });
+
+describe('links in a bubble', () => {
+  beforeEach(() => {
+    opened.length = 0;
+    copyTextToClipboard.mockClear();
+    toast.mockClear();
+  });
+
+  test('right-clicking a link leads with Open link and Copy link, then the usual items', async () => {
+    const {deps} = mk();
+    const bubble = messageFor(2);
+    const a = document.createElement('a');
+    a.href = 'https://play.google.com/store/apps/details?id=ai.coachchat.app';
+    a.textContent = 'store link';
+    bubble.append(a);
+    deps.messageListInner.append(bubble);
+    a.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 5, clientY: 5}));
+    const items = opened.at(-1)!;
+    expect(items.map((i) => i.text)).toEqual(['Open link', 'Copy link', 'Reply', 'Delete']);
+    items[1].onClick();
+    await Promise.resolve();
+    expect(copyTextToClipboard).toHaveBeenCalledWith('https://play.google.com/store/apps/details?id=ai.coachchat.app');
+  });
+
+  test('right-clicking plain text keeps the menu as it was', () => {
+    const {deps} = mk();
+    const bubble = messageFor(2);
+    bubble.textContent = 'no link here';
+    deps.messageListInner.append(bubble);
+    bubble.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true}));
+    expect(opened.at(-1)!.map((i) => i.text)).toEqual(['Reply', 'Delete']);
+  });
+
+  test('on touch, a long-press on a link keeps the phone own menu', () => {
+    const {deps} = mk({isTouch: true});
+    const bubble = messageFor(2);
+    const a = document.createElement('a');
+    a.href = 'https://example.com/x';
+    bubble.append(a);
+    deps.messageListInner.append(bubble);
+    const onLink = new MouseEvent('contextmenu', {bubbles: true, cancelable: true});
+    a.dispatchEvent(onLink);
+    expect(onLink.defaultPrevented).toBe(false);
+    const onText = new MouseEvent('contextmenu', {bubbles: true, cancelable: true});
+    bubble.dispatchEvent(onText);
+    expect(onText.defaultPrevented).toBe(true);
+  });
+});
