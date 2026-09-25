@@ -1,7 +1,8 @@
 import {afterEach, describe, expect, test} from 'vitest';
 import * as rowStore from '../engine/store/rows/rowStore';
 import {messageRow, type StoreRow} from '../engine/store/rows/core';
-import {settleEcho} from '../engine/store/rows/door';
+import {applyProjection, isUnsettledOwnSend, settleEcho} from '../engine/store/rows/door';
+import {sessions} from '../engine/store/registry';
 import type {CycEngineMessage} from '../engine/store/types';
 import {memTx} from './rowStoreFake';
 
@@ -128,5 +129,32 @@ describe('settleEcho is idempotent when its pending row is already gone', () => 
     expect(messages[0].mid).toBe('mr-real');
     expect(messages[0].seq).toBe(7);
     expect(messages[0].status).toBe('delivered');
+  });
+});
+
+describe('an old served send is never a pending overlay', () => {
+  test('a mid-less user row the engine numbered is settled; a real optimistic send is not', () => {
+    const old = msg({role: 'user', text: 'my resume', ts: 50, seq: 677, cid: 'c-old'});
+    expect(isUnsettledOwnSend(old)).toBe(false);
+    const sending = msg({role: 'user', text: 'hi', ts: 900, seq: -1, cid: 'c-new', status: 'sending'});
+    expect(isUnsettledOwnSend(sending)).toBe(true);
+    expect(isUnsettledOwnSend(msg({role: 'user', text: 'x', ts: 1, cid: 'c-x'}))).toBe(true);
+  });
+
+  test('when the window moves past an old send it leaves the chat, it is not pinned at the bottom', async () => {
+    rowStore.__setBackingForTest(memTx().tx);
+    rowStore.setOpen(SID);
+    await rowStore.openWindow(SID, 100);
+    const old = msg({role: 'user', text: 'my resume', ts: 50, seq: 677, cid: 'c-old'});
+    const s = {id: SID, messages: [old], events: []} as never as import('../engine/store/types').CycEngineSession;
+    sessions.set(SID, s);
+    try {
+      // the window now holds only newer rows; the old send is not among them
+      rowStore.upsertSync(SID, [mrow({mid: 'mr-today', seq: 2600, ts: 1000, text: 'today'})]);
+      applyProjection(SID);
+      expect(s.messages.map((m) => m.text)).toEqual(['today']);
+    } finally {
+      sessions.delete(SID);
+    }
   });
 });

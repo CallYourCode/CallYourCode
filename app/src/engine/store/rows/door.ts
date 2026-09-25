@@ -206,7 +206,14 @@ export function writeRow(sessionId: string, row: StoreRow, tag = 'wire'): void {
 // twice. The send settles into the store the one right way: adoptEngineRow +
 // settleEcho, keyed by the engine's durable id. applyProjection keeps this
 // bubble visible as an overlay until then.
+//
+// A row the engine has numbered (seq >= 0) is settled whatever else it lacks:
+// rows from before the engine stamped mids carry no mid, and treating an old
+// served send as unsettled carried it past the window as a "pending" overlay
+// pinned at the bottom of the chat (Hunter's 26 August send under today's,
+// 2026-09-25).
 export function isUnsettledOwnSend(m: CycEngineMessage): boolean {
+  if (typeof m.seq === 'number' && m.seq >= 0) return false;
   return m.role === 'user' && !m.mid && !m.dedupeKey;
 }
 
