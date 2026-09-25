@@ -584,6 +584,34 @@ OOMPolicy=kill
 WantedBy=default.target
 EOF
 
+  # The voice engine's daily restart: a timer fires once a day at a random time
+  # between 03:00 and 05:00 local, and the script waits for no live speech
+  # before restarting (scripts/voice-daily-restart.sh).
+  VOICE_RESTART_UNIT="$HOME/.config/systemd/user/cyc-voice-restart.service"
+  VOICE_RESTART_TIMER="$HOME/.config/systemd/user/cyc-voice-restart.timer"
+  write_file "$VOICE_RESTART_UNIT" <<EOF
+[Unit]
+Description=CallYourCode voice engine daily restart (waits for quiet)
+
+[Service]
+Type=oneshot
+Environment=VOICE_PORT=$VOICE_PORT_VAL
+ExecStart=/bin/sh $REPO_DIR/scripts/voice-daily-restart.sh
+EOF
+
+  write_file "$VOICE_RESTART_TIMER" <<EOF
+[Unit]
+Description=CallYourCode voice engine daily restart
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=2h
+Persistent=false
+
+[Install]
+WantedBy=timers.target
+EOF
+
   write_file "$TURN_UNIT" <<EOF
 [Unit]
 Description=CallYourCode STUN/TURN
@@ -613,6 +641,8 @@ EOF
   fi
   run systemctl --user enable $CYC_ENABLE_UNITS
   run systemctl --user restart $CYC_ENABLE_UNITS
+  # the daily voice restart; the script itself skips a voice-off install
+  run systemctl --user enable --now cyc-voice-restart.timer
 else
   ENGINE_PLIST="$HOME/Library/LaunchAgents/com.callyourcode.agent-engine.plist"
   APP_PLIST="$HOME/Library/LaunchAgents/com.callyourcode.app-server.plist"
@@ -736,6 +766,43 @@ $PLIST_PORT_BASE_ENV
 </plist>
 EOF
 
+  # The voice engine's daily restart at 03:00 local; the script adds up to 2h of
+  # jitter and waits for no live speech (scripts/voice-daily-restart.sh).
+  VOICE_RESTART_PLIST="$HOME/Library/LaunchAgents/com.callyourcode.voice-restart.plist"
+  write_file "$VOICE_RESTART_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>VOICE_PORT</key>
+		<string>$VOICE_PORT_VAL</string>
+	</dict>
+	<key>Label</key>
+	<string>com.callyourcode.voice-restart</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>$REPO_DIR/scripts/voice-daily-restart.sh</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>3</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>$DATA_DIR/logs/voice-restart.log</string>
+	<key>StandardOutPath</key>
+	<string>$DATA_DIR/logs/voice-restart.log</string>
+</dict>
+</plist>
+EOF
+
   write_file "$TURN_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -788,9 +855,9 @@ EOF
   # Without the marker, all four bootstrap exactly as before.
   if [ -f "$VOICE_DISABLED_MARKER" ]; then
     echo "voice: disabled (cyc voice off); leaving it off"
-    CYC_BOOTSTRAP_PLISTS="$TURN_PLIST $APP_PLIST $ENGINE_PLIST"
+    CYC_BOOTSTRAP_PLISTS="$TURN_PLIST $APP_PLIST $ENGINE_PLIST $VOICE_RESTART_PLIST"
   else
-    CYC_BOOTSTRAP_PLISTS="$TURN_PLIST $VOICE_PLIST $APP_PLIST $ENGINE_PLIST"
+    CYC_BOOTSTRAP_PLISTS="$TURN_PLIST $VOICE_PLIST $APP_PLIST $ENGINE_PLIST $VOICE_RESTART_PLIST"
   fi
   for plist in $CYC_BOOTSTRAP_PLISTS; do
     label=$(basename "$plist" .plist)

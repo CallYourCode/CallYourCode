@@ -484,3 +484,40 @@ test("tailnet up: TURN host is the MagicDNS name and the relay IP its tailnet IP
   expect(code).toBe(0);
   expect(out).toContain("turn: host=box.tail1234.ts.net ip=100.64.0.7");
 });
+
+test("the voice engine gets a daily restart: a jittered timer on Linux, a calendar job on macOS", async () => {
+  const linux = await dryRun("Linux", scratchHome(), { CYC_FAKE_TMUX: "present" })
+  expect(linux.code).toBe(0)
+  expect(linux.out).toContain("cyc-voice-restart.timer")
+  expect(linux.out).toContain("cyc-voice-restart.service")
+  expect(linux.out).toContain("systemctl --user enable --now cyc-voice-restart.timer")
+  const mac = await dryRun("Darwin", scratchHome(), { CYC_FAKE_TMUX: "present" })
+  expect(mac.code).toBe(0)
+  expect(mac.out).toContain("com.callyourcode.voice-restart.plist")
+})
+
+test("the daily restart script waits for quiet and skips a voice-off install", async () => {
+  const run = async (env: Record<string, string>) => {
+    const p = Bun.spawn(["sh", "scripts/voice-daily-restart.sh", "--dry-run"], {
+      cwd: REPO_ROOT, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe",
+    })
+    const out = await new Response(p.stdout).text()
+    await p.exited
+    return out
+  }
+  const off = scratchHome()
+  mkdirSync(join(off, ".callyourcode"), { recursive: true })
+  writeFileSync(join(off, ".callyourcode", "voice-disabled"), "")
+  expect(await run({ HOME: off, CYC_DATA_DIR: join(off, ".callyourcode") })).toContain("voice is off")
+
+  const busy = Bun.serve({ port: 0, fetch: () => Response.json({ load: { active_streams: 1, batch_in_flight: 0, batch_queued: 0 }, capabilities: { stream: { active_streams: 0 } } }) })
+  const quiet = Bun.serve({ port: 0, fetch: () => Response.json({ load: { active_streams: 0, batch_in_flight: 0, batch_queued: 0 } }) })
+  try {
+    const home = scratchHome()
+    expect(await run({ HOME: home, CYC_DATA_DIR: join(home, "d"), VOICE_PORT: String(busy.port) })).toContain("would wait")
+    expect(await run({ HOME: home, CYC_DATA_DIR: join(home, "d"), VOICE_PORT: String(quiet.port) })).toContain("would restart")
+  } finally {
+    busy.stop(true)
+    quiet.stop(true)
+  }
+})
