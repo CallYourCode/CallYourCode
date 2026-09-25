@@ -164,7 +164,6 @@ export async function mediaRoutes(ctx: RoutesCtx, req: Request, url: URL, path: 
     if (growing.has(clip[1])) {
       const msgId = clip[1];
       const f = Bun.file(audioPath(msgId, "audio/mpeg"));
-      if (!(await f.exists())) return new Response("not found", { status: 404 });
       const range = req.headers.get("range");
       /* PLAY WHILE GROWING (#531). A media element opens its clip with an
        * open-from-zero range (Chrome `bytes=0-`, WebKit's `bytes=0-1` probe);
@@ -212,6 +211,11 @@ export async function mediaRoutes(ctx: RoutesCtx, req: Request, url: URL, path: 
             "x-cyc-stream": "live" },
         });
       }
+      // A snapshot needs bytes that exist; the live stream above does not: the
+      // reply's bubble shows before its first sentence is synthesized, and a
+      // play in that gap got a 404 the app gave up on, so the reply only played
+      // when tapped again after it finished (2026-09-25).
+      if (!(await f.exists())) return new Response("not found", { status: 404 });
       const bytes = new Uint8Array(await f.arrayBuffer());
       const total = bytes.byteLength;
       const growHeaders: Record<string, string> = {
