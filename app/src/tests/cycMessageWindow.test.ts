@@ -191,6 +191,43 @@ describe('the window slides with the scroll offset', () => {
   });
 });
 
+describe('the window keeps a pixel overscan band for fast flings', () => {
+  // The blank-frame fix: the DOM window extends two viewport-heights beyond the
+  // visible range on each side, so a fast fling meets painted rows instead of
+  // unmounted space. jsdom has no layout, but the window is placed from the
+  // virtualizer's measurement offsets (estimates here), so the band is visible
+  // as how much a one-viewport scroll still overlaps the prior window.
+  test('scrolling one viewport still overlaps most of the previous window', () => {
+    const s = denseChat();
+    const {scroll, inner} = mount(800);
+    // Land mid-history so there is room for the band on both sides.
+    scroll.scrollTop = 40_000;
+    paint(inner, s);
+    const before = midsIn(inner);
+    scroll.scrollTop = 40_800; // one viewport further down
+    paint(inner, s);
+    const after = midsIn(inner);
+    const overlap = [...after].filter((id) => before.has(id)).length;
+    // A two-viewport overscan each side keeps a viewport-plus band mounted, so a
+    // one-viewport scroll re-uses most of the prior rows rather than swapping in
+    // a fresh window (which is what blanked the viewport mid-fling).
+    expect(before.size).toBeGreaterThan(0);
+    expect(overlap).toBeGreaterThan(before.size / 2);
+  });
+
+  test('the mounted window spans well beyond the visible viewport, still bounded', () => {
+    // A single 800px viewport of ~76px rows holds ~10 rows; the pixel overscan
+    // band (two viewports each side) mounts several times that, never the chat.
+    const s = denseChat();
+    const {scroll, inner} = mount(800);
+    scroll.scrollTop = 40_000;
+    paint(inner, s);
+    const rows = allRows(inner).length;
+    expect(rows).toBeGreaterThan(20);
+    expect(rows).toBeLessThan(80);
+  });
+});
+
 describe('jump to a row outside the window mounts it', () => {
   test('scrollMessageIntoView renders and seats an unrendered old message', () => {
     const s = denseChat();

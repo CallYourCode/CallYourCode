@@ -213,6 +213,9 @@ type RenderState = {
   // measurement moved the visible range, with no store change behind it).
   lastPaint: (() => void) | null;
   scheduled: boolean;
+  // True while a synchronous re-window is in flight, so the measurement
+  // notifications that paint itself triggers do not re-enter it.
+  painting: boolean;
   // Wired by the render hub: after a scroll-driven re-window, re-run the DOM
   // sweeps (waveform hydration, sticky dates, play state) over the freshly
   // mounted rows so a row scrolled into view hydrates like a store paint.
@@ -234,7 +237,17 @@ const EST_DATE = 40;
 // measured boxes), so this is an accuracy nicety, not the fix.
 const EST_MSG = 96;
 const EST_EVENT = 30;
-const MSG_OVERSCAN = 6;
+// A small item-count overscan for the virtualizer's own range; the real depth
+// of the DOM window is the pixel band below, expanded onto this base.
+const MSG_OVERSCAN = 1;
+
+// Pixel overscan: the DOM window keeps rows painted this many viewport-heights
+// beyond the visible band on each side. A fast fling scrolls compositor-side
+// ahead of the main-thread re-window, so without a band deep enough to cover
+// the frames it races past, the viewport meets unmounted space and paints blank.
+// One viewport each side (a three-viewport painted region) covers a 15,000 px/s
+// fling while holding the node count well under budget.
+const OVERSCAN_VIEWPORTS = 2;
 
 const raf: (cb: () => void) => void =
   typeof requestAnimationFrame !== 'undefined'
@@ -341,7 +354,9 @@ function ensureVirt(inner: HTMLElement, st: RenderState): MsgVirtualizer {
       const box = scrollBoxOf(inner);
       if (box) markMachineTop(box);
     },
-    onChange: () => scheduleRepaint(inner, st)
+    // sync is the virtualizer's isScrolling flag: true when the change came from
+    // an active scroll, false for a measurement settle or the scroll-end tick.
+    onChange: (_v: MsgVirtualizer, sync: boolean) => scheduleRepaint(inner, st, sync)
   };
   const v = new Virtualizer(opts as never) as unknown as MsgVirtualizer;
   st.opts = opts;
@@ -359,8 +374,28 @@ function ensureVirt(inner: HTMLElement, st: RenderState): MsgVirtualizer {
   return v;
 }
 
-function scheduleRepaint(inner: HTMLElement, st: RenderState): void {
-  if (st.scheduled) return;
+// Re-window after a range change. A scroll-driven change (sync) re-windows
+// SYNCHRONOUSLY inside the scroll event, so the DOM window tracks the native
+// scroll position in the same frame the browser is about to paint; deferring it
+// to rAF let a fast fling paint one or more blank frames before the window
+// caught up (measured: 9 blank frames at 15,000 px/s on the phone even with a
+// two-viewport overscan, versus 0 when it re-windows in the event). Everything
+// else (a measurement settle, the scroll-end tick) re-windows on rAF as before.
+// The painting guard swallows the measurement notifications the synchronous
+// paint itself raises, so it cannot re-enter.
+function scheduleRepaint(inner: HTMLElement, st: RenderState, sync = false): void {
+  if (sync) {
+    if (st.painting || st.scheduled) return;
+    st.painting = true;
+    try {
+      anchoredRewindow(inner, st);
+      st.onWindowChange?.();
+    } finally {
+      st.painting = false;
+    }
+    return;
+  }
+  if (st.scheduled || st.painting) return;
   st.scheduled = true;
   raf(() => {
     st.scheduled = false;
@@ -456,11 +491,22 @@ function computeWindow(
   const v = syncGeom(inner, st, box);
   const vitems = v.getVirtualItems();
   if (!vitems.length) return null;
-  const r0 = vitems[0].index;
-  const r1 = vitems[vitems.length - 1].index;
   const total = v.getTotalSize();
-  const padTop = vitems[0].start;
-  const padBottom = Math.max(0, total - vitems[vitems.length - 1].end);
+  // Expand the virtualizer's tight range outward to cover the pixel overscan
+  // band on each side, reading the full measurement offsets (measured where a
+  // row has mounted, estimated otherwise). The scrollTop is live, so the band
+  // tracks the native scroll position of THIS paint.
+  const meas = v.measurementsCache;
+  const last = meas.length - 1;
+  const band = box.clientHeight * OVERSCAN_VIEWPORTS;
+  const topLimit = box.scrollTop - band;
+  const botLimit = box.scrollTop + box.clientHeight + band;
+  let r0 = vitems[0].index;
+  let r1 = vitems[vitems.length - 1].index;
+  while (r0 > 0 && meas[r0 - 1] && meas[r0 - 1].end > topLimit) r0--;
+  while (r1 < last && meas[r1 + 1] && meas[r1 + 1].start < botLimit) r1++;
+  const padTop = meas[r0] ? meas[r0].start : vitems[0].start;
+  const padBottom = meas[r1] ? Math.max(0, total - meas[r1].end) : 0;
   return {r0, r1, padTop, padBottom};
 }
 
@@ -737,6 +783,7 @@ function paintMessages(
       opts: null,
       lastPaint: null,
       scheduled: false,
+      painting: false,
       onWindowChange: null
     };
     renderStates.set(inner, st);
