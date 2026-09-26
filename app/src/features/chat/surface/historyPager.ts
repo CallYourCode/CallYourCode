@@ -1,7 +1,6 @@
 import * as engine from '@/engine/store';
 import {active} from '@/sessionSelectors';
 import {cyclog} from '@/shared/logging';
-import {extendMessageWindow, messageWindowFrom} from './messageList';
 
 // A wheel/touch flick that leaves the viewport within this many px of the top
 // counts as a request for older history.
@@ -17,25 +16,12 @@ interface HistoryPagerOptions {
 }
 
 export function installHistoryPager(options: HistoryPagerOptions) {
-  const {container, messages, render, ownsOpening, isAnchoring, isMachineScroll} = options;
-  let extendingEarlier = false;
-  let lastScrollPos = 0;
+  const {container, messages, render, ownsOpening, isAnchoring} = options;
   let prepending = false;
-
-  container.addEventListener('scroll', () => {
-    const pos = container.scrollTop;
-    const up = pos < lastScrollPos;
-    lastScrollPos = pos;
-    if (!up || extendingEarlier || pos > 600) return;
-    if (isMachineScroll(pos) || ownsOpening()) return;
-    if (messageWindowFrom(messages) <= 0) return;
-    extendingEarlier = true;
-    try {
-      if (extendMessageWindow(messages)) render();
-    } finally {
-      extendingEarlier = false;
-    }
-  });
+  // The rendered window is virtual now: reaching the top no longer extends an
+  // in-memory floor (every loaded row is already in the model). It only pulls
+  // older STORE pages, below (loadEarlier), which prepend to the model; the
+  // render bracket preserves the reader's anchor across the prepend.
 
   const loadEarlier = () => {
     const session = active();

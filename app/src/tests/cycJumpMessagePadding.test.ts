@@ -29,7 +29,7 @@ vi.mock('../engine/store', () => ({
 }));
 vi.mock('../sessionSelectors', () => ({active: () => fake.active}));
 vi.mock('../features/chat/surface/messageList', () => ({
-  extendMessageWindow: vi.fn(() => false)
+  scrollMessageIntoView: vi.fn(() => false)
 }));
 vi.mock('../components/widgets', () => ({toast: vi.fn()}));
 

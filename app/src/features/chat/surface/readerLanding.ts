@@ -6,6 +6,7 @@ import {dataState, sessionState} from '@/sessionState';
 import {speaker} from '@/audio/speaker';
 import {mayStartSpeech} from '@/speechGate';
 import {UNREAD_LANDING_SELECTOR} from '../messages/messageFrame';
+import {scrollMessageIntoView} from './messageList';
 
 interface ReaderLandingDeps {
   heardTsOf(session: CycSession): number;
@@ -115,8 +116,14 @@ export function createReaderLanding(options: ReaderLandingOptions) {
     for (const message of queue) deps.play(sessionId, message.msgId!, message.text);
   };
 
-  const scrollToFirstUnread = (): boolean => {
-    const marker = messages.querySelector<HTMLElement>(UNREAD_LANDING_SELECTOR);
+  const scrollToFirstUnread = (firstUnreadId?: string): boolean => {
+    let marker = messages.querySelector<HTMLElement>(UNREAD_LANDING_SELECTOR);
+    // The anchor row may sit outside the virtual window (never mounted). Scroll
+    // to it so the re-window mounts the divider, then position it below.
+    if (!marker && firstUnreadId) {
+      scrollMessageIntoView(messages, firstUnreadId, 'start');
+      marker = messages.querySelector<HTMLElement>(UNREAD_LANDING_SELECTOR);
+    }
     if (!marker) return false;
     const box = scroll;
     const headroom = box.clientHeight / 3;

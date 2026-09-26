@@ -656,8 +656,17 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       openMarker = marker;
     }
   });
-  const {nothingUnseen, firstUnheardId, speakUnheard, scrollToFirstUnread, noteHeardMarked} =
-    readerLanding;
+  const {
+    nothingUnseen,
+    firstUnheardId,
+    speakUnheard,
+    scrollToFirstUnread: scrollToFirstUnreadRaw,
+    noteHeardMarked
+  } = readerLanding;
+
+  // Pass the current anchor id so the landing can mount the divider row when it
+  // sits outside the virtual window (see readerLanding.scrollToFirstUnread).
+  const scrollToFirstUnread = (): boolean => scrollToFirstUnreadRaw(firstUnreadId);
 
   const anchorSourceKnown = (s: CycSession): boolean =>
     dataState.mode !== 'live' || (s as CycEngineSession).heardTs !== undefined;

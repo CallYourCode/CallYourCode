@@ -15,7 +15,7 @@ const fake = vi.hoisted(() => ({
   cvCalls: [] as string[],
   plugins: [] as unknown[],
   overlayOn: false,
-  windowFrom: 0,
+  rangeKey: '0:0',
   domEpoch: 0,
   merged: false,
   chip: {harness: true, model: true} as Record<string, boolean>
@@ -57,7 +57,8 @@ vi.mock('../components/domHelpers', () => ({
 vi.mock('../features/chat/surface/messageList', () => ({
   renderMessages: vi.fn(),
   clearMessages: vi.fn(),
-  messageWindowFrom: () => fake.windowFrom,
+  messageVisibleRangeKey: () => fake.rangeKey,
+  setMessageWindowHook: vi.fn(),
   messageDomEpoch: () => fake.domEpoch
 }));
 vi.mock('../features/settings/preferences', () => ({
@@ -181,7 +182,7 @@ beforeEach(() => {
   fake.cvCalls = [];
   fake.plugins = [];
   fake.overlayOn = false;
-  fake.windowFrom = 0;
+  fake.rangeKey = '0:0';
   fake.domEpoch = 0;
   fake.merged = false;
   fake.chip = {harness: true, model: true};
@@ -391,16 +392,15 @@ describe('render-heat: chat-pane scan guards (fix #4)', () => {
     expect(reads).toBe(2);
   });
 
-  test('a history-pagination window move DOES re-run the scans (same messages)', () => {
+  test('a scroll that slides the virtual window DOES re-run the scans (same messages)', () => {
     const {hub, deps, cs} = mk();
     openChat([msg({id: 1, kind: 'voice', durationS: 3})]);
-    fake.windowFrom = 300;
+    fake.rangeKey = '300:600';
     hub.render();
     const before = scanCounts(deps, cs);
-    // The Earlier pill / scroll pager / jumpToMessage moved the window origin
-    // and forced a render: every row frame is discarded and the whole list is
-    // rebuilt with the message array untouched.
-    fake.windowFrom = 0;
+    // A scroll moved the visible range and re-windowed: the rows the window now
+    // holds must hydrate like a store paint, with the message array untouched.
+    fake.rangeKey = '0:400';
     hub.render();
     const after = scanCounts(deps, cs);
     expect(after.hydrate).toBe(before.hydrate + 1);

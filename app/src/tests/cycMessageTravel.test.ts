@@ -16,7 +16,7 @@ vi.mock('../engine/store', () => ({
 }));
 vi.mock('../sessionSelectors', () => ({active: () => fake.active}));
 vi.mock('../features/chat/surface/messageList', () => ({
-  extendMessageWindow: vi.fn(() => false)
+  scrollMessageIntoView: vi.fn(() => false)
 }));
 vi.mock('../features/chat/content', () => ({
   previewText: (s: string) => s
@@ -28,7 +28,7 @@ import {
   firstWords,
   type MessageTravelDeps
 } from '../features/chat/surface/messageTravel';
-import {extendMessageWindow} from '../features/chat/surface/messageList';
+import {scrollMessageIntoView} from '../features/chat/surface/messageList';
 import {toast} from '../components/widgets';
 import {replySource} from '../replyModel';
 function mkSession(): CycSession {
@@ -126,11 +126,14 @@ describe('jumpToMessage', () => {
     // The jump flash mounts the row's highlight overlay to paint into.
     expect(el.querySelector(':scope > .cyc-msg-highlight')).not.toBeNull();
   });
-  test('a held-but-windowed-out message widens the window and looks again', () => {
-    const {api, deps} = mk();
-    (extendMessageWindow as ReturnType<typeof vi.fn>).mockReturnValueOnce(true);
+  test('a held-but-windowed-out message scrolls to mount its row, then looks again', () => {
+    const {api} = mk();
+    (scrollMessageIntoView as ReturnType<typeof vi.fn>).mockReturnValueOnce(true);
+    // The row is not in the DOM: jump asks the virtual list to scroll to it
+    // (mounting it), then re-queries. The mock does not mount a node, so the
+    // seat still fails, but the scroll-to-row request was made.
     expect(api.jumpToMessage(500, 'claude')).toBe(false);
-    expect(deps.renderEarlier).toHaveBeenCalledTimes(1);
+    expect(scrollMessageIntoView).toHaveBeenCalledTimes(1);
     expect(api.jumpToMessage(999, 'claude')).toBe(false);
   });
 });

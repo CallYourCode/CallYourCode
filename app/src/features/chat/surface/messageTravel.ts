@@ -1,7 +1,7 @@
 import {touchCapable} from '@/shared/capabilities';
 import type {CycMessage, CycReplyTo, CycSession} from '@/types';
 import * as engine from '@/engine/store';
-import {extendMessageWindow} from './messageList';
+import {scrollMessageIntoView} from './messageList';
 import {smoothScrollTo} from '@/shared/smoothScroll';
 import {toast} from '@/components/widgets';
 import {replyAuthor, replyTargetFor, replySource} from '@/replyModel';
@@ -80,8 +80,10 @@ export function createMessageTravel(deps: MessageTravelDeps) {
     const sel = (id: string) => `.cyc-message[data-mid="${escapeMid(id)}"]`;
     let el = m && messageListInner.querySelector<HTMLElement>(sel(m.id));
 
-    if (m && !el && extendMessageWindow(messageListInner, Number.MAX_SAFE_INTEGER)) {
-      deps.renderEarlier();
+    // The target row may sit outside the virtual window (never mounted). Scroll
+    // the box to its computed offset, which re-windows and mounts it, then
+    // re-query and centre it with the smooth scroll below.
+    if (m && !el && scrollMessageIntoView(messageListInner, m.id, 'center')) {
       el = messageListInner.querySelector<HTMLElement>(sel(m.id));
     }
     if (!el) return false;

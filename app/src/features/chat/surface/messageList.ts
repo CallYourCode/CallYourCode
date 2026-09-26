@@ -1,7 +1,15 @@
 import type {CycMessage, CycSession, CycSessionEvent} from '@/types';
 import {RENDERABLE_EVENT_KINDS} from '@/engine/store/rows/core';
+import {
+  Virtualizer,
+  elementScroll,
+  measureElement,
+  observeElementOffset,
+  observeElementRect
+} from '@tanstack/virtual-core';
 
 import {h} from '@/components/domHelpers';
+import {markMachineTop} from './machineScroll';
 import {syncedAt} from '@/engine/sync';
 import {cyclog} from '@/shared/logging';
 import {DEFAULT_AGENT_NAME} from '../navigation/chatRow';
@@ -167,144 +175,269 @@ type ItemFrame = {
   last?: boolean;
 };
 
+// One merged transcript entry: a message or a session event, at its ts. The
+// row model and the paint loop both walk lists of these.
+type RowItem = {m?: CycMessage; ev?: CycSessionEvent; ts: number};
+
+// One RENDER-VISIBLE row in the virtual list. The renderer collapses a run of
+// session events into a single row (a fold head, a tool run, or a lone pill),
+// paints each message as its own row, and opens each day with a date-chip row.
+// `itemFrom`/`itemTo` are the inclusive span of merged items the row covers; a
+// date row owns no items (itemTo < itemFrom) and simply marks the day boundary
+// that sits before item `itemFrom`.
+type RowKind = 'date' | 'msg' | 'event';
+type RowDesc = {
+  key: string;
+  kind: RowKind;
+  itemFrom: number;
+  itemTo: number;
+  estimate: number;
+};
+
+type MsgVirtualizer = Virtualizer<HTMLElement, HTMLElement>;
+
 type RenderState = {
   sessionId: string;
   frames: ItemFrame[];
-
-  from: number;
-
+  // The item slice [fromItem..toItem] the current DOM window covers. Reuse of
+  // the built rows only applies when fromItem is unchanged (a data change at or
+  // below the window top); a scroll that slides the window rebuilds it.
+  fromItem: number;
+  toItem: number;
   count: number;
-
-  // The item index at which each RENDER-VISIBLE row begins for the current
-  // items list (visibleRowStarts). The window budget counts these, not raw
-  // items, and extendMessageWindow moves the floor up by whole visible rows so
-  // one step past a huge collapsed run reveals real content, not more of the
-  // same chip.
-  starts: number[];
+  rows: RowDesc[];
+  virt: MsgVirtualizer | null;
+  cleanup: (() => void) | null;
+  opts: Record<string, unknown> | null;
+  // Re-run the last paint verbatim (a pure re-window: scroll, resize, or a late
+  // measurement moved the visible range, with no store change behind it).
+  lastPaint: (() => void) | null;
+  scheduled: boolean;
+  // Wired by the render hub: after a scroll-driven re-window, re-run the DOM
+  // sweeps (waveform hydration, sticky dates, play state) over the freshly
+  // mounted rows so a row scrolled into view hydrates like a store paint.
+  onWindowChange: (() => void) | null;
 };
 
 const renderStates = new WeakMap<HTMLElement, RenderState>();
 
-// The window budget, measured in RENDER-VISIBLE rows: a message is one row, a
-// collapsed "N background updates" run is one row (one chip), a short tool run
-// is one row. Counting visible rows (not raw items) is what keeps a fresh open
-// of a status-heavy chat painting a screen of real bubbles instead of the
-// newest 300 ITEMS collapsing to a single chip (the field failure).
-const WINDOW_ITEMS = 300;
+// Rough per-row heights the virtualizer starts from; measureElement replaces
+// each with the real box as the row mounts. Only OFF-window rows keep an
+// estimate, so a wrong guess costs at most a little scroll drift, corrected as
+// the reader arrives.
+const EST_DATE = 40;
+const EST_MSG = 76;
+const EST_EVENT = 30;
+const MSG_OVERSCAN = 6;
 
-const WINDOW_CHUNK = 300;
+const raf: (cb: () => void) => void =
+  typeof requestAnimationFrame !== 'undefined'
+    ? (cb) => requestAnimationFrame(() => cb())
+    : (cb) => setTimeout(cb, 0);
 
-// The item index at which each render-visible row begins, walking the merged
-// item list EXACTLY as the build loop groups it: a maximal same-day run of
-// >= COLLAPSE_MIN session events is one fold row; a shorter same-day tool run
-// (with an optional trailing interrupt) is one run row; any other lone event is
-// one pill row; each message is one row. The result's length is the total
-// visible-row count, and each entry is a legal window floor (a row boundary).
-export function visibleRowStarts(
-  items: {m?: CycMessage; ev?: CycSessionEvent; ts: number}[]
-): number[] {
-  // One Date per item (the run scans below compare these strings, never re-parse)
-  // so the whole-list pass stays O(n) even on a chat with thousands of events.
-  const day = new Array<string>(items.length);
-  for (let k = 0; k < items.length; k++) day[k] = new Date(items[k].ts).toDateString();
-  const starts: number[] = [];
+function evKey(ev: CycSessionEvent): string {
+  return (ev as {uuid?: string}).uuid ?? String(ev.ts);
+}
+
+// The full render-row model over the merged item list, grouped EXACTLY as the
+// paint loop groups: a maximal same-day run of >= COLLAPSE_MIN events folds to
+// one row; a shorter same-day tool run (+ optional trailing interrupt) is one
+// row; any other lone event is one pill row; each message is one row; each day
+// opens with a date row. `rowOfItem[g]` is the model-row index a merged item
+// belongs to (its first item for multi-item event rows); `dateRowOfDay` maps a
+// day string to its date-row index.
+function buildRowModel(items: RowItem[]): {
+  rows: RowDesc[];
+  rowOfItem: number[];
+  dateRowOfDay: Map<string, number>;
+} {
+  const n = items.length;
+  const day = new Array<string>(n);
+  for (let k = 0; k < n; k++) day[k] = new Date(items[k].ts).toDateString();
+  const rows: RowDesc[] = [];
+  const rowOfItem = new Array<number>(n);
+  const dateRowOfDay = new Map<string, number>();
   let i = 0;
-  while (i < items.length) {
-    starts.push(i);
+  let curDay = '';
+  while (i < n) {
+    if (day[i] !== curDay) {
+      curDay = day[i];
+      dateRowOfDay.set(curDay, rows.length);
+      rows.push({key: 'd|' + curDay, kind: 'date', itemFrom: i, itemTo: i - 1, estimate: EST_DATE});
+    }
     const it = items[i];
     if (it.ev) {
-      const key = day[i];
       let runEnd = i;
-      while (runEnd + 1 < items.length && items[runEnd + 1].ev && day[runEnd + 1] === key) runEnd++;
+      while (runEnd + 1 < n && items[runEnd + 1].ev && day[runEnd + 1] === curDay) runEnd++;
       if (runEnd - i + 1 >= COLLAPSE_MIN) {
+        const ri = rows.length;
+        rows.push({key: 'e|' + evKey(it.ev) + '|f', kind: 'event', itemFrom: i, itemTo: runEnd, estimate: EST_EVENT});
+        for (let k = i; k <= runEnd; k++) rowOfItem[k] = ri;
         i = runEnd + 1;
         continue;
       }
       if (it.ev.kind === 'tool') {
         let j = i;
-        while (j + 1 < items.length && items[j + 1].ev?.kind === 'tool' && day[j + 1] === key) j++;
-        if (j + 1 < items.length && items[j + 1].ev?.kind === 'interrupt' && day[j + 1] === key)
-          j++;
+        while (j + 1 < n && items[j + 1].ev?.kind === 'tool' && day[j + 1] === curDay) j++;
+        if (j + 1 < n && items[j + 1].ev?.kind === 'interrupt' && day[j + 1] === curDay) j++;
+        const ri = rows.length;
+        rows.push({key: 'e|' + evKey(it.ev) + '|r', kind: 'event', itemFrom: i, itemTo: j, estimate: EST_EVENT});
+        for (let k = i; k <= j; k++) rowOfItem[k] = ri;
         i = j + 1;
         continue;
       }
+      rowOfItem[i] = rows.length;
+      rows.push({key: 'e|' + evKey(it.ev) + '|p', kind: 'event', itemFrom: i, itemTo: i, estimate: EST_EVENT});
       i += 1;
       continue;
     }
+    rowOfItem[i] = rows.length;
+    rows.push({key: 'm|' + it.m!.id, kind: 'msg', itemFrom: i, itemTo: i, estimate: EST_MSG});
     i += 1;
   }
-  return starts;
+  return {rows, rowOfItem, dateRowOfDay};
 }
 
-// The window floor that leaves `target` visible rows painted (or 0 when the
-// whole list already fits the budget). Returns a row boundary from `starts`.
-function floorForVisibleRows(starts: number[], target: number): number {
-  if (starts.length <= target) return 0;
-  return starts[starts.length - target];
+// The scroll box the list lives in, or null when the list is painted detached
+// (unit tests, a not-yet-mounted surface). No scroll box means no viewport to
+// bound the DOM to, so the paint falls back to rendering every row.
+function scrollBoxOf(inner: HTMLElement): HTMLElement | null {
+  return inner.closest<HTMLElement>('.cyc-message-list-scroll');
 }
 
-// The largest row-start <= `idx` (a legal window floor at or before `idx`), or 0.
-// Used to snap a floor computed from a raw item index (the landing-anchor pull)
-// back onto a visible-row boundary so the build loop's grouping is clean.
-function rowStartAtOrBefore(starts: number[], idx: number): number {
-  if (idx <= 0 || !starts.length) return 0;
-  let lo = 0;
-  let hi = starts.length - 1;
-  let ans = 0;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (starts[mid] <= idx) {
-      ans = starts[mid];
-      lo = mid + 1;
-    } else hi = mid - 1;
-  }
-  return ans;
+// The persistent virtualizer for a list node. It owns the geometry (viewport
+// rect, scroll offset, measured row heights) and the visible-range math; the
+// paint below reads getVirtualItems()/getTotalSize() from it. It observes the
+// scroll box for scroll/resize and re-measures mounted rows, and on any range
+// change re-runs the last paint (a pure re-window) so scrolling reveals rows.
+function ensureVirt(inner: HTMLElement, st: RenderState): MsgVirtualizer {
+  if (st.virt) return st.virt;
+  const opts: Record<string, unknown> = {
+    count: 0,
+    getScrollElement: () => scrollBoxOf(inner),
+    estimateSize: (i: number) => st.rows[i]?.estimate ?? EST_MSG,
+    getItemKey: (i: number) => st.rows[i]?.key ?? i,
+    overscan: MSG_OVERSCAN,
+    indexAttribute: 'data-index',
+    observeElementRect,
+    observeElementOffset,
+    // Keep the estimate for a row that measures as zero height (a not-yet
+    // laid-out or display:none row, and every row under jsdom); caching 0 would
+    // collapse the list's offsets and defeat the window bound.
+    measureElement: (el: HTMLElement, entry: ResizeObserverEntry | undefined, instance: MsgVirtualizer) => {
+      const size = measureElement(el, entry, instance);
+      if (size > 0) return size;
+      const idx = instance.indexFromElement(el);
+      return (idx >= 0 && st.rows[idx]?.estimate) || EST_MSG;
+    },
+    scrollToFn: (offset: number, o: {adjustments?: number; behavior?: ScrollBehavior}, instance: MsgVirtualizer) => {
+      elementScroll(offset, o, instance);
+      const box = scrollBoxOf(inner);
+      if (box) markMachineTop(box);
+    },
+    onChange: () => scheduleRepaint(st)
+  };
+  const v = new Virtualizer(opts as never) as unknown as MsgVirtualizer;
+  st.opts = opts;
+  st.cleanup = v._didMount();
+  v._willUpdate();
+  st.virt = v;
+  return v;
 }
 
-// The number of visible rows painted by a window whose floor is item index
-// `from` (rows at or after `from`).
-function visibleRowsFrom(starts: number[], from: number): number {
-  if (from <= 0) return starts.length;
-  let lo = 0;
-  let hi = starts.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (starts[mid] < from) lo = mid + 1;
-    else hi = mid;
-  }
-  return starts.length - lo;
+function scheduleRepaint(st: RenderState): void {
+  if (st.scheduled) return;
+  st.scheduled = true;
+  raf(() => {
+    st.scheduled = false;
+    st.lastPaint?.();
+    st.onWindowChange?.();
+  });
 }
 
-export function extendMessageWindow(inner: HTMLElement, by = WINDOW_CHUNK): boolean {
+// The visible render-row range for the current geometry, plus the top/bottom
+// spacer heights that stand in for the rows outside it. Returns null when the
+// list has no bounded viewport, telling the paint to render every row.
+// The scroll box drives the geometry directly: each paint reads the live
+// scrollTop and viewport height into the virtualizer, so the window matches the
+// native scroll position synchronously (an app scrollTop write, jsdom with no
+// scroll events) instead of waiting on the async scroll observer. The observer
+// still fires onChange so a reader's own scroll re-windows.
+function syncGeom(inner: HTMLElement, st: RenderState, box: HTMLElement): MsgVirtualizer {
+  const v = ensureVirt(inner, st);
+  st.opts!.count = st.rows.length;
+  v.setOptions(st.opts as never);
+  v._willUpdate();
+  v.scrollRect = {width: box.clientWidth, height: box.clientHeight};
+  v.scrollOffset = box.scrollTop;
+  return v;
+}
+
+function computeWindow(
+  inner: HTMLElement,
+  st: RenderState
+): {r0: number; r1: number; padTop: number; padBottom: number} | null {
+  const box = scrollBoxOf(inner);
+  if (!box || !box.clientHeight || !st.rows.length) return null;
+  const v = syncGeom(inner, st, box);
+  const vitems = v.getVirtualItems();
+  if (!vitems.length) return null;
+  const r0 = vitems[0].index;
+  const r1 = vitems[vitems.length - 1].index;
+  const total = v.getTotalSize();
+  const padTop = vitems[0].start;
+  const padBottom = Math.max(0, total - vitems[vitems.length - 1].end);
+  return {r0, r1, padTop, padBottom};
+}
+
+// Register the after-window-change sweep hook (see RenderState.onWindowChange).
+export function setMessageWindowHook(inner: HTMLElement, cb: () => void): void {
   const st = renderStates.get(inner);
-  if (!st || st.from <= 0) return false;
-  const starts = st.starts;
-  if (starts && starts.length) {
-    // Move the floor up by `by` VISIBLE rows, not raw items: above a huge
-    // collapsed run one chunk of items could all sit inside a single fold, so
-    // an item-step would reveal nothing. Find the floor's current row, step
-    // back `by` rows, and land on that row's start.
-    let curRow = 0;
-    let lo = 0;
-    let hi = starts.length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (starts[mid] <= st.from) {
-        curRow = mid;
-        lo = mid + 1;
-      } else hi = mid - 1;
-    }
-    const targetRow = Math.max(0, curRow - Math.max(1, by));
-    st.from = starts[targetRow] ?? 0;
-  } else {
-    st.from = Math.max(0, st.from - Math.max(1, by));
-  }
-  st.frames = [];
-  return true;
+  if (st) st.onWindowChange = cb;
 }
 
-export function messageWindowFrom(inner: HTMLElement): number {
-  return renderStates.get(inner)?.from ?? 0;
+// A scan-key fragment that changes whenever the visible window moves, so the
+// render hub re-runs its DOM sweeps for the rows a scroll just revealed.
+export function messageVisibleRangeKey(inner: HTMLElement): string {
+  const st = renderStates.get(inner);
+  if (!st) return '0:0';
+  return st.fromItem + ':' + st.toItem;
+}
+
+// The model-row index whose message carries `id`, or -1. Used to scroll to a
+// row that may not be mounted yet (reply/search/audio jump, unread landing).
+function rowIndexOfMessageId(st: RenderState, id: string): number {
+  const key = 'm|' + id;
+  for (let i = 0; i < st.rows.length; i++) if (st.rows[i].key === key) return i;
+  return -1;
+}
+
+// Bring the message with `id` into view even when its row is outside the
+// current window: scroll the box to the row's computed offset, which fires the
+// re-window that mounts it. Returns false when the id is unknown. The caller
+// re-queries the DOM (after the synchronous re-window) for the mounted node.
+export function scrollMessageIntoView(
+  inner: HTMLElement,
+  id: string,
+  align: 'start' | 'center' | 'end' = 'center'
+): boolean {
+  const st = renderStates.get(inner);
+  if (!st) return false;
+  const idx = rowIndexOfMessageId(st, id);
+  if (idx < 0) return false;
+  const box = scrollBoxOf(inner);
+  if (!box || !box.clientHeight) return true; // render-all: the row is already mounted
+  const v = syncGeom(inner, st, box);
+  v.getVirtualItems(); // refresh the measurements cache getOffsetForIndex reads
+  const off = v.getOffsetForIndex(idx, align);
+  if (off) {
+    box.scrollTop = off[0];
+    markMachineTop(box);
+  }
+  // Re-window at the new offset now (computeWindow reads box.scrollTop), so the
+  // caller can find the freshly mounted row synchronously.
+  st.lastPaint?.();
+  return true;
 }
 
 const EAGER_TAIL = 12;
@@ -351,8 +484,12 @@ export function messageDomEpoch(): number {
 
 export function clearMessages(inner: HTMLElement) {
   domEpoch++;
+  const st = renderStates.get(inner);
+  st?.cleanup?.();
   renderStates.delete(inner);
   inner.textContent = '';
+  inner.style.removeProperty('padding-top');
+  inner.style.removeProperty('padding-bottom');
 }
 
 export function renderMessages(
@@ -469,8 +606,20 @@ function paintMessages(
 
   if (!items.length) {
     domEpoch++;
-    renderStates.delete(inner);
+    const st0 = renderStates.get(inner);
+    if (st0) {
+      st0.frames = [];
+      st0.fromItem = 0;
+      st0.toItem = -1;
+      st0.count = 0;
+      st0.rows = [];
+      st0.lastPaint = null;
+    }
     inner.textContent = '';
+    if (inner.style.paddingTop || inner.style.paddingBottom) {
+      inner.style.removeProperty('padding-top');
+      inner.style.removeProperty('padding-bottom');
+    }
 
     if ((s as {historyPending?: boolean}).historyPending) return;
     const wrap = h('div', 'cyc-vacant-chat flex flex-auto items-center justify-center');
@@ -496,55 +645,76 @@ function paintMessages(
     return;
   }
 
-  const prev = renderStates.get(inner);
-  const sameChat = !!(prev && prev.sessionId === s.id);
-  const starts = visibleRowStarts(items);
-  const budgetFloor = floorForVisibleRows(starts, WINDOW_ITEMS);
-  let from = sameChat ? Math.min(prev!.from, Math.max(0, items.length - 1)) : budgetFloor;
-
-  // A sameChat repaint whose reader sits at the bottom and whose window has
-  // grown well past the budget resnaps to the newest WINDOW_ITEMS VISIBLE rows,
-  // bounding the painted DOM. Measured in visible rows (a collapsed run is one),
-  // never raw items, so the resnap keeps a screen of real content, not one chip.
-  // The near-bottom guard leaves a reader who scrolled up untouched.
-  if (sameChat && prev!.frames.length && from < budgetFloor) {
-    const wayOver = visibleRowsFrom(starts, from) > WINDOW_ITEMS * 2;
-    const grew = items.length - prev!.count >= WINDOW_CHUNK;
-    if (wayOver || grew) {
-      const sc = inner.closest('.cyc-message-list-scroll');
-      if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 200) {
-        from = budgetFloor;
-      }
-    }
+  // Persistent per-list render state, holding the virtualizer across paints and
+  // chat switches. A new list, or a switch to another chat, resets the built
+  // rows but keeps the virtualizer bound to the same scroll box.
+  let st = renderStates.get(inner);
+  const sameChat = !!(st && st.sessionId === s.id);
+  if (!st) {
+    st = {
+      sessionId: s.id,
+      frames: [],
+      fromItem: 0,
+      toItem: -1,
+      count: 0,
+      rows: [],
+      virt: null,
+      cleanup: null,
+      opts: null,
+      lastPaint: null,
+      scheduled: false,
+      onWindowChange: null
+    };
+    renderStates.set(inner, st);
+  } else if (!sameChat) {
+    st.sessionId = s.id;
+    st.frames = [];
+    st.fromItem = 0;
+    st.toItem = -1;
+    st.count = 0;
   }
+  const prevFrames = sameChat ? st.frames : [];
+  const prevFromItem = st.fromItem;
 
-  // LANDING ANCHOR (fix-msgwindow, shape 3). A firstUnreadId that falls outside
-  // the current window EXTENDS the window to include it, on EVERY paint, not
-  // only a fresh open: a tab-return repaint (or the landing's own second paint)
-  // is a sameChat repaint, and the reader-at-bottom resnap above can push the
-  // floor past an old anchor. Runs AFTER the resnap so the resnap still bounds
-  // DOM, then this guarantees the anchor is landable (its divider is painted)
-  // instead of the landing skipping to the window edge on weeks-old rows. Pull
-  // back to ~3 messages before the anchor for lead-in, then snap to a row start.
-  if (firstUnreadId !== undefined && from > 0) {
-    const u = items.findIndex((it) => it.m?.id === firstUnreadId);
-    if (u >= 0 && u < from) {
-      const WANT = 3;
-      const LOOK_BACK = 60;
-      let seen = 0;
-      let i = u;
-      while (i > 0 && seen < WANT && u - i < LOOK_BACK) {
-        i--;
-        if (items[i]?.m) seen++;
-      }
-      from = rowStartAtOrBefore(starts, Math.max(0, i));
+  // The full render-row model, then the visible slice. The virtualizer bounds
+  // the DOM to the viewport (+ overscan); with no scroll box the whole list
+  // renders (a detached list in a unit test, a short chat). winItems is the
+  // merged-item slice the visible rows cover; padTop/padBottom stand in for the
+  // rows outside it so native scroll and the box's scrollHeight stay honest.
+  const model = buildRowModel(items);
+  const rows = model.rows;
+  const rowOfItem = model.rowOfItem;
+  const dateRowOfDay = model.dateRowOfDay;
+  st.rows = rows;
+  const win = computeWindow(inner, st);
+  const windowed = !!win;
+  let fromItem: number;
+  let toItem: number;
+  let padTop = 0;
+  let padBottom = 0;
+  let startsWithDate = true;
+  if (win) {
+    let f = Infinity;
+    let t = -1;
+    for (let r = win.r0; r <= win.r1; r++) {
+      if (rows[r].itemFrom < f) f = rows[r].itemFrom;
+      if (rows[r].itemTo > t) t = rows[r].itemTo;
     }
+    if (t < f) t = f;
+    fromItem = f;
+    toItem = t;
+    padTop = win.padTop;
+    padBottom = win.padBottom;
+    startsWithDate = rows[win.r0].kind === 'date';
+  } else {
+    fromItem = 0;
+    toItem = items.length - 1;
   }
-  const winItems = from > 0 ? items.slice(from) : items;
+  const winItems = items.slice(fromItem, toItem + 1);
 
   const sigs = winItems.map((it) => itemSig(it.m, it.ev, it.ts, firstUnreadId));
 
-  const reusable = sameChat && prev!.from === from ? prev!.frames : null;
+  const reusable = sameChat && prevFromItem === fromItem ? prevFrames : null;
   let start = 0;
   if (reusable) {
     while (start < reusable.length) {
@@ -638,7 +808,7 @@ function paintMessages(
   if (dbg) {
     dbg.push({
       items: winItems.length,
-      from,
+      from: fromItem,
       had: reusable?.length ?? -1,
       start,
       a: reusable?.[start]?.sig?.slice(0, 90) ?? null,
@@ -657,12 +827,18 @@ function paintMessages(
   // message (a status edge, the engine's adopted timestamp) carries its
   // still-loaded <img> elements over from here, so the picture never blanks
   // and reloads for a repaint that did not change it.
+  // A rebuilt row for the same message adopts the dropped row's <img> (see
+  // carryStillImages). The source is the reused tail on a data change, or the
+  // whole previous window on a scroll re-window (reusable is null then, but the
+  // rows that stay visible should still carry their decoded pictures).
   const dropped = new Map<string, HTMLElement>();
-  if (reusable) {
-    for (let i = start; i < reusable.length; i++) {
-      const f = reusable[i];
+  {
+    const dropSource = reusable ?? prevFrames;
+    const dropStart = reusable ? start : 0;
+    for (let i = dropStart; i < dropSource.length; i++) {
+      const f = dropSource[i];
       const mid = f?.node.dataset.mid;
-      if (mid && !dropped.has(mid)) dropped.set(mid, f!.node);
+      if (mid && !dropped.has(mid)) dropped.set(mid, f.node);
     }
   }
   if (!frames.length) {
@@ -692,7 +868,18 @@ function paintMessages(
   let group: HTMLDivElement | null = base?.group ?? null;
   let prevRole: string | null = base?.prevRole ?? null;
 
-  let prevQueued = base?.prevQueued ?? (from > 0 ? !!items[from - 1].m?.queued : false);
+  let prevQueued = base?.prevQueued ?? (fromItem > 0 ? !!items[fromItem - 1].m?.queued : false);
+
+  // The window opened mid-day (its first rendered row is not a day boundary):
+  // open a chip-less day section so the partial day's rows have a container and
+  // no duplicate date chip appears. A very long single day scrolled deep shows
+  // no pinned chip until its boundary scrolls in; a documented limitation of
+  // the virtual list (the date separators between days are unaffected).
+  if (!frames.length && windowed && !startsWithDate) {
+    dayKey = new Date(winItems[0].ts).toDateString();
+    dateGroup = h('section', 'cyc-date-group relative');
+    inner.append(dateGroup);
+  }
 
   const onlyChip = (section: HTMLElement) => section.childElementCount <= 1;
 
@@ -702,7 +889,7 @@ function paintMessages(
   // sweep and the build agree on the single row that may carry it.
   let firstQueuedMid: string | undefined;
   {
-    let pq = from > 0 ? !!items[from - 1].m?.queued : false;
+    let pq = fromItem > 0 ? !!items[fromItem - 1].m?.queued : false;
     for (const it of winItems) {
       const m = it.m;
       if (!m) continue;
@@ -749,7 +936,10 @@ function paintMessages(
       } else {
         dateGroup = h('section', 'cyc-date-group relative');
         const label = dayLabel(it.ts);
-        dateGroup.append(dateMessage(label));
+        const chip = dateMessage(label);
+        const dri = dateRowOfDay.get(key);
+        if (dri !== undefined) chip.dataset.index = String(dri);
+        dateGroup.append(chip);
         inner.append(dateGroup);
       }
       group = null;
@@ -805,6 +995,7 @@ function paintMessages(
       } else {
         node = sessionEventMessage(it.ev);
       }
+      node.dataset.index = String(rowOfItem[fromItem + from]);
       (group ?? dateGroup!).append(node);
       frames.push({
         sig: sigs[from],
@@ -870,6 +1061,7 @@ function paintMessages(
                       )
                     : textMessage(m, first, last, onPlay);
     messageNode.dataset.mid = m.id;
+    messageNode.dataset.index = String(rowOfItem[fromItem + from]);
     // The message's ts rides the node for DISPLAY only (a stamp label); the one
     // durable id in data-mid is what every user action resolves the bubble by.
     messageNode.dataset.ts = String(m.ts);
@@ -947,7 +1139,46 @@ function paintMessages(
     break;
   }
 
-  renderStates.set(inner, {sessionId: s.id, frames, from, count: items.length, starts});
+  // Spacers stand in for the rows outside the window; skip touching the style
+  // in the render-all case so a no-op repaint of a detached list mutates
+  // nothing (the reuse guarantees the row nodes carry).
+  if (windowed) {
+    inner.style.paddingTop = padTop + 'px';
+    inner.style.paddingBottom = padBottom + 'px';
+  } else if (inner.style.paddingTop || inner.style.paddingBottom) {
+    inner.style.removeProperty('padding-top');
+    inner.style.removeProperty('padding-bottom');
+  }
+
+  st.sessionId = s.id;
+  st.frames = frames;
+  st.fromItem = fromItem;
+  st.toItem = toItem;
+  st.count = items.length;
+  st.rows = rows;
+  st.lastPaint = () =>
+    paintMessages(
+      inner,
+      s,
+      onPlay,
+      firstUnreadId,
+      onSeek,
+      onOpenFile,
+      events,
+      uploadSrc,
+      onOpenUpload,
+      fileSrc,
+      onEarlier,
+      uploadUrlOf
+    );
+
+  // Feed the real box heights back to the virtualizer so off-window offsets and
+  // the total scroll height converge from the estimates. measureElement only
+  // notifies (and thus schedules a re-window) when a size actually changed, so
+  // this settles rather than looping.
+  if (windowed && st.virt) {
+    for (const node of inner.querySelectorAll<HTMLElement>('[data-index]')) st.virt.measureElement(node);
+  }
 }
 
 /** A date chip whose box overlaps the unread divider carries this; the chip
