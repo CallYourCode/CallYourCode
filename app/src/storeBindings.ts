@@ -271,7 +271,10 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
 
   let lastActiveMsgCount = -1;
 
-  let lastHistory = 0;
+  // The newest message time already on screen: only rows past it are "new
+  // below". A window load or backfill adds rows too, all of them older, and
+  // counting those put 300 (the window size) on the jump-down badge (2026-09-26).
+  let lastNewestTs = 0;
   let lastActiveEvCount = -1;
 
   let lastActiveSessionId: string | null = null;
@@ -404,7 +407,6 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       const s = active();
       const count = s ? s.messages.length : -1;
 
-      const history = s ? ((s as CycEngineSession).historyAdded ?? 0) : 0;
 
       const overlayActive = !!s && engine.overlayOn(s.id);
       const evCount = overlayActive ? (s as CycEngineSession).events.length : -1;
@@ -421,9 +423,18 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       const prevSessionId = lastActiveSessionId;
       const prevEvCount = lastActiveEvCount;
       const prevScrollH = lastActiveScrollH;
-      const prevHistory = lastHistory;
       const wasNearBottom = nearBottom;
-      const arrived = count - prevMsgCount - Math.max(0, history - prevHistory);
+      const prevNewestTs = lastNewestTs;
+      let newestTs = 0;
+      let newer = 0;
+      if (s) {
+        for (const m of s.messages) {
+          if (m.ts > newestTs) newestTs = m.ts;
+          if (prevNewestTs > 0 && m.ts > prevNewestTs) newer++;
+        }
+      }
+      // no baseline yet (a fresh open): nothing counts as new
+      const arrived = prevNewestTs > 0 ? newer : 0;
       const sameSession = !!s && s.id === prevSessionId;
       // graceOpen/openOwned are store state, not layout; read them now so the
       // unread bookkeeping matches the branch the rAF will take.
@@ -434,7 +445,7 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       // Bookkeeping the next notify needs is settled synchronously (it reads no
       // layout); only lastActiveScrollH waits for the rAF's post-render measure.
       lastActiveMsgCount = count;
-      lastHistory = history;
+      lastNewestTs = s && s.id === prevSessionId ? Math.max(prevNewestTs, newestTs) : newestTs;
       lastActiveEvCount = evCount;
       lastActiveSessionId = s ? s.id : null;
 
