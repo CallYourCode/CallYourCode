@@ -145,4 +145,36 @@ describe('smoothScrollToBottom', () => {
     expect(spy).not.toHaveBeenCalled();
     container.remove();
   });
+
+  // The field regression: rows measure taller than their estimate as they mount
+  // on the way down, so scrollHeight climbs past the target computed at click
+  // time. A one-shot scroll stops at the stale target thousands of px short;
+  // this must re-target to the true, grown end and hold there.
+  test('re-targets to the true end as the content grows on the way down', async () => {
+    let scrollHeight = 5000;
+    let top = 0;
+    const container = document.createElement('div');
+    Object.defineProperty(container, 'clientHeight', {get: () => 800});
+    Object.defineProperty(container, 'scrollHeight', {get: () => scrollHeight});
+    Object.defineProperty(container, 'scrollTop', {
+      get: () => top,
+      set: (v: number) => {
+        top = v;
+      }
+    });
+    (container as HTMLElement & {scrollTo: (o: ScrollToOptions) => void}).scrollTo = (
+      o: ScrollToOptions
+    ) => {
+      top = o.top ?? 0;
+      // Each landing mounts more rows, growing the content past the last target.
+      if (scrollHeight < 9000) scrollHeight += 2000;
+    };
+    document.body.append(container);
+
+    await smoothScrollToBottom(container);
+
+    expect(scrollHeight).toBe(9000); // the growth ran
+    expect(scrollHeight - top - 800).toBeLessThanOrEqual(1); // landed on the TRUE end
+    container.remove();
+  });
 });

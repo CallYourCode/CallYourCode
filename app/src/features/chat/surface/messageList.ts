@@ -226,7 +226,13 @@ const renderStates = new WeakMap<HTMLElement, RenderState>();
 // estimate, so a wrong guess costs at most a little scroll drift, corrected as
 // the reader arrives.
 const EST_DATE = 40;
-const EST_MSG = 76;
+// The message estimate sat well under the real rows the owner's chats draw (a
+// wrapped bubble measures ~1.3x this on the narrow layouts); the whole
+// estimated block above the fold then under-counted and every scroll correction
+// had a large delta to walk off. A closer guess shrinks that delta. The scroll
+// fixes below stay correct under ANY estimate error (they settle against the
+// measured boxes), so this is an accuracy nicety, not the fix.
+const EST_MSG = 96;
 const EST_EVENT = 30;
 const MSG_OVERSCAN = 6;
 
@@ -335,24 +341,92 @@ function ensureVirt(inner: HTMLElement, st: RenderState): MsgVirtualizer {
       const box = scrollBoxOf(inner);
       if (box) markMachineTop(box);
     },
-    onChange: () => scheduleRepaint(st)
+    onChange: () => scheduleRepaint(inner, st)
   };
   const v = new Virtualizer(opts as never) as unknown as MsgVirtualizer;
   st.opts = opts;
   st.cleanup = v._didMount();
   v._willUpdate();
   st.virt = v;
+  // The virtualizer's own on-resize scroll correction writes the scroll box
+  // mid-measure, BEFORE this paint's spacer heights catch up, so a row above
+  // the fold measuring taller than its estimate shoved the visible content for
+  // one frame (the row-shift-while-older-loads bug). Turn that off and hold the
+  // anchor ourselves in anchoredRewindow, where the scrollTop move and the
+  // fresh spacer heights land together in one synchronous re-window.
+  (v as unknown as {shouldAdjustScrollPositionOnItemSizeChange?: () => boolean})
+    .shouldAdjustScrollPositionOnItemSizeChange = () => false;
   return v;
 }
 
-function scheduleRepaint(st: RenderState): void {
+function scheduleRepaint(inner: HTMLElement, st: RenderState): void {
   if (st.scheduled) return;
   st.scheduled = true;
   raf(() => {
     st.scheduled = false;
-    st.lastPaint?.();
+    anchoredRewindow(inner, st);
     st.onWindowChange?.();
   });
+}
+
+// The distance to the end (px) at or under which the list counts as sitting at
+// the bottom, so a re-window follows the end rather than holding a top anchor.
+const BOTTOM_PIN_PX = 2;
+
+// A pure re-window (a scroll, or a late measurement) recomputes the spacer
+// heights from freshly measured rows. When rows above the fold measure away
+// from their estimate that changes their offset, and without this the visible
+// content would jump by that delta (the row-shift-while-older-loads bug, which
+// lands on the ASYNC re-window after the bracket has already returned).
+//
+// Sitting at the bottom is the one case where holding a TOP anchor is wrong:
+// rows above the fold growing would drag the view up off the end, so there we
+// follow the (possibly grown) end instead -- which is also what lets go-to
+// bottom settle at distance <= 1 as its tail measures. Otherwise hold the
+// topmost row meeting the viewport top: note its on-screen offset before the
+// re-window, then after re-seat the box so the SAME row keeps that offset. The
+// reference is the live scrollTop, so a reader's own scroll (already on the
+// box) is preserved, not undone -- scrollTop only moves when a measurement
+// shifted an offset. Under jsdom every rect is zero, so no anchor is found and
+// this is a plain re-window (existing window tests are unaffected).
+function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
+  const box = scrollBoxOf(inner);
+  if (!box || !box.clientHeight || !st.lastPaint) {
+    st.lastPaint?.();
+    return;
+  }
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_PIN_PX;
+  const boxTop = box.getBoundingClientRect().top;
+  let anchorIndex: string | null = null;
+  let screenOffset = 0;
+  if (!atBottom) {
+    for (const row of inner.querySelectorAll<HTMLElement>('[data-index]')) {
+      const r = row.getBoundingClientRect();
+      if (r.bottom > boxTop) {
+        anchorIndex = row.dataset.index ?? null;
+        screenOffset = r.top - boxTop;
+        break;
+      }
+    }
+  }
+  st.lastPaint();
+  if (atBottom) {
+    const end = box.scrollHeight - box.clientHeight;
+    if (end - box.scrollTop > 0.5) {
+      box.scrollTop = end;
+      markMachineTop(box);
+    }
+    return;
+  }
+  if (anchorIndex === null) return;
+  const again = inner.querySelector<HTMLElement>(`[data-index="${anchorIndex}"]`);
+  if (!again) return;
+  const now = again.getBoundingClientRect().top - box.getBoundingClientRect().top;
+  const delta = now - screenOffset;
+  if (Math.abs(delta) > 0.5) {
+    box.scrollTop += delta;
+    markMachineTop(box);
+  }
 }
 
 // The visible render-row range for the current geometry, plus the top/bottom

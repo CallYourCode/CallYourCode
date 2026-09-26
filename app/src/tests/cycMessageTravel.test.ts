@@ -21,7 +21,10 @@ vi.mock('../features/chat/surface/messageList', () => ({
 vi.mock('../features/chat/content', () => ({
   previewText: (s: string) => s
 }));
-vi.mock('../shared/smoothScroll', () => ({smoothScrollTo: (o: unknown) => scrolls.push(o)}));
+vi.mock('../shared/smoothScroll', () => ({
+  smoothScrollTo: (o: unknown) => scrolls.push(o),
+  seatScrollTop: () => 0
+}));
 vi.mock('../components/widgets', () => ({toast: vi.fn()}));
 import {
   createMessageTravel,
