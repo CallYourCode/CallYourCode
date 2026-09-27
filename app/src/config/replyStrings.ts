@@ -92,6 +92,84 @@ export function promptBitList(ov?: ReplyStringOverrides): string[] {
   return ov?.bits ?? DEFAULT_PROMPT_BITS;
 }
 
+// Reply/complexity wordings the dial appended in SHIPPED builds before the
+// current DEFAULT_* strings. Collected verbatim from stored chat logs (grep
+// "(Reply with", "(Answer with", "(Keep this") so a prompt pill that carries an
+// old wording is still cleaned. Whitespace is matched flexibly at strip time, so
+// the multiline (indented) forms these shipped in are covered by these
+// single-space forms. These are DISPLAY-strip data only; nothing generates them.
+const LEGACY_APPENDED_SUFFIXES: string[] = [
+  '(Reply with the chat tool, complete and structured. Then ALSO call the speak tool' +
+    ' with a short spoken summary of that reply: two or three sentences, the answer and' +
+    ' nothing else.)',
+  '(Reply with the chat tool, complete and structured. Then ALSO call the speak tool' +
+    ' with a short spoken summary: two or three sentences, the answer and nothing else.)',
+  '(Reply with the chat tool, the way you would message someone: complete but not' +
+    ' exhaustive, structured where structure helps, a few short paragraphs at most. Do' +
+    ' not use the speak tool.)',
+  '(Reply with the chat tool. Send the same detail you would print in the terminal: full' +
+    ' output, structure intact. Do not use the speak tool.)',
+  '(Reply with the speak tool. Keep it concise, complete, short and simple; whole' +
+    ' sentences, it will be read aloud.)',
+  '(Reply with the chat tool, the way you would message someone. 1-2 lines answer. No' +
+    ' blobs of text. A list of short and simple line items where it helps.)',
+  '(Answer with the speak tool. The spoken answer must stand on its own: concise,' +
+    ' complete, whole sentences, no markdown, no paths read aloud. Chat only for what' +
+    ' speech cannot carry: code, tables, diffs, paths, long lists.)',
+  '(Answer with the speak tool. The spoken answer must stand on its own: concise,' +
+    ' complete, whole sentences, no markdown, no paths read aloud. Put in the chat only' +
+    ' what speech cannot carry, when it is needed: code, tables, diffs, file paths, long' +
+    ' lists. Do not repeat the spoken answer as text.)',
+  '(Keep this short and simple: the answer, the one reason it is the answer, and stop' +
+    ' there.)'
+];
+
+// Every wording the reply dial may have appended to the owner's message: the
+// current defaults, the owner's current overrides (settings), the shipped bits,
+// and the legacy wordings above. Trimmed and deduped, for the DISPLAY strip.
+export function knownPromptSuffixes(ov?: ReplyStringOverrides): string[] {
+  const out: string[] = [];
+  for (const n of RUNGS) {
+    out.push(replyText(n, ov), DEFAULT_REPLY_TEXT[n]);
+    out.push(complexityText(n, ov), DEFAULT_COMPLEXITY_TEXT[n]);
+  }
+  out.push(...promptBitList(ov), ...DEFAULT_PROMPT_BITS, ...LEGACY_APPENDED_SUFFIXES);
+  return [...new Set(out.map((s) => s.trim()).filter(Boolean))];
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Strip, FOR DISPLAY ONLY, every known dial-appended bit off the end of a prompt
+// pill's text (several may be concatenated), plus a leading "TEXT: " prefix.
+// Matching is exact per known wording except that any run of whitespace in a
+// wording matches any run of whitespace in the text, so a wording that shipped
+// wrapped across indented lines is still recognised. Only exact known wordings
+// are removed, never arbitrary text the owner typed. Never call this on the
+// message sent to the agent -- it is a render-time transform.
+export function stripAppendedPromptBits(text: string, ov?: ReplyStringOverrides): string {
+  if (!text) return text;
+  let cur = text.replace(/^TEXT:[ \t]+/, '');
+  // Longest first, so a longer wording wins over a shorter one it contains.
+  const res = knownPromptSuffixes(ov)
+    .sort((a, b) => b.length - a.length)
+    .map((s) => new RegExp('\\s*' + escapeRe(s).replace(/\s+/g, '\\s+') + '\\s*$'));
+  for (let guard = 0; guard < 12; guard++) {
+    let cut = false;
+    for (const re of res) {
+      const next = cur.replace(re, '');
+      if (next.length < cur.length) {
+        cur = next;
+        cut = true;
+        break;
+      }
+    }
+    if (!cut) break;
+  }
+  return cur.replace(/\s+$/, '');
+}
+
 function replyText(n: number, ov?: ReplyStringOverrides): string {
   return ov?.reply?.[n]?.text ?? DEFAULT_REPLY_TEXT[n] ?? '';
 }

@@ -662,6 +662,12 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     if (holdDivider && !pinnedToBottom) {
       const divider = messageListInner.querySelector<HTMLElement>('[data-cyc-unread]');
       if (divider) {
+        // A live selection means the reader is here and reading: end the hold
+        // and never scroll or re-window the row their selection lives in.
+        if (selectionInList()) {
+          endDividerHold();
+          return;
+        }
         const seat = messageListScroll.clientHeight / 3;
         const now =
           divider.getBoundingClientRect().top - messageListScroll.getBoundingClientRect().top;
@@ -689,16 +695,29 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
 
   const holdPointer = () => {
     pointerHeld = true;
+    endDividerHold();
   };
   const releasePointer = () => {
     pointerHeld = false;
   };
+  // Any user interaction ends the divider hold at once, so it can never re-seat
+  // (and wipe a selection) once the reader is doing anything in the chat.
+  const endHoldOnInput = () => endDividerHold();
+  const endHoldOnSelection = () => {
+    if (selectionInList()) endDividerHold();
+  };
   messageListScroll.addEventListener('pointerdown', holdPointer, {passive: true});
+  messageListScroll.addEventListener('wheel', endHoldOnInput, {passive: true});
+  messageListScroll.addEventListener('touchstart', endHoldOnInput, {passive: true});
   window.addEventListener('pointerup', releasePointer, {passive: true});
   window.addEventListener('pointercancel', releasePointer, {passive: true});
+  window.addEventListener('keydown', endHoldOnInput, {passive: true});
+  document.addEventListener('selectionchange', endHoldOnSelection, {passive: true});
   deps.onTeardown(() => {
     window.removeEventListener('pointerup', releasePointer);
     window.removeEventListener('pointercancel', releasePointer);
+    window.removeEventListener('keydown', endHoldOnInput);
+    document.removeEventListener('selectionchange', endHoldOnSelection);
   });
 
   // The last time a real reader input (a finger drag or a wheel) touched the
@@ -760,11 +779,45 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   // switch, or the anchor being answered/cleared.
   let holdDivider = false;
 
+  // The divider hold must be strictly bounded: it re-seats the divider on every
+  // content resize, and if a row above the fold keeps reflowing (or the re-seat's
+  // own rewindow changes heights) it oscillates -- a machine scroll every couple
+  // of seconds that wipes the owner's text selection and re-windows rows under
+  // their cursor (the phantom scrolls). So the hold ENDS at the first user
+  // interaction of any kind (pointerdown, keydown, wheel, touch, or a non-empty
+  // selection) and, failing that, after a short fixed window, and it never
+  // re-seats over a live selection.
+  const HOLD_DIVIDER_MAX_MS = 1500;
+  let holdDividerTimer: ReturnType<typeof setTimeout> | null = null;
+  const endDividerHold = () => {
+    holdDivider = false;
+    if (holdDividerTimer !== null) {
+      clearTimeout(holdDividerTimer);
+      holdDividerTimer = null;
+    }
+  };
+
+  // A non-empty text selection anchored inside the message list. A machine
+  // re-seat or row rebuild must never touch the row it lives in, so the hold
+  // checks this before it scrolls or re-windows, and a selection ends the hold.
+  const selectionInList = (): boolean => {
+    const sel = typeof getSelection === 'function' ? getSelection() : null;
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    if (!sel.toString().trim()) return false;
+    const node = sel.anchorNode;
+    const el = node ? (node.nodeType === 1 ? (node as Element) : node.parentElement) : null;
+    return !!el && messageListScroll.contains(el);
+  };
+
   // Pass the current anchor id so the landing can mount the divider row when it
   // sits outside the virtual window (see readerLanding.scrollToFirstUnread).
   const scrollToFirstUnread = (): boolean => {
     const ok = scrollToFirstUnreadRaw(firstUnreadId);
-    if (ok && firstUnreadId !== undefined) holdDivider = true;
+    if (ok && firstUnreadId !== undefined) {
+      holdDivider = true;
+      if (holdDividerTimer !== null) clearTimeout(holdDividerTimer);
+      holdDividerTimer = setTimeout(endDividerHold, HOLD_DIVIDER_MAX_MS);
+    }
     return ok;
   };
 
@@ -1235,6 +1288,10 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       scrolledUp: !!openToken?.readerTook,
       pinned: pinnedToBottom
     });
+    // Whether the unread-divider hold is still active. The hold must end at the
+    // first user interaction and after a short bounded window (fix-sync FIX 6),
+    // so a test can arm it and assert each release path.
+    (window as never as {__cycDividerHeld: () => boolean}).__cycDividerHeld = () => holdDivider;
   }
 
   const mountChrome = ({

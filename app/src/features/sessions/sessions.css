@@ -65,13 +65,17 @@
   padding-inline-end: 2.75rem;
 }
 
+/* The speaking-badge equalizer bars. They pulse via scaleY (transform-origin
+   bottom) rather than animating `height`, so each frame is compositor work, not
+   a layout of the list row. Visually identical: a full-height bar scaled to 30%
+   from the bottom is the same 30%-tall bar the height animation drew. */
 @keyframes cyc-eq-bounce {
   0%,
   100% {
-    height: 30%;
+    transform: scaleY(0.3);
   }
   50% {
-    height: 100%;
+    transform: scaleY(1);
   }
 }
 .cyc-host-tabs.cyc-reordering .cyc-seg {
@@ -119,4 +123,18 @@ html body .cyc-seg,
 html body .cyc-seg-bg,
 html body .cyc-host-tabs-wrap {
   border-radius: 6px !important;
+}
+
+/* The left (sessions) pane is translated off-screen and faded to opacity 0 in
+   the chat/profile views on narrow layouts (main.ts), but opacity and translate
+   do NOT stop CSS animations: its busy typing dots (and the speaking-badge eq
+   bars) kept animating off-screen, a style/paint tick every frame for something
+   nobody can see. Pause every animation under the pane whenever it is in that
+   hidden state, mirroring the exact condition that hides it (max-tab width, the
+   cols group in view-chat/view-profile). */
+@media (width < 34.4375rem) {
+  .view-chat #cyc-left-pane *,
+  .view-profile #cyc-left-pane * {
+    animation-play-state: paused !important;
+  }
 }

@@ -181,8 +181,10 @@ export function createRecorder(opts: RecorderOptions = {}): Recorder {
 
   const dot = h(
     'div',
+    // The pulsing ring is a pseudo-element (composer.css .cyc-rec-dot::after)
+    // that animates transform + opacity ONLY while [data-cyc-recording] is set,
+    // so an idle/hidden recorder repaints nothing.
     'cyc-rec-dot h-2.5 w-2.5 rounded-full bg-[var(--cyc-danger)] ' +
-      '[animation:cyc-rec-dot-ring_1.4s_ease-in-out_infinite] ' +
       '[.cyc-rec-panel[data-cyc-rec=review]_&]:hidden'
   );
   const playbackBtn = h(

@@ -1,5 +1,5 @@
 import {describe, expect, test, vi} from 'vitest';
-import {createReplicator, rowsFromPage} from '../engine/store/rows/replicator';
+import {createReplicator, rowsFromPage, tailVersionOf} from '../engine/store/rows/replicator';
 import {cursorSeq} from '../engine/store/rows/cursor';
 import type {EnginePage} from '../engine/contract';
 import {
@@ -110,6 +110,83 @@ describe('replicator backfill', () => {
   });
 });
 
+describe('the tail version is a version, never a row count', () => {
+  test('prefers the wire tailVersion, else the newest served page, and NEVER total', () => {
+    // The wire tailVersion is authoritative even on a page-less delta.
+    expect(tailVersionOf({sessionId: SID, pageSize: 100, total: 123904, tailVersion: 124924, pages: []})).toBe(124924);
+    // No wire tailVersion: the newest SERVED page's version (the tail page is
+    // always among the served pages), never the total.
+    expect(
+      tailVersionOf({sessionId: SID, pageSize: 100, total: 123904, pages: [page(1238, 124000), page(1239, 124924)]})
+    ).toBe(124924);
+    // Page-less AND no wire tailVersion (an old engine, a device current): the
+    // tail is UNKNOWN (0). The old code returned `total` (123904) here, a row
+    // count that on a gappy axis reads as a regression below the real tail.
+    expect(tailVersionOf({sessionId: SID, pageSize: 100, total: 123904, pages: []})).toBe(0);
+  });
+
+  // Fail-before: the exact BZ-Builder flood. A fully-synced device reconnects
+  // and the engine serves a page-less, up-to-date attach whose `total` (a row
+  // count) sits BELOW the gappy tail version. The old tailVersionOf fell back to
+  // total, renumberDirty saw a regression, resetCoverage wiped the covered run,
+  // and the replicator re-pulled every page (5 MB / 353 msgs on the wire). It
+  // must instead hold coverage and pull nothing.
+  test('a page-less up-to-date reconnect on a gappy axis re-pulls NOTHING', async () => {
+    const h = harness(1240);
+    // seed a high tail version (a gappy axis) via the wire, then cover the tail
+    await h.rep.attachOk({
+      sessionId: SID,
+      pageSize: 100,
+      tailPage: 1239,
+      total: 123904,
+      tailVersion: 124924,
+      pages: []
+    });
+    await h.rep.pump(); // commits the tail page 1239, coveredFrom = 1239
+    const coveredBefore = cursorSeq(h.rep.cursor);
+    expect(coveredBefore).toBe(123900);
+    const fetchesBefore = h.fetches.length;
+    // the reconnect: an OLD engine (no wire tailVersion), page-less, total below
+    // the true tail version.
+    await h.rep.attachOk({sessionId: SID, pageSize: 100, tailPage: 1239, total: 123904, pages: []});
+    // coverage held: no renumber, no reset.
+    expect(cursorSeq(h.rep.cursor)).toBe(coveredBefore);
+    // the ordered backfill resumes BELOW the covered run; the tail is never
+    // re-fetched (a reset would have set nextPage back to the tail page).
+    await h.rep.pump();
+    expect(h.fetches.slice(fetchesBefore)).not.toContain(1239);
+    expect(h.fetches[h.fetches.length - 1]).toBe(1238);
+  });
+
+  // The same reconnect from a NEW engine that DOES state its tail version: the
+  // stated version equals what we covered at, so still no renumber.
+  test('a page-less reconnect that states the real tail version is not a renumber', async () => {
+    const h = harness(1240);
+    await h.rep.attachOk({
+      sessionId: SID,
+      pageSize: 100,
+      tailPage: 1239,
+      total: 123904,
+      tailVersion: 124924,
+      pages: []
+    });
+    await h.rep.pump();
+    const coveredBefore = cursorSeq(h.rep.cursor);
+    const fetchesBefore = h.fetches.length;
+    await h.rep.attachOk({
+      sessionId: SID,
+      pageSize: 100,
+      tailPage: 1239,
+      total: 123904,
+      tailVersion: 124924,
+      pages: []
+    });
+    expect(cursorSeq(h.rep.cursor)).toBe(coveredBefore);
+    await h.rep.pump();
+    expect(h.fetches.slice(fetchesBefore)).not.toContain(1239);
+  });
+});
+
 describe('idempotent re-sync after a seq renumber', () => {
   test('an attach whose tail version regressed re-pulls; upserts by mid converge (no twins)', async () => {
     const h = harness(3);
@@ -142,6 +219,95 @@ describe('demand hints jump the queue', () => {
     expect(h.fetches).toEqual([9, 1]); // the demand jumped ahead of page 8
     await h.rep.pump();
     expect(h.fetches[2]).toBe(8); // then the ordered backfill resumes
+  });
+});
+
+describe('the background backfill pauses while hidden and trickles for non-open chats', () => {
+  test('a paused (hidden) replicator arms no timer until it is woken', async () => {
+    let hidden = true;
+    const scheduled: Array<{fn: () => void; ms: number}> = [];
+    const fetches: number[] = [];
+    const rep = createReplicator(SID, {
+      fetchPage: async (n) => {
+        fetches.push(n);
+        return page(n, (n + 1) * 100);
+      },
+      upsert: async () => ({loSeq: -1, hiSeq: -1}),
+      persistCursor: () => {},
+      now: () => 0,
+      schedule: (fn, ms) => scheduled.push({fn, ms}),
+      paused: () => hidden
+    });
+    await rep.attachOk({sessionId: SID, pageSize: 100, tailPage: 3, total: 400, pages: []});
+    rep.start();
+    // Hidden: start armed nothing, so no page is pulled.
+    expect(scheduled).toHaveLength(0);
+    // Even a manual pump fetches nothing while paused.
+    await rep.pump();
+    expect(fetches).toHaveLength(0);
+
+    // The page becomes visible and the registry wakes it: now the backfill arms.
+    hidden = false;
+    rep.wake();
+    expect(scheduled).toHaveLength(1);
+    scheduled[0].fn(); // run the scheduled step
+    await Promise.resolve();
+    expect(fetches).toEqual([3]);
+  });
+
+  test('a timer that fires after the page went hidden pulls nothing and stops re-arming', async () => {
+    let hidden = false;
+    const scheduled: Array<() => void> = [];
+    const fetches: number[] = [];
+    const rep = createReplicator(SID, {
+      fetchPage: async (n) => {
+        fetches.push(n);
+        return page(n, (n + 1) * 100);
+      },
+      upsert: async () => ({loSeq: -1, hiSeq: -1}),
+      persistCursor: () => {},
+      now: () => 0,
+      schedule: (fn) => scheduled.push(fn),
+      paused: () => hidden
+    });
+    await rep.attachOk({sessionId: SID, pageSize: 100, tailPage: 3, total: 400, pages: []});
+    rep.start();
+    expect(scheduled).toHaveLength(1);
+    // The page hid while the timer was pending: the step fires but pulls nothing
+    // and does not re-arm.
+    hidden = true;
+    scheduled[0]();
+    await Promise.resolve();
+    expect(fetches).toHaveLength(0);
+    expect(scheduled).toHaveLength(1); // no new timer armed while hidden
+  });
+
+  test('gapMs sets the fetch cadence: the open chat runs fast, a background chat trickles', async () => {
+    const openGaps: number[] = [];
+    const openRep = createReplicator(SID, {
+      fetchPage: async (n) => page(n, (n + 1) * 100),
+      upsert: async () => ({loSeq: -1, hiSeq: -1}),
+      persistCursor: () => {},
+      now: () => 0,
+      schedule: (_fn, ms) => openGaps.push(ms),
+      gapMs: () => 500
+    });
+    await openRep.attachOk({sessionId: SID, pageSize: 100, tailPage: 3, total: 400, pages: []});
+    openRep.start();
+    expect(openGaps[0]).toBe(500);
+
+    const bgGaps: number[] = [];
+    const bgRep = createReplicator(SID, {
+      fetchPage: async (n) => page(n, (n + 1) * 100),
+      upsert: async () => ({loSeq: -1, hiSeq: -1}),
+      persistCursor: () => {},
+      now: () => 0,
+      schedule: (_fn, ms) => bgGaps.push(ms),
+      gapMs: () => 5000
+    });
+    await bgRep.attachOk({sessionId: SID, pageSize: 100, tailPage: 3, total: 400, pages: []});
+    bgRep.start();
+    expect(bgGaps[0]).toBe(5000);
   });
 });
 

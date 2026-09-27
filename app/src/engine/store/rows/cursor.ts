@@ -138,8 +138,17 @@ export function addDemand(st: CursorState, page: number): void {
 // a covered run, the covered region can no longer be trusted by seq: mark it
 // dirty so the replicator re-pulls. Upserts by mid make the re-pull convergent.
 // A pure decision so it gets exhaustive tests around real renumber cases.
+//
+// engineTailVersion <= 0 means the attach stated NO tail version (an old engine's
+// page-less delta): the tail is UNKNOWN, not regressed, so never declare a
+// renumber on it. Declaring one on an unknown version -- which used to happen
+// because tailVersionOf fell back to `total`, a row count below the real gappy
+// tail version -- reset coverage and re-pulled the whole history on every
+// up-to-date reconnect (the flood). A renumber is only real when a KNOWN engine
+// tail version sits strictly below the version we last covered at.
 export function renumberDirty(st: CursorState, engineTailVersion: number): boolean {
   if (!Number.isFinite(st.coveredFrom)) return false;
+  if (engineTailVersion <= 0) return false;
   return engineTailVersion < st.tailVersion;
 }
 

@@ -1,6 +1,8 @@
 import type {CycSessionEvent} from '@/types';
 import {h} from '@/components/domHelpers';
 import {setFormatted} from '@/features/chat/content';
+import {stripAppendedPromptBits} from '@/config/replyStrings';
+import {globalSettings} from '@/engine/settings';
 import {paintPresentation, type Presentation} from '@/components/presentation';
 import {SERVICE_CONTENT_UTILS, SERVICE_MSG_UTILS, attachMessageHighlight} from './messageContent';
 import {paintServiceRowWidth} from './messageFrame';
@@ -121,9 +123,17 @@ export function sessionEventMessage(
   const body = h('span', 'cyc-se-body');
   msg.append(body);
 
+  // A grey prompt pill shows the owner's message, NOT the reply-dial bits the
+  // app/engine appended to it. Strip those known appended wordings (and a
+  // leading "TEXT: ") for display only, honouring the owner's current wording
+  // overrides; the message sent to the agent is untouched. Other event kinds
+  // paint verbatim.
+  const shown =
+    ev.kind === 'prompt' ? stripAppendedPromptBits(ev.text, globalSettings().strings) : ev.text;
+
   const paint = (open: boolean) => {
-    if (open) setFormatted(body, ev.text);
-    else body.textContent = ev.text;
+    if (open) setFormatted(body, shown);
+    else body.textContent = shown;
   };
   messageNode.cycPaint = paint;
   paint(ev.uuid === expandedSeUuid);

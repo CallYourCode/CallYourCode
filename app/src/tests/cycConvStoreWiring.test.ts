@@ -1802,7 +1802,10 @@ describe('the stale-axis resurrect LOOP (real wiring): a second page must not wr
     mkSession('p1');
 
     await seedFieldPoison();
-    await vi.advanceTimersByTimeAsync(1); // commit the poison durably
+    // The seq index is now written on a coalesced ~3s trailing flush, not per
+    // upsert; advance past it so the poisoned idx is durable before we capture
+    // what a second tab would write back. (The row payloads commit immediately.)
+    await vi.advanceTimersByTimeAsync(3100); // flush + commit the poison durably
 
     // A second tab loaded this poisoned idx and holds it warm: capture the exact
     // durable records it would fire-and-forget write back on its next upsert.

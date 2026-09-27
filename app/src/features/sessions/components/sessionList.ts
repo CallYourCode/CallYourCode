@@ -40,18 +40,21 @@ type MaybeDead = CycSession & {alive?: boolean};
 
 function equalizer(): HTMLSpanElement {
   const eq = h('span', 'cyc-eq flex items-end gap-0.5 h-2.5');
+  // Full-height bars that pulse via scaleY from the bottom (origin-bottom): the
+  // animation is compositor-only, never a per-frame layout of the row. At rest
+  // (30%) they match the old h-[30%] bars.
   eq.append(
     h(
       'span',
-      'w-[2px] h-[30%] rounded-[1px] bg-current [animation:cyc-eq-bounce_1s_ease-in-out_infinite]'
+      'w-[2px] h-full origin-bottom rounded-[1px] bg-current [animation:cyc-eq-bounce_1s_ease-in-out_infinite]'
     ),
     h(
       'span',
-      'w-[2px] h-[30%] rounded-[1px] bg-current [animation:cyc-eq-bounce_1s_ease-in-out_infinite] [animation-delay:0.2s]'
+      'w-[2px] h-full origin-bottom rounded-[1px] bg-current [animation:cyc-eq-bounce_1s_ease-in-out_infinite] [animation-delay:0.2s]'
     ),
     h(
       'span',
-      'w-[2px] h-[30%] rounded-[1px] bg-current [animation:cyc-eq-bounce_1s_ease-in-out_infinite] [animation-delay:0.4s]'
+      'w-[2px] h-full origin-bottom rounded-[1px] bg-current [animation:cyc-eq-bounce_1s_ease-in-out_infinite] [animation-delay:0.4s]'
     )
   );
   return eq;
