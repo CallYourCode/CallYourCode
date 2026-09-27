@@ -44,7 +44,10 @@ const DEFAULTS: GlobalSettings = {
   verbosityOn: true,
   complexityOn: false,
 
-  promptBitsOn: true,
+  // #585 follow-up (owner call): the prompt-bits menu ships OFF, matching the
+  // engine plugin's ship default; the plugin owns the value, this is only the
+  // first-paint fallback before an engine's decl arrives.
+  promptBitsOn: false,
 
   geom: false,
 

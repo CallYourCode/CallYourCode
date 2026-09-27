@@ -147,7 +147,7 @@ test("promptBitsOn round-trips; the wording bag is stored whole and echoed verba
   const s1 = await startServer(dir);
 
   let j = await getJson(`${s1.url}/settings`);
-  expect(j.promptBitsOn, "the prompt-bits menu is offered by default").toBe(true);
+  expect(j.promptBitsOn, "the prompt-bits menu ships OFF by default (#585 follow-up)").toBe(false);
   expect(j.strings, "a fresh server holds no wording edits").toBeUndefined();
 
   // the switch round-trips

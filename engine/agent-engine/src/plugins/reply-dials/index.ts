@@ -83,9 +83,9 @@ export const DEFAULT_REPLY_NAMES: Record<number, string> = {
 export const DEFAULT_REPLY_TEXT: Record<number, string> = {
   1: " (Reply with a copy of your terminal output via the chat tool. Send the" +
      " same detail you would print in the terminal.)",
-  2: " (Reply with the chat tool, the way you would message someone. complete" +
-     " but not exhaustive, structured where structure helps, a few short" +
-     " paragraphs at most.)",
+  2: " (Reply with the chat tool, the way you would message someone. 1-2 lines" +
+     " answer. No blobs of text. A list of short and simple line items where it" +
+     " helps.)",
   3: " (Reply with the chat tool AND the speak tool. Send a short spoken summary" +
      " of the reply via speak tool and a full text message via chat tool.)",
   4: " (Answer with the speak tool. The spoken answer must stand on its own:" +
@@ -279,7 +279,11 @@ export function defaultState(): DialsState {
     complexity: DEFAULT_COMPLEXITY,
     verbosityOn: true,
     complexityOn: false,
-    promptBitsOn: true,
+    /* SHIP DEFAULT (owner call): the prompt-bits menu ships OFF now (#585
+     * follow-up). Like the complexity dial, it stays present and keeps its
+     * value; off means the composer does not offer it, and it is turned back
+     * on from settings. */
+    promptBitsOn: false,
     overrides: {},
   };
 }

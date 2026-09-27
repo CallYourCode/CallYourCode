@@ -55,14 +55,15 @@ async function tmpStore(): Promise<{ store: ReplyDialsStore; dir: string }> {
 
 // ============================== the store ==================================
 
-test("defaults: level 3, complexity 3, verbosity and bits on, complexity off", async () => {
+test("defaults: level 3, complexity 3, verbosity on, complexity and bits off", async () => {
   const { store } = await tmpStore();
   expect(await store.load(), "an empty dir is a fresh engine, not a migration").toBeNull();
   expect(store.level()).toBe(3);
   expect(store.complexity()).toBe(3);
   const s = store.state();
-  // SHIP DEFAULT (his call): bits + verbosity on, complexity OFF
-  expect([s.verbosityOn, s.complexityOn, s.promptBitsOn]).toEqual([true, false, true]);
+  // SHIP DEFAULT (owner call, #585 follow-up): verbosity on, complexity and
+  // bits OFF -- both are turned on from settings when wanted
+  expect([s.verbosityOn, s.complexityOn, s.promptBitsOn]).toEqual([true, false, false]);
   expect(store.verbosityName(3)).toBe("Read out");
   expect(store.verbosityText(3)).toBe(DEFAULT_REPLY_TEXT[3]);
   expect(store.complexityName(1)).toBe("Product Manager");
@@ -367,6 +368,8 @@ test("bits: the validator's cap IS the composer menu's cap", async () => {
    * composer with nothing anywhere saying why. */
   const { store } = await tmpStore();
   await store.load();
+  // the bits menu ships off now (#585 follow-up); turn it on so the widget exists
+  await store.setToggles({ promptBitsOn: true });
   await store.setBits(Array.from({ length: MENU_MAX_ITEMS }, (_, i) => `bit ${i}`));
   const menu = store.composerWidgets().find((w) => (w as any).key === "bits")!;
   const decl = declarePlugins([replyDialsPlugin({ store })])[0];
@@ -380,15 +383,15 @@ test("bits: the validator's cap IS the composer menu's cap", async () => {
 test("composerWidgets: ship default is two widgets; enabling complexity adds the third", async () => {
   const { store } = await tmpStore();
   await store.load();
-  // SHIP DEFAULT: bits + verbosity, complexity OFF. DISTINCT GLYPHS (#595/#598):
-  // the bits menu is `edit` (the pencil, #598), the two dials must not read as one
-  // control, so verbosity keeps `equalizer` and complexity is `statistics`.
+  // SHIP DEFAULT (#585 follow-up): only verbosity, complexity AND bits OFF.
+  // DISTINCT GLYPHS (#595/#598): the bits menu is `edit` (the pencil, #598), the
+  // two dials must not read as one control, so verbosity keeps `equalizer` and
+  // complexity is `statistics`.
   expect(store.composerWidgets().map((x) => [x.type, (x as any).key, (x as any).icon])).toEqual([
-    ["menu", "bits", "edit"],
     ["slider", "verbosity", "equalizer"],
   ]);
-  // enabling complexity adds its slider, in pill order (after verbosity)
-  await store.setToggles({ complexityOn: true });
+  // enabling complexity and bits adds their widgets, in pill order (bits first)
+  await store.setToggles({ complexityOn: true, promptBitsOn: true });
   const w = store.composerWidgets();
   expect(w.map((x) => [x.type, (x as any).key, (x as any).icon])).toEqual([
     ["menu", "bits", "edit"],
@@ -556,7 +559,7 @@ test("rpc get: the dials, the effective wording with edited flags, the bits and 
   expect(j.result.level).toBe(3);
   expect(j.result.complexity).toBe(3);
   expect(j.result.migrated).toBe(false);
-  expect([j.result.verbosityOn, j.result.complexityOn, j.result.promptBitsOn]).toEqual([true, false, true]);
+  expect([j.result.verbosityOn, j.result.complexityOn, j.result.promptBitsOn]).toEqual([true, false, false]);
   expect(j.result.verbosity[3].name).toBe("Read out");
   expect(j.result.verbosity[3].text).toBe(DEFAULT_REPLY_TEXT[3]);
   expect(j.result.verbosity[3].edited).toEqual({ name: false, text: false });
@@ -610,11 +613,11 @@ test("rpc set: an unknown key or an out-of-range rung is a 400, not a 500", asyn
 test("rpc toggle: flips one switch, keeps the rest, answers the three", async () => {
   const { rpc, slider } = await dialsRig();
   const a = (await (await rpc("toggle", { complexityOn: true })).json() as any).result;
-  expect(a).toEqual({ verbosityOn: true, complexityOn: true, promptBitsOn: true });
+  expect(a).toEqual({ verbosityOn: true, complexityOn: true, promptBitsOn: false });
   expect(slider("complexity"), "enabling complexity did not add its slider to the decl").toBeTruthy();
 
-  const b = (await (await rpc("toggle", { promptBitsOn: false })).json() as any).result;
-  expect(b, "an unrelated toggle moved").toEqual({ verbosityOn: true, complexityOn: true, promptBitsOn: false });
+  const b = (await (await rpc("toggle", { promptBitsOn: true })).json() as any).result;
+  expect(b, "an unrelated toggle moved").toEqual({ verbosityOn: true, complexityOn: true, promptBitsOn: true });
   // a junk value is ignored rather than coerced: the switch keeps its position
   const c = (await (await rpc("toggle", { verbosityOn: "off" })).json() as any).result;
   expect(c.verbosityOn).toBe(true);
@@ -672,7 +675,7 @@ test("the reply-dials decl carries widgets and NOT ONE function", async () => {
   const spec = replyDialsPlugin({ store });
   const decl = declarePlugins([spec])[0];
   expect(decl).toMatchObject({ id: "reply-dials", name: "Reply dials", version: 1 });
-  expect(decl.composer!.map((w) => (w as any).key)).toEqual(["bits", "verbosity"]);
+  expect(decl.composer!.map((w) => (w as any).key)).toEqual(["verbosity"]);
   expect("rpc" in decl).toBe(false);
   expect(JSON.parse(JSON.stringify(decl)), "the decl did not survive a round trip through JSON")
     .toEqual(decl);

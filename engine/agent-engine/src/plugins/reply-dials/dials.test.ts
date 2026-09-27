@@ -139,7 +139,7 @@ test("nothing on disk: the ship defaults, and no migration is claimed", async ()
   await bootHolding(null);
   expect(await getDials()).toMatchObject({
     level: 3, complexity: 3, migrated: false,
-    verbosityOn: true, complexityOn: false, promptBitsOn: true,
+    verbosityOn: true, complexityOn: false, promptBitsOn: false,
   });
   // a read is not a write: an engine nobody has touched leaves no file behind
   expect(await Bun.file(dialsFile()).exists()).toBe(false);
