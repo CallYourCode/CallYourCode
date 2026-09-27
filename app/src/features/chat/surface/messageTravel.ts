@@ -2,7 +2,7 @@ import {touchCapable} from '@/shared/capabilities';
 import type {CycMessage, CycReplyTo, CycSession} from '@/types';
 import * as engine from '@/engine/store';
 import {scrollMessageIntoView} from './messageList';
-import {markMachineTop} from './machineScroll';
+import {markMachineTop, logScrollWrite} from './machineScroll';
 import {seatScrollTop, smoothScrollTo} from '@/shared/smoothScroll';
 import {toast} from '@/components/widgets';
 import {replyAuthor, replyTargetFor, replySource} from '@/replyModel';
@@ -91,14 +91,18 @@ export function createMessageTravel(deps: MessageTravelDeps) {
         }
       } else {
         stable = 0;
+        const from = container.scrollTop;
         container.scrollTop = top;
+        logScrollWrite(container, 'travel.settle', from, container.scrollTop);
         markMachineTop(container);
       }
       await nextFrame();
     }
     const el = messageListInner.querySelector<HTMLElement>(midSel(id));
     if (el) {
+      const from = container.scrollTop;
       container.scrollTop = seatScrollTop({container, element: el, position: 'center'});
+      logScrollWrite(container, 'travel.final', from, container.scrollTop);
       markMachineTop(container);
       highlightMessage(el);
     }

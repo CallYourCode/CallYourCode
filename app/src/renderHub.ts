@@ -9,6 +9,7 @@ import {
   setMessageWindowHook
 } from '@/features/chat/surface/messageList';
 import {cyclog} from '@/shared/logging';
+import {logChatRepaint} from '@/features/chat/surface/machineScroll';
 import * as interactionWindow from '@/shared/browser';
 import {enginePin} from './engine/contract';
 import type {EnginePluginDecl} from './engine/contract';
@@ -475,6 +476,33 @@ export function createRenderHub(deps: RenderHubDeps) {
   }
   let lastScanKey: string | null = null;
 
+  // V4 diagnostic (Lane C step 0): the last contentVersion inputs and message
+  // set of the open chat, so a repaint can name what actually changed. Keyed by
+  // session id; a chat switch resets the diff (a fresh id has no prior).
+  type RepaintSnap = {
+    id: string;
+    setSig: string;
+    status: string;
+    thinking: number;
+    turnSince: number;
+    lastActivity: number;
+    contextPct: number;
+  };
+  let lastRepaint: RepaintSnap | null = null;
+  const repaintSnap = (s: CycSession): RepaintSnap => {
+    const msgs = s.messages ?? [];
+    const n = msgs.length;
+    return {
+      id: s.id,
+      setSig: `${n}|${n ? msgs[0].id : ''}|${n ? msgs[n - 1].id : ''}`,
+      status: s.status ?? '',
+      thinking: s.thinking ? 1 : 0,
+      turnSince: s.turnSince ?? 0,
+      lastActivity: s.lastActivity ?? 0,
+      contextPct: s.contextPct ?? -1
+    };
+  };
+
   function renderChatPane() {
     const s = active();
 
@@ -515,6 +543,30 @@ export function createRenderHub(deps: RenderHubDeps) {
 
     const es = s as CycEngineSession;
     const overlayActive = dataState.mode === 'live' && engine.overlayOn(s.id);
+
+    // Name why this open-chat repaint ran: which contentVersion inputs moved
+    // and whether the message set itself changed. The bracket below re-seats
+    // scrollTop on every one of these, so this is the writer the V4 idle-creep
+    // chain blames. Rate-limited inside logChatRepaint (1/2s).
+    {
+      const snap = repaintSnap(s);
+      const prev = lastRepaint && lastRepaint.id === s.id ? lastRepaint : null;
+      const changed: string[] = [];
+      if (prev) {
+        if (snap.status !== prev.status) changed.push('status');
+        if (snap.thinking !== prev.thinking) changed.push('thinking');
+        if (snap.turnSince !== prev.turnSince) changed.push('turnSince');
+        if (snap.lastActivity !== prev.lastActivity) changed.push('lastActivity');
+        if (snap.contextPct !== prev.contextPct) changed.push('contextPct');
+      }
+      logChatRepaint({
+        session: s.id,
+        set: prev ? snap.setSig !== prev.setSig : true,
+        rows: s.messages?.length ?? 0,
+        changed: prev ? changed.join(',') : 'open'
+      });
+      lastRepaint = snap;
+    }
 
     cs.bracketMessageRender(s.id, () => {
       renderMessages(

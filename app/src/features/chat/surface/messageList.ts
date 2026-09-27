@@ -9,7 +9,7 @@ import {
 } from '@tanstack/virtual-core';
 
 import {h} from '@/components/domHelpers';
-import {markMachineTop} from './machineScroll';
+import {markMachineTop, logScrollWrite} from './machineScroll';
 import {syncedAt} from '@/engine/sync';
 import {cyclog} from '@/shared/logging';
 import {DEFAULT_AGENT_NAME} from '../navigation/chatRow';
@@ -429,9 +429,13 @@ function ensureVirt(inner: HTMLElement, st: RenderState): MsgVirtualizer {
       return (idx >= 0 && st.rows[idx]?.estimate) || EST_MSG;
     },
     scrollToFn: (offset: number, o: {adjustments?: number; behavior?: ScrollBehavior}, instance: MsgVirtualizer) => {
-      elementScroll(offset, o, instance);
       const box = scrollBoxOf(inner);
-      if (box) markMachineTop(box);
+      const from = box?.scrollTop ?? 0;
+      elementScroll(offset, o, instance);
+      if (box) {
+        logScrollWrite(box, 'virtual.scrollTo', from, box.scrollTop);
+        markMachineTop(box);
+      }
     },
     // sync is the virtualizer's isScrolling flag: true when the change came from
     // an active scroll, false for a measurement settle or the scroll-end tick.
@@ -592,7 +596,9 @@ function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
   if (atBottom) {
     const end = box.scrollHeight - box.clientHeight;
     if (end - box.scrollTop > 0.5) {
+      const from = box.scrollTop;
       box.scrollTop = end;
+      logScrollWrite(box, 'rewindow.bottom', from, box.scrollTop);
       markMachineTop(box);
     }
     return;
@@ -605,7 +611,9 @@ function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
   const now = again.getBoundingClientRect().top - box.getBoundingClientRect().top;
   const delta = now - screenOffset;
   if (Math.abs(delta) > 0.5) {
+    const from = box.scrollTop;
     box.scrollTop += delta;
+    logScrollWrite(box, 'rewindow.anchor', from, box.scrollTop);
     markMachineTop(box);
   }
 }
@@ -799,7 +807,9 @@ export function scrollMessageIntoView(
     const off = v.getOffsetForIndex(idx, align);
     if (!off) break;
     const target = off[0];
+    const from = box.scrollTop;
     box.scrollTop = target;
+    logScrollWrite(box, 'jump.into', from, box.scrollTop);
     markMachineTop(box);
     // Re-window at the new offset now (computeWindow reads box.scrollTop), so the
     // caller can find the freshly mounted row synchronously, and this pass's

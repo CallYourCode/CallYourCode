@@ -22,7 +22,13 @@ import {active, allSessions, selectTabFor} from '@/sessionSelectors';
 import {createChatChrome} from './chatChrome';
 import {installHistoryPager} from './historyPager';
 import {createReaderLanding} from './readerLanding';
-import {markMachineTop, isMachineTop as machineTopMatches, machineTopOf} from './machineScroll';
+import {
+  markMachineTop,
+  isMachineTop as machineTopMatches,
+  machineTopOf,
+  logScrollWrite,
+  logScrollUpUser
+} from './machineScroll';
 import {onHorizontalSwipe} from '@/features/gestures';
 
 export interface ChatSurfaceDeps {
@@ -515,16 +521,18 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   };
 
   const SCROLL_TRACE = new URLSearchParams(location.search).get('cycscroll') === '1';
-  const silentScrollTo = (v: number) => {
+  const silentScrollTo = (v: number, tag = 'silent') => {
+    const from = messageListScroll.scrollTop;
     if (SCROLL_TRACE) {
       const at = (new Error().stack ?? '').split('\n').slice(2, 5).join(' | ');
 
       console.debug(
-        `[cyc-overflow] write v=${Math.round(v)} from=${Math.round(messageListScroll.scrollTop)}` +
+        `[cyc-overflow] write v=${Math.round(v)} from=${Math.round(from)}` +
           `${openOwned() ? '' : ' UNOWNED'} ${at}`
       );
     }
     messageListScroll.scrollTop = v;
+    logScrollWrite(messageListScroll, tag, from, messageListScroll.scrollTop);
     markMachineTop(messageListScroll);
     notePinAfterWrite();
   };
@@ -620,6 +628,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       }
     }
     const after = messageListScroll.scrollTop;
+    logScrollWrite(messageListScroll, keep ? 'bracket' : 'bracket.fresh', before, after);
     markMachineTop(messageListScroll);
     // A paint never speaks for the reader: it can confirm a pin (a shrink
     // clamped the view to the end) but not drop one. The top pad may already
@@ -639,7 +648,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   };
 
   const scrollToBottom = () => {
-    silentScrollTo(messageListScroll.scrollHeight);
+    silentScrollTo(messageListScroll.scrollHeight, 'toBottom');
   };
 
   // Runs after layout whenever the list content, either pad, or the scroller's
@@ -672,7 +681,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
         const now =
           divider.getBoundingClientRect().top - messageListScroll.getBoundingClientRect().top;
         if (Math.abs(now - seat) > 1) {
-          silentScrollTo(messageListScroll.scrollTop + (now - seat));
+          silentScrollTo(messageListScroll.scrollTop + (now - seat), 'resize.divider');
           rewindowMessages(messageListInner);
         }
         return;
@@ -681,7 +690,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     if (pinnedToBottom) {
       if (distToEnd() > 0) scrollToBottom();
     } else if (padDelta) {
-      silentScrollTo(messageListScroll.scrollTop + padDelta);
+      silentScrollTo(messageListScroll.scrollTop + padDelta, 'resize.pad');
     }
   };
   if (typeof ResizeObserver !== 'undefined') {
@@ -757,7 +766,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     deps,
     messages: messageListInner,
     scroll: messageListScroll,
-    silentScrollTo,
+    silentScrollTo: (v: number) => silentScrollTo(v, 'landing'),
     openMarker: () => openMarker,
     setOpenMarker: (marker) => {
       openMarker = marker;
@@ -847,6 +856,10 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       const height = messageListScroll.scrollHeight;
       const clientH = messageListScroll.clientHeight;
       const machine = isMachineTop(top);
+
+      // An upward scroll not attributed to a machine write: a real reader scroll
+      // (or an untagged writer). readerTrackTop still holds the PREVIOUS offset.
+      if (!machine && top < readerTrackTop - 1) logScrollUpUser(readerTrackTop, top);
 
       // The reader's own scroll ends the divider hold: a real gesture owns the
       // offset from here on. Machine writes (the hold's own re-seat, the landing)

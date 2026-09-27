@@ -1,4 +1,5 @@
 import {prefersMotion} from '@/shared/capabilities';
+import {logScrollWrite} from '@/features/chat/surface/machineScroll';
 
 const SETTLE_CEIL_MS = 1000;
 
@@ -79,10 +80,12 @@ export function smoothScrollTo(request: ScrollRequest): Promise<void> {
   if (!element.isConnected || !container.contains(element)) return Promise.resolve();
   const top = containedTop(request);
   if (!prefersMotion()) {
+    logScrollWrite(container, 'smooth.to', container.scrollTop, top);
     container.scrollTo({top, behavior: 'auto'});
     return Promise.resolve();
   }
   const done = settle(container);
+  logScrollWrite(container, 'smooth.to', container.scrollTop, top);
   container.scrollTo({top, behavior: 'smooth'});
   return done;
 }
@@ -128,14 +131,17 @@ export async function smoothScrollToBottom(container: HTMLElement): Promise<void
     stable = 0;
     const near = top - container.scrollTop <= 2 * container.clientHeight;
     if (smooth && near) {
+      logScrollWrite(container, 'smooth.bottom', container.scrollTop, top);
       container.scrollTo({top, behavior: 'smooth'});
       await settle(container);
     } else {
+      logScrollWrite(container, 'smooth.bottom', container.scrollTop, top);
       container.scrollTo({top, behavior: 'auto'});
       await nextFrame();
     }
   }
   // Ceiling reached: land exactly on the end so a slow-settling list is never
   // left short.
+  logScrollWrite(container, 'smooth.bottom', container.scrollTop, target());
   container.scrollTo({top: target(), behavior: 'auto'});
 }
