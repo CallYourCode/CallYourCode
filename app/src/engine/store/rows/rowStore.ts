@@ -150,6 +150,95 @@ function fireWrite(run: (store: IDBObjectStore) => IDBRequest): void {
   backing('readwrite', run).catch(() => {});
 }
 
+// COALESCED SEQ-INDEX WRITES. The seq index is one record per session holding
+// every row's tuple (78k-125k of them on a busy chat). Rewriting the whole
+// record on EVERY upsert/drop serialized that array dozens of times a second
+// during a backfill (36 rewrites / 2.3s of main thread per 20s on the rig), for
+// no gain: the WARM MIRROR (m.idx, in memory) is the authoritative copy every
+// reader projects from; the durable record only ever matters when a COLD session
+// is loaded from scratch (ensureIdx's durable read runs only when the session is
+// not idxLoaded), and a dirty session is ALWAYS warm (marking dirty happens only
+// after m.idx was mutated, which means ensureIdx already ran and set idxLoaded).
+//
+// So a mutation marks the session's index dirty and a single ~3s trailing timer
+// flushes every dirty session at once. It also flushes eagerly at the moments a
+// stale durable index would be observable or lost: before EVICTING a warm mirror
+// (close, so the next cold open reads the mirror we are dropping), before a
+// reader reloads from the durable backing (openWindow, rekey), and when the page
+// is backgrounded or unloaded (visibilitychange hidden, pagehide) so a clean
+// close never loses the newest tuples.
+//
+// HOW A LOST INDEX WRITE HEALS. The row PAYLOADS stay immediate (fireWrite), so
+// a crash between a coalesced-dirty mutation and its flush can leave the durable
+// index BEHIND its durable rows -- never ahead. A cold open then reads an index
+// that is a strict SUBSET of the rows on disk and simply under-projects (some
+// recent rows are not yet in the window); it never points at a row that is not
+// there, and it never wins over the real axis. The very next attach re-serves
+// those rows and the replicator re-upserts them (idempotent by mid), which
+// re-adds the missing tuples and re-marks the index dirty, so the window heals
+// to the full tail. A purge/wipe path CANCELS a pending write (it is deleting
+// the record) so a deferred flush can never resurrect a just-deleted index.
+const idxDirty = new Set<string>();
+let idxFlushTimer: ReturnType<typeof setTimeout> | null = null;
+const IDX_FLUSH_MS = 3000;
+
+function writeIdxNow(sessionId: string): void {
+  idxDirty.delete(sessionId);
+  const m = mirrors.get(sessionId);
+  if (!m) return;
+  fireWrite((s) => s.put({key: idxKey(sessionId), sessionId, tuples: m.idx} satisfies IdxRecord));
+}
+
+// Mark a session's durable seq index stale and arm the trailing flush (at most
+// one timer for all dirty sessions).
+function markIdxDirty(sessionId: string): void {
+  idxDirty.add(sessionId);
+  if (idxFlushTimer !== null) return;
+  idxFlushTimer = setTimeout(() => {
+    idxFlushTimer = null;
+    flushAllIdx();
+  }, IDX_FLUSH_MS);
+  const t = idxFlushTimer as unknown as {unref?: () => void};
+  if (typeof t.unref === 'function') t.unref();
+}
+
+// Flush ONE session's pending index write now, before a reader reloads its
+// mirror from the durable backing or before its warm mirror is evicted. A no-op
+// when the session is not dirty.
+function flushIdx(sessionId: string): void {
+  if (!idxDirty.has(sessionId)) return;
+  writeIdxNow(sessionId);
+}
+
+// Flush every dirty session's index (the trailing timer body, and the
+// hidden/pagehide hooks).
+function flushAllIdx(): void {
+  if (idxFlushTimer !== null) {
+    clearTimeout(idxFlushTimer);
+    idxFlushTimer = null;
+  }
+  for (const sid of [...idxDirty]) writeIdxNow(sid);
+}
+
+// Drop a session's pending index write WITHOUT writing it: the caller is about
+// to delete the durable index (purge) or wipe the whole store, so a deferred
+// write firing afterwards would resurrect the very record being deleted.
+function cancelIdxFlush(sessionId: string): void {
+  idxDirty.delete(sessionId);
+}
+
+// Flush the whole coalesced set when the page is backgrounded or torn down, so a
+// clean close never loses the newest tuples. Guarded for the non-browser test
+// environment (the tests drive flushing through openWindow/close directly).
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushAllIdx();
+  });
+}
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', () => flushAllIdx());
+}
+
 // Test seam: swap the durable backing for an in-memory runner and drop every
 // warm mirror, so each test starts from an empty store.
 export function __setBackingForTest(tx: Tx | null): void {
@@ -157,6 +246,11 @@ export function __setBackingForTest(tx: Tx | null): void {
   mirrors.clear();
   metaCache.clear();
   idxLoaded.clear();
+  idxDirty.clear();
+  if (idxFlushTimer !== null) {
+    clearTimeout(idxFlushTimer);
+    idxFlushTimer = null;
+  }
   openSid = null;
 }
 
@@ -168,6 +262,13 @@ export function __setBackingForTest(tx: Tx | null): void {
 // now-dead warm mirror. The store is left able to lazily reopen: openDb rebuilds
 // the connection on the next access.
 export function closeForClear(): void {
+  // Flush any pending index writes BEFORE dropping the warm mirrors and closing
+  // the connection: closeForClear is used both before a deleteDatabase (where
+  // the flush is harmlessly deleted with everything else) AND to force a cold
+  // reload (a test, or a versionchange), where a dropped index would blank the
+  // next open. Flushing while the connection is still open keeps the writes on
+  // the live db.
+  flushAllIdx();
   try {
     db?.close();
   } catch {}
@@ -280,7 +381,7 @@ function sanitizeOnRead(sessionId: string, m: Mirror): void {
   for (const t of m.idx) if (isPoisonTuple(t)) m.loaded.delete(t.id);
   m.idx = clean;
   cyclog('rowstore.axis.sanitized', {session: sessionId, dropped});
-  fireWrite((s) => s.put({key: idxKey(sessionId), sessionId, tuples: m.idx} satisfies IdxRecord));
+  markIdxDirty(sessionId);
 }
 
 async function loadPayloads(sessionId: string, m: Mirror, ids: string[]): Promise<void> {
@@ -311,6 +412,10 @@ export async function openWindow(
   sessionId: string,
   size: number
 ): Promise<{messages: CycEngineMessage[]; events: CycSessionEvent[]}> {
+  // Flush this session's coalesced index before ensureIdx might reload it from
+  // the durable backing, so a reader never observes an index older than the
+  // mirror it is about to project.
+  flushIdx(sessionId);
   const m = await ensureIdx(sessionId);
   // A warm mirror ensureIdx returned without re-reading (the migration that just
   // imported this session, or a live hold) can still carry a poisoned axis; the
@@ -448,7 +553,7 @@ export function dropRow(sessionId: string, id: string): void {
     const had = m.loaded.has(id);
     if (at >= 0) m.idx.splice(at, 1);
     m.loaded.delete(id);
-    fireWrite((s) => s.put({key: idxKey(sessionId), sessionId, tuples: m.idx} satisfies IdxRecord));
+    markIdxDirty(sessionId);
     if (openSid === sessionId && had) fireChange(sessionId, -1, -1);
   }
   fireWrite((s) => s.delete(rowKey(sessionId, id)));
@@ -477,7 +582,7 @@ function persistUpsert(sessionId: string, m: Mirror, rows: StoreRow[], res: Upse
     const inc = m.loaded.get(into);
     if (inc) fireWrite((s) => s.put({...inc, key: rowKey(sessionId, into)}));
   }
-  fireWrite((s) => s.put({key: idxKey(sessionId), sessionId, tuples: m.idx} satisfies IdxRecord));
+  markIdxDirty(sessionId);
 }
 
 // One cyclog line per row the door refused (isPoisonTuple, once the session
@@ -572,6 +677,8 @@ export function findMsgByCid(sessionId: string, cid: string): StoreRow | undefin
 // as the one seam that retires a stale provisional record. No id is carried
 // across: next already carries its one durable name from messageRow.
 export function rekey(sessionId: string, oldId: string, next: StoreRow): void {
+  // Flush the coalesced index before this may reload the mirror from durable.
+  flushIdx(sessionId);
   const m = mirrors.get(sessionId);
   if (m) {
     // drop the provisional row from index and loaded set
@@ -613,6 +720,9 @@ export function metaSnapshot(sessionId: string): SessionMeta | undefined {
 // open reloads the window from them.
 export function close(sessionId: string): void {
   if (openSid === sessionId) return;
+  // Flush the coalesced index BEFORE dropping the warm mirror, so the next cold
+  // open reads the tuples we are about to evict rather than a stale record.
+  flushIdx(sessionId);
   mirrors.delete(sessionId);
   idxLoaded.delete(sessionId);
 }
@@ -667,11 +777,23 @@ export async function purge(sessionId: string): Promise<boolean> {
   const mine = Array.isArray(keys)
     ? keys.filter((k): k is string => typeof k === 'string' && k.startsWith(prefix))
     : [];
-  if (mine.length) {
+  // Cancel any pending coalesced index write for this session BEFORE the delete:
+  // a deferred flush firing after the purge would resurrect the stale index the
+  // heal is dropping (the resurrect loop the field hit). The idx and meta keys
+  // are ALSO deleted unconditionally below (even if getAllKeys did not list them
+  // yet), so a flush whose fire-and-forget write was already in flight when the
+  // purge ran -- created before the purge's delete, so it commits first -- is
+  // still removed by the delete that follows it.
+  cancelIdxFlush(sessionId);
+  const del = new Set<string>(mine);
+  del.add(idxKey(sessionId));
+  del.add(metaKey(sessionId));
+  const toDelete = [...del];
+  if (toDelete.length) {
     try {
       await backing('readwrite', (s) => {
-        let last: IDBRequest = s.delete(mine[0]);
-        for (let i = 1; i < mine.length; i++) last = s.delete(mine[i]);
+        let last: IDBRequest = s.delete(toDelete[0]);
+        for (let i = 1; i < toDelete.length; i++) last = s.delete(toDelete[i]);
         return last;
       });
     } catch {
