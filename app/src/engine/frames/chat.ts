@@ -12,6 +12,7 @@ const attachOk: FrameHandler = (ctx, frame) => {
   if (Number.isFinite(frame.pointer)) a.pointer = Number(frame.pointer);
   if (Number.isFinite(frame.pointerPage)) a.pointerPage = Number(frame.pointerPage);
   if (Number.isFinite(frame.tailPage)) a.tailPage = Number(frame.tailPage);
+  if (Number.isFinite(frame.tailVersion)) a.tailVersion = Number(frame.tailVersion);
   if (Number.isFinite(frame.pageSize)) a.pageSize = Number(frame.pageSize);
   if (Number.isFinite(frame.total)) a.total = Number(frame.total);
   if (pages.length) a.pages = pages;

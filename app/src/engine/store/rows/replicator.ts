@@ -73,6 +73,11 @@ export type AttachOkLite = {
   pageSize: number;
   total?: number;
   tailPage?: number;
+  // The engine's tail VERSION (the seq just past the newest row), carried on
+  // every attach-ok. It is the one value the renumber check may compare: unlike
+  // `total` (a row COUNT) it is a real point on the seq axis, so on an axis with
+  // gaps it sits ABOVE `total`. Absent on engines older than this field.
+  tailVersion?: number;
   pointerPage?: number;
   pages: EnginePage[];
   deltaBase?: number;
@@ -94,12 +99,27 @@ export function rowsFromPage(sessionId: string, page: EnginePage): StoreRow[] {
   return rows;
 }
 
-// The engine's tail version we watch for a renumber: the newest page's version,
-// falling back to the total. A restart that renumbers the seq axis moves this.
+// The engine's tail version we watch for a renumber. It is a VERSION (a point on
+// the seq axis), never a row COUNT. Preference order:
+//   1. the wire `tailVersion` the engine states on every attach-ok, authoritative
+//      even on a page-less delta (a device already current);
+//   2. else the newest SERVED page's version -- the tail page is always among the
+//      pages when the delta carries any (engine builds them down from pageOf(T)),
+//      so its version equals the real tail version.
+// It NEVER falls back to `total`. `total` is the row count, which on a gappy seq
+// axis sits BELOW the true tail version; treating it as a version made a
+// page-less up-to-date attach look like a regression and triggered a false
+// renumber that re-downloaded the whole history (the CPU/network/storage flood).
+// Returns 0 when NO version is known (an old engine's page-less attach); the
+// renumber check reads 0 as "unknown" and declares no renumber, so an unknown
+// tail can never be mistaken for a regressed one.
 export function tailVersionOf(a: AttachOkLite): number {
+  if (typeof a.tailVersion === 'number' && Number.isFinite(a.tailVersion) && a.tailVersion > 0) {
+    return a.tailVersion;
+  }
   let v = 0;
   for (const p of a.pages) if (p.version > v) v = p.version;
-  return v || a.total || 0;
+  return v;
 }
 
 export function createReplicator(sessionId: string, deps: ReplicatorDeps): Replicator {

@@ -1,5 +1,5 @@
 import {describe, expect, test, vi} from 'vitest';
-import {createReplicator, rowsFromPage} from '../engine/store/rows/replicator';
+import {createReplicator, rowsFromPage, tailVersionOf} from '../engine/store/rows/replicator';
 import {cursorSeq} from '../engine/store/rows/cursor';
 import type {EnginePage} from '../engine/contract';
 import {
@@ -107,6 +107,83 @@ describe('replicator backfill', () => {
     fail = false;
     await rep.pump();
     expect(committed).toHaveLength(100); // resumes exactly at the tail
+  });
+});
+
+describe('the tail version is a version, never a row count', () => {
+  test('prefers the wire tailVersion, else the newest served page, and NEVER total', () => {
+    // The wire tailVersion is authoritative even on a page-less delta.
+    expect(tailVersionOf({sessionId: SID, pageSize: 100, total: 123904, tailVersion: 124924, pages: []})).toBe(124924);
+    // No wire tailVersion: the newest SERVED page's version (the tail page is
+    // always among the served pages), never the total.
+    expect(
+      tailVersionOf({sessionId: SID, pageSize: 100, total: 123904, pages: [page(1238, 124000), page(1239, 124924)]})
+    ).toBe(124924);
+    // Page-less AND no wire tailVersion (an old engine, a device current): the
+    // tail is UNKNOWN (0). The old code returned `total` (123904) here, a row
+    // count that on a gappy axis reads as a regression below the real tail.
+    expect(tailVersionOf({sessionId: SID, pageSize: 100, total: 123904, pages: []})).toBe(0);
+  });
+
+  // Fail-before: the exact BZ-Builder flood. A fully-synced device reconnects
+  // and the engine serves a page-less, up-to-date attach whose `total` (a row
+  // count) sits BELOW the gappy tail version. The old tailVersionOf fell back to
+  // total, renumberDirty saw a regression, resetCoverage wiped the covered run,
+  // and the replicator re-pulled every page (5 MB / 353 msgs on the wire). It
+  // must instead hold coverage and pull nothing.
+  test('a page-less up-to-date reconnect on a gappy axis re-pulls NOTHING', async () => {
+    const h = harness(1240);
+    // seed a high tail version (a gappy axis) via the wire, then cover the tail
+    await h.rep.attachOk({
+      sessionId: SID,
+      pageSize: 100,
+      tailPage: 1239,
+      total: 123904,
+      tailVersion: 124924,
+      pages: []
+    });
+    await h.rep.pump(); // commits the tail page 1239, coveredFrom = 1239
+    const coveredBefore = cursorSeq(h.rep.cursor);
+    expect(coveredBefore).toBe(123900);
+    const fetchesBefore = h.fetches.length;
+    // the reconnect: an OLD engine (no wire tailVersion), page-less, total below
+    // the true tail version.
+    await h.rep.attachOk({sessionId: SID, pageSize: 100, tailPage: 1239, total: 123904, pages: []});
+    // coverage held: no renumber, no reset.
+    expect(cursorSeq(h.rep.cursor)).toBe(coveredBefore);
+    // the ordered backfill resumes BELOW the covered run; the tail is never
+    // re-fetched (a reset would have set nextPage back to the tail page).
+    await h.rep.pump();
+    expect(h.fetches.slice(fetchesBefore)).not.toContain(1239);
+    expect(h.fetches[h.fetches.length - 1]).toBe(1238);
+  });
+
+  // The same reconnect from a NEW engine that DOES state its tail version: the
+  // stated version equals what we covered at, so still no renumber.
+  test('a page-less reconnect that states the real tail version is not a renumber', async () => {
+    const h = harness(1240);
+    await h.rep.attachOk({
+      sessionId: SID,
+      pageSize: 100,
+      tailPage: 1239,
+      total: 123904,
+      tailVersion: 124924,
+      pages: []
+    });
+    await h.rep.pump();
+    const coveredBefore = cursorSeq(h.rep.cursor);
+    const fetchesBefore = h.fetches.length;
+    await h.rep.attachOk({
+      sessionId: SID,
+      pageSize: 100,
+      tailPage: 1239,
+      total: 123904,
+      tailVersion: 124924,
+      pages: []
+    });
+    expect(cursorSeq(h.rep.cursor)).toBe(coveredBefore);
+    await h.rep.pump();
+    expect(h.fetches.slice(fetchesBefore)).not.toContain(1239);
   });
 });
 

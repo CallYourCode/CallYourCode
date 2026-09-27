@@ -63,6 +63,7 @@ export function wireChat(conn: Conn, ctx: HandlerCtx): void {
       pageSize: s.pageSize ?? PAGE_SIZE,
       total: a.total,
       tailPage: a.tailPage,
+      tailVersion: a.tailVersion,
       pointerPage: a.pointerPage,
       pages: a.pages ?? [],
       deltaBase: a.deltaBase

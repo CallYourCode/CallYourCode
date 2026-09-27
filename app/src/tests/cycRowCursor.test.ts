@@ -86,4 +86,18 @@ describe('renumber after an engine restart', () => {
     const st = seeded(5, 200);
     expect(renumberDirty(st, 1)).toBe(false);
   });
+
+  // Fail-before: an UNKNOWN tail version (0) must never look like a regression.
+  // A page-less attach from an engine that omits tailVersion resolves to 0; on
+  // a gappy axis (tailVersion 124924 far above the row count) the old code fell
+  // back to the count and declared a false renumber, re-pulling the whole
+  // history. With coverage established, 0 must be read as "unknown", not
+  // "regressed".
+  test('an unknown (zero) tail version is never a renumber even with coverage', () => {
+    const st = seeded(1239, 124924);
+    notePageCommitted(st, 1239);
+    expect(renumberDirty(st, 0)).toBe(false); // unknown: hold the covered run
+    expect(renumberDirty(st, 123904)).toBe(true); // a KNOWN lower version is a real renumber
+    expect(renumberDirty(st, 124924)).toBe(false); // equal: not a regression
+  });
 });

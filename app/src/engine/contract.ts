@@ -259,6 +259,13 @@ export type EngineAttachOk = {
   pointer?: number;
   pointerPage?: number;
   tailPage?: number;
+  /* The engine's tail VERSION (the seq just past the newest row), the value it
+   * watches for a seq-axis renumber. It is a version, NOT a row count: on an
+   * axis with seq gaps it sits ABOVE `total`. Carried on every attach-ok so a
+   * page-less delta (a device already current) still states the real tail
+   * version; absent on engines older than this field, and then the app falls
+   * back to the newest served page's version and NEVER to `total`. */
+  tailVersion?: number;
   pageSize?: number;
   total?: number;
   pages?: EnginePage[];
