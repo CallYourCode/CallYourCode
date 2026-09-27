@@ -51,6 +51,7 @@ import { initClips } from "../chat/clips.ts";
 import { initReadState } from "../sessions/readstate.ts";
 import { initContextCache, claudeTitleOf } from "../sessions/context-cache.ts";
 import { initChatlog, logSession, sweepRestoredQueued } from "../chat/chatlog.ts";
+import { bumpRowsGen } from "../chat/wirecache.ts";
 import { initTts, ttsWithVoice, sweepGrowingClips } from "../voice/tts.ts";
 import { makeAnnounce } from "../terminal/announce.ts";
 import { initAsks, publishAsk } from "../chat/asks.ts";
@@ -1549,7 +1550,7 @@ if (process.env.CYC_BACKFILL_MARKERS === "1") {
     rememberLog: (id, log) => {
       restoredLogs.set(id, log);
       const row = sessions.get(id);
-      if (row && row.log.length === 0) row.log.push(...log); // paint the open dead row now
+      if (row && row.log.length === 0) { row.log.push(...log); bumpRowsGen(row); } // paint the open dead row now
       broadcastSessions();
     },
     log: (e, f) => LOG.line(e, f),

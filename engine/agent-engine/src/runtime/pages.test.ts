@@ -12,7 +12,7 @@
  */
 
 import { test, expect } from "bun:test";
-import { PAGE_SIZE, pageOf, tailPage, buildPage, pointerSeq, tsForSeq, type Seqd } from "./pages";
+import { PAGE_SIZE, pageOf, tailPage, buildPage, pageAt, pointerSeq, tsForSeq, type Seqd } from "./pages";
 
 /* A synthetic log of `n` messages, seq = index, alternating user/claude, ts a
  * strictly increasing minute so a marker can land between any two. */
@@ -260,4 +260,32 @@ test("the pointer skips records: the divider sits on the first unread AGENT mess
   expect(pointerSeq(rows, 10 * 60_000)).toBe(12);
   // a progress report that lands on a record parks the marker on that record's instant
   expect(tsForSeq(rows, 8)).toBe(9 * 60_000);
+});
+
+/* pageAt is the serve path's binary-search cut of a seq-sorted merge. It must
+ * be BYTE-IDENTICAL to buildPage's full scan on every page: version, sealed
+ * and the exact message list. Proven over dense, empty, gapped and tied seq
+ * axes, and over pages before, at and past the tail. */
+test("pageAt equals buildPage on every page, for dense, gapped, tied and empty axes", () => {
+  const cases: Seqd[][] = [
+    [],
+    mixed(1),
+    mixed(99),
+    mixed(100),
+    mixed(101),
+    mixed(250),
+    // a gapped axis: seqs 0,1,2 then a jump to 500,501, then 999
+    [0, 1, 2, 500, 501, 999].map((seq) => ({ seq, ts: seq })),
+    // a tied axis (a seq repair can land a message on a record's seq): two
+    // rows share seq 5, contiguous with the rest
+    [0, 1, 5, 5, 6, 200].map((seq, i) => ({ seq, ts: seq * 10 + i })),
+  ];
+  for (const rows of cases) {
+    const top = rows.length ? pageOf(rows[rows.length - 1].seq) : 0;
+    for (let n = 0; n <= top + 2; n++) {
+      expect(JSON.stringify(pageAt(rows, n)),
+        `page ${n} of ${rows.length} rows must match buildPage byte for byte`)
+        .toBe(JSON.stringify(buildPage(rows, n)));
+    }
+  }
 });

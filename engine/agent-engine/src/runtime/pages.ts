@@ -69,6 +69,37 @@ export function buildPage<M extends Seqd>(chat: readonly M[], n: number): Page<M
   return { page: n, version, sealed: n < tailPage(chat), messages };
 }
 
+/** The first index of `rows` whose seq is >= `target`, by binary search. Rows
+ *  are seq-sorted (rowsBySeq merges two sorted runs; a seq repair only ever
+ *  ties, never inverts), so this is a well-defined lower bound. */
+function lowerBound(rows: readonly Seqd[], target: number): number {
+  let lo = 0, hi = rows.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (rows[mid].seq < target) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+/* One page, by BINARY SEARCH over seq-sorted rows: byte-identical to
+ * buildPage but O(log N + page) instead of a full scan. The rows a page holds
+ * are the contiguous run with lo <= seq < hi (contiguous because the rows are
+ * seq-sorted), so two lower-bound probes bound the slice. `version` and
+ * `sealed` are computed exactly as buildPage does, from the slice's last row
+ * and the log's last row. This is the serve path for a merged conversation
+ * (attach.ts): every page fetch reuses the cached merge and cuts one slice
+ * from it. buildPage stays the reference for callers over a plain array. */
+export function pageAt<M extends Seqd>(rows: readonly M[], n: number): Page<M> {
+  const lo = n * PAGE_SIZE;
+  const hi = lo + PAGE_SIZE; // exclusive
+  const start = lowerBound(rows, lo);
+  const end = lowerBound(rows, hi);
+  const messages = rows.slice(start, end);
+  const last = messages[messages.length - 1];
+  const version = last ? last.seq + 1 : lo;
+  return { page: n, version, sealed: n < tailPage(rows), messages };
+}
+
 /* The pointer, as a seq: where the unread divider is drawn and where autoplay
  * begins. It is the first AGENT message the marker has not passed
  * (`ts > heardTs`), because only the agent's messages are ever unread.

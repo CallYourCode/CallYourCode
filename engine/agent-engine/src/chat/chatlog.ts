@@ -13,10 +13,11 @@
 import { mintMsgId, type ChatMsg } from "./chatmsg.ts";
 import { realClock, type Clock } from "../runtime/clock.ts";
 import { capText, factKey, mintSessionRecId, srcKey, type SessionRec } from "./sessionrec.ts";
+import { bumpRowsGen, type RowsGenerational } from "./wirecache.ts";
 
 export type DedupeEntry = { msgId?: string; seq: number };
 
-export type ChatSession = {
+export type ChatSession = RowsGenerational & {
   id: string;
   chat: ChatMsg[];
   /** the session records of the same log, on the same seq axis (sessionrec.ts);
@@ -244,6 +245,7 @@ export function logChat(s: ChatSession, msg: ChatMsg): number {
   if (!msg.mid) msg.mid = mintMsgId();
   s.chat.push(msg);
   if (s.chat.length > CHAT_KEEP) s.chat.splice(0, s.chat.length - CHAT_KEEP);
+  bumpRowsGen(s); // the merged wire rows just changed: invalidate attach's cache
   /* ONE APPENDED LINE is the whole persistence of this message (the design),
    * and the blob index learns every id it carries in the same breath. */
   const { aid, chatId } = deps.chatRefFor(s.id);
@@ -302,6 +304,7 @@ export function logSession(s: ChatSession, input: SessionRecInput): SessionRec |
   const rec: SessionRec = { ...input, text, seq: nextSeq(s), id: input.id ?? mintSessionRecId() };
   if (sk) remember(keys.src, sk, SRC_KEEP);
   (s.log ??= []).push(rec);
+  bumpRowsGen(s); // a new session record on the axis: invalidate attach's cache
   const { aid, chatId } = deps.chatRefFor(s.id);
   deps.appendRec(aid, chatId, rec);
   deps.sendSessionRec?.(s.id, rec);

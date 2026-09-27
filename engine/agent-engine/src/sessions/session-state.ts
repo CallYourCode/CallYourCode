@@ -25,6 +25,7 @@ import { isHarnessSessionId } from "../runtime/ids.ts";
 import { parseOrder } from "../chat/order.ts";
 import { attachmentsOf, type ChatMsg } from "../chat/chatmsg.ts";
 import { ensureSeqs } from "../chat/chatlog.ts";
+import { bumpRowsGen } from "../chat/wirecache.ts";
 import { dropDeliveredReceiptRows } from "../chat/migrate-from-rows.ts";
 import type { SessionRec } from "../chat/sessionrec.ts";
 import type { AgentStatus } from "../terminal/herdr.ts";
@@ -92,6 +93,10 @@ export type Session = {
    * harness did, on the same seq axis as `chat`, replayed at boot and
    * appended by the ingest (chat/ingest.ts) and the engine's own edges. */
   log: SessionRec[];
+  /* THE WIRE-ROWS GENERATION (chat/wirecache.ts): bumped on every mutation of
+   * chat/log or a row's fields, so attach.ts can cache the merged page rows
+   * and reuse them until something actually changed. */
+  rowsGen?: number;
   lastOrigin?: { id: string; ts: number };
   recentKeys?: Map<string, { msgId?: string; seq: number }>;
   recentSrc?: Set<string>;
@@ -682,6 +687,12 @@ export function persistPatch(agentId: string, mts: number,
   set?: Record<string, unknown>, del?: string[]): void {
   const { aid, chatId } = chatRefFor(agentId);
   chatStore.appendPatch(aid, chatId, { mts, set, del });
+  /* Every in-memory row edit is persisted through here (a dequeue, a
+   * completed note, a grown clip finalising), and the caller has already
+   * mutated the row's fields, so this is the one place that sees them all:
+   * invalidate attach's cached merge for the live session. */
+  const s = sessions.get(agentId);
+  if (s) bumpRowsGen(s);
 }
 
 /* A stable agent id no live session or persisted meta already holds: the mint

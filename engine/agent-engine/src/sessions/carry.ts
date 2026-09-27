@@ -22,6 +22,7 @@
 
 import { saveAgentMeta } from "../runtime/agentmeta.ts";
 import { ensureSeqs } from "../chat/chatlog.ts";
+import { bumpRowsGen } from "../chat/wirecache.ts";
 import { evictContextFor } from "./context-cache.ts";
 import { sessions, restoredChats, restoredLogs, agentMetas, chatStore, metaFor, indexSession,
   sessionIndex, flushAgentSave, scheduleAgentSave, getManualOrder, setManualOrder,
@@ -172,7 +173,7 @@ export function absorb(provisional: Session, targetId: string): void {
   // any past ids the provisional gathered point at the survivor now
   for (const [sid, aid] of sessionIndex) if (aid === provisional.id) sessionIndex.set(sid, targetId);
   if (rows) {
-    if (target) { target.chat = rows.chat; target.log = rows.log; }
+    if (target) { target.chat = rows.chat; target.log = rows.log; bumpRowsGen(target); }
     else { restoredChats.set(targetId, rows.chat); restoredLogs.set(targetId, rows.log); }
     void disk.then(async () => {
       try {

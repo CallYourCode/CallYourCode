@@ -7,6 +7,7 @@ import type { RoutesCtx } from "./ctx.ts";
 import { wirePage } from "../chat/attach.ts";
 import { JSON_BODY_MAX_BYTES, readJsonCapped } from "../storage/body-limits.ts";
 import { ensureSeqs } from "../chat/chatlog.ts";
+import { bumpRowsGen } from "../chat/wirecache.ts";
 import { searchableText } from "../chat/chatmsg.ts";
 import { json, requireOwner } from "../transport/httpx.ts";
 import { normalizeQuery, scanChat } from "../chat/chat-search.ts";
@@ -113,6 +114,7 @@ export async function chatRoutes(ctx: RoutesCtx, req: Request, url: URL, path: s
     /* The new file starts its seq axis at 0: renumber the merged rows in
      * storage order so the pages are dense again. */
     rowsBySeq(s.chat, s.log).forEach((r, i) => { r.seq = i; });
+    bumpRowsGen(s); // both arrays were replaced and re-sequenced: drop the cache
     restoredChats.delete(id);
     restoredLogs.delete(id);
     /* Append-only rule: a trim never rewrites lines. The kept tail becomes a

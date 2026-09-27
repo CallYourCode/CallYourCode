@@ -18,8 +18,9 @@
  * An un-reloaded bundle may still send `have`; that path is deprecated.
  */
 
-import { PAGE_SIZE, pageOf, tailPage, buildPage, pointerSeq, tsForSeq } from "../runtime/pages.ts";
+import { PAGE_SIZE, pageOf, tailPage, buildPage, pageAt, pointerSeq, tsForSeq } from "../runtime/pages.ts";
 import { ensureSeqs, type ChatSession } from "./chatlog.ts";
+import type { RowsGenerational } from "./wirecache.ts";
 import type { ChatMsg } from "./chatmsg.ts";
 import type { SessionRec } from "./sessionrec.ts";
 import { rowsBySeq } from "./chatstore.ts";
@@ -38,7 +39,7 @@ export type AttachSession = Omit<ChatSession & ReadStateSession, "chat"> & {
   chat: ChatMsg[];
   log: SessionRec[];
   cwd: string;
-};
+} & RowsGenerational;
 
 export type AttachDeps = {
   sessionOf(id: string): AttachSession | undefined;
@@ -62,22 +63,40 @@ const D = (): AttachDeps => {
 export type WireRec = SessionRec & { t: "s" };
 export type WireRow = (ChatMsg & { seq: number; id: string }) | WireRec;
 
-/** The rows of one session in storage order, ready for buildPage: messages
+/* THE MERGED WIRE ROWS, CACHED per session against its generation counter
+ * (wirecache.ts). Keyed by the session OBJECT so a fresh object (a reconcile
+ * rebuild) starts clean, and freed with the object when it is GC'd; the
+ * counter guards every mutation, so a hit is only ever the current merge. The
+ * one merge is then reused by every page fetch of the conversation instead of
+ * being rebuilt per page. */
+const wireCache = new WeakMap<object, { gen: number; rows: WireRow[] }>();
+
+/** The rows of one session in storage order, ready for a page cut: messages
  *  with their routing id forced to THIS session (a ChatMsg's own id can be a
- *  stale pane id on a re-keyed session) and records tagged `t: "s"`. */
+ *  stale pane id on a re-keyed session) and records tagged `t: "s"`. The
+ *  merge is cached against `s.rowsGen` and reused until a mutation bumps it,
+ *  so a device pulling every page merges the log once, not once per page. */
 export function wireRows(s: AttachSession): WireRow[] {
   /* Idempotent, and cheap when the run is already correct (one scan, no
    * writes). Every other paging caller stamps first; doing it here too makes
-   * this function safe on its own rather than on its callers' good manners. */
+   * this function safe on its own rather than on its callers' good manners.
+   * Run before the cache read: a seq repair only ever happens on a freshly
+   * reloaded log (which bumps the generation), and once repaired it is stable,
+   * so the cached merge always reflects the repaired seqs. */
   ensureSeqs(s.chat, s.log);
+  const gen = s.rowsGen ?? 0;
+  const hit = wireCache.get(s);
+  if (hit && hit.gen === gen) return hit.rows;
   const recs = new Set<unknown>(s.log);
-  return rowsBySeq(s.chat, s.log).map((r) =>
+  const rows = rowsBySeq(s.chat, s.log).map((r) =>
     recs.has(r) ? { t: "s" as const, ...(r as SessionRec) } : { ...(r as ChatMsg & { seq: number }), id: s.id });
+  wireCache.set(s, { gen, rows });
+  return rows;
 }
 
-/* One page, ready for the wire: buildPage's shape over the merged rows. */
+/* One page, ready for the wire: a binary-search cut of the cached merge. */
 export function wirePage(s: AttachSession, n: number) {
-  return buildPage(wireRows(s), n);
+  return pageAt(wireRows(s), n);
 }
 
 /** Newest seq on the merged axis; -1 when the log has never held a row. */
@@ -117,7 +136,7 @@ export function onAttach(ws: Sock, m: any) {
   const pointer = pointerSeq(s.chat, s.heardTs);
   // The page the divider sits on, clamped into the real range.
   const ptrPage = Math.min(tail, Math.max(0, pageOf(pointer)));
-  const tailVersion = buildPage(rows, tail).version;
+  const tailVersion = pageAt(rows, tail).version;
   const F0 = readFrontier(m);
   /* A frontier beyond the newest seq this axis can hold is IMPOSSIBLE: the
    * device cached rows from an OLDER, LONGER seq axis (a pre-rebuild engine),
@@ -159,7 +178,7 @@ export function onAttach(ws: Sock, m: any) {
       const fromPage = pageOf(lo);
       const toPage = pageOf(T);
       pages = [];
-      for (let n = toPage; n >= fromPage; n--) pages.push(buildPage(rows, n));
+      for (let n = toPage; n >= fromPage; n--) pages.push(pageAt(rows, n));
       deltaBase = lo;
     }
   } else {
@@ -173,7 +192,7 @@ export function onAttach(ws: Sock, m: any) {
     const tailMatches = have !== null &&
       Number(have.tailPage) === tail && Number(have.tailVersion) === tailVersion;
     const wanted = ptrPage === tail ? [tail] : [ptrPage, tail];
-    pages = tailMatches ? [] : wanted.map((n) => buildPage(rows, n));
+    pages = tailMatches ? [] : wanted.map((n) => pageAt(rows, n));
     pagesSkipped = tailMatches;
   }
 
