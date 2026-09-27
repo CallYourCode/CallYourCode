@@ -4,8 +4,9 @@ import type {CycMediaItem, CycMessage, CycSession, CycSessionEvent} from './type
 import {sessionState, dataState} from './sessionState';
 import {
   renderMessages,
-  messageWindowFrom,
-  messageDomEpoch
+  messageVisibleRangeKey,
+  messageDomEpoch,
+  setMessageWindowHook
 } from '@/features/chat/surface/messageList';
 import {cyclog} from '@/shared/logging';
 import * as interactionWindow from '@/shared/browser';
@@ -456,17 +457,17 @@ export function createRenderHub(deps: RenderHubDeps) {
       }
     }
     // firstUnread fixes the divider's position; mode gates hydrateWaveforms
-    // (which no-ops off live). The window origin covers history pagination and
-    // jumpToMessage (a moved `from` discards every row frame with the messages
-    // unchanged); the DOM epoch covers clearMessages and the empty-wipe
-    // teardowns, which rebuild the node set with no store change at all.
+    // (which no-ops off live). The visible-range key covers the virtual window
+    // sliding on scroll (rows revealed by a scroll must hydrate like a store
+    // paint) and jumpToMessage; the DOM epoch covers clearMessages and the
+    // empty-wipe teardowns, which rebuild the node set with no store change.
     return [
       dataState.mode,
       s.id,
       n,
       fold,
       cs.firstUnread() ?? -1,
-      messageWindowFrom(cs.messageListInner),
+      messageVisibleRangeKey(cs.messageListInner),
       messageDomEpoch(),
       overlayActive ? 1 : 0,
       evFold
@@ -606,6 +607,15 @@ export function createRenderHub(deps: RenderHubDeps) {
     // reply no longer pays these DOM sweeps and forced layout every frame. The
     // scroll-driven stickyDates path (attachStickyDates' own scroll listener) is
     // untouched: scroll still refreshes the date-chip veil.
+    // A scroll that slides the virtual window mounts fresh rows without a store
+    // paint; run the same DOM sweeps over them so a row scrolled into view
+    // hydrates its waveform, sticky date, and play state like a store paint.
+    setMessageWindowHook(cs.messageListInner, () => {
+      deps.hydrateWaveforms();
+      cs.stickyDates.refresh();
+      audio.updateMessagePlays();
+    });
+
     const scanKey = chatScanKey(s, overlayActive, es.events);
     if (scanKey !== lastScanKey) {
       lastScanKey = scanKey;

@@ -1,7 +1,15 @@
 import type {CycMessage, CycSession, CycSessionEvent} from '@/types';
 import {RENDERABLE_EVENT_KINDS} from '@/engine/store/rows/core';
+import {
+  Virtualizer,
+  elementScroll,
+  measureElement,
+  observeElementOffset,
+  observeElementRect
+} from '@tanstack/virtual-core';
 
 import {h} from '@/components/domHelpers';
+import {markMachineTop} from './machineScroll';
 import {syncedAt} from '@/engine/sync';
 import {cyclog} from '@/shared/logging';
 import {DEFAULT_AGENT_NAME} from '../navigation/chatRow';
@@ -165,146 +173,642 @@ type ItemFrame = {
   // neighbour arriving below it flips this in place (setMessageLast) instead
   // of rebuilding the row. Absent on session-event frames.
   last?: boolean;
+  // The row-cache key this node was built under (see the detached-node LRU on
+  // RenderState). A row leaving the window is stashed under this key so the
+  // same row (same content, same group edges) re-entering re-attaches its
+  // decoded node instead of rebuilding it. Absent on date rows (cheap to make).
+  cacheKey?: string;
 };
+
+// One merged transcript entry: a message or a session event, at its ts. The
+// row model and the paint loop both walk lists of these.
+type RowItem = {m?: CycMessage; ev?: CycSessionEvent; ts: number};
+
+// One RENDER-VISIBLE row in the virtual list. The renderer collapses a run of
+// session events into a single row (a fold head, a tool run, or a lone pill),
+// paints each message as its own row, and opens each day with a date-chip row.
+// `itemFrom`/`itemTo` are the inclusive span of merged items the row covers; a
+// date row owns no items (itemTo < itemFrom) and simply marks the day boundary
+// that sits before item `itemFrom`.
+type RowKind = 'date' | 'msg' | 'event';
+type RowDesc = {
+  key: string;
+  kind: RowKind;
+  itemFrom: number;
+  itemTo: number;
+  estimate: number;
+};
+
+type MsgVirtualizer = Virtualizer<HTMLElement, HTMLElement>;
 
 type RenderState = {
   sessionId: string;
   frames: ItemFrame[];
-
-  from: number;
-
+  // The item slice [fromItem..toItem] the current DOM window covers. Reuse of
+  // the built rows only applies when fromItem is unchanged (a data change at or
+  // below the window top); a scroll that slides the window rebuilds it.
+  fromItem: number;
+  toItem: number;
   count: number;
-
-  // The item index at which each RENDER-VISIBLE row begins for the current
-  // items list (visibleRowStarts). The window budget counts these, not raw
-  // items, and extendMessageWindow moves the floor up by whole visible rows so
-  // one step past a huge collapsed run reveals real content, not more of the
-  // same chip.
-  starts: number[];
+  rows: RowDesc[];
+  virt: MsgVirtualizer | null;
+  cleanup: (() => void) | null;
+  opts: Record<string, unknown> | null;
+  // Re-run the last paint verbatim (a pure re-window: scroll, resize, or a late
+  // measurement moved the visible range, with no store change behind it).
+  lastPaint: (() => void) | null;
+  scheduled: boolean;
+  // True while a synchronous re-window is in flight, so the measurement
+  // notifications that paint itself triggers do not re-enter it.
+  painting: boolean;
+  // Set when a measurement notification was swallowed during a paint (a row
+  // measured away from its estimate). A standalone paint reads it after its
+  // measure loop to schedule a single async converge re-window.
+  measuredDirty: boolean;
+  // Set for one paint to force a from-scratch window rebuild, bypassing the
+  // incremental edge reconcile. The coverage net (below) sets it when an
+  // incremental re-window left the viewport uncovered (a rare window collapse
+  // under load); a full rebuild recomputes the window and recovers, so the
+  // blank never reaches the compositor.
+  forceFull: boolean;
+  // The item key at index 0 on the previous sync. When it changes the list grew
+  // (or trimmed) at the FRONT -- older history prepended -- so every index now
+  // maps to a different message. The virtualizer keys its measured sizes by key
+  // but rebuilds its offset cache only from `pendingMin` onward; a measurement
+  // left pending from the previous paint would keep stale offsets for the
+  // now-shifted rows, so the window lands on the wrong rows and meets an
+  // unmounted row (the row-shift/unmount-while-older-loads bug, and the failed
+  // jump to an old message). The virtualizer resets this itself only for
+  // anchorTo:"end"; this list anchors "start", so syncGeom forces the rebuild.
+  // A same-day prepend keeps the head DATE row at index 0 while shifting the
+  // messages below it, so the row count is tracked alongside the head key: any
+  // count change (prepend, append, trim) or head-key change (chat switch, front
+  // trim) rebuilds; a pure re-window (scroll, measurement settle) changes
+  // neither and keeps the fast incremental path.
+  lastHeadKey: string | number | null;
+  lastRowCount: number;
+  // Wired by the render hub: after a scroll-driven re-window, re-run the DOM
+  // sweeps (waveform hydration, sticky dates, play state) over the freshly
+  // mounted rows so a row scrolled into view hydrates like a store paint.
+  onWindowChange: (() => void) | null;
+  // A bounded LRU of DETACHED row nodes, keyed by row identity + content
+  // version (rowCacheKey). A scroll that slides the window drops the rows
+  // leaving it into here and re-attaches the rows entering it from here, so a
+  // fast fling re-attaches decoded bubbles instead of rebuilding them from
+  // scratch (markdown parse, syntax paint) on every scroll event -- the
+  // measured scroll jank. Bounded so the detached set cannot grow without
+  // limit; entries are the row node only, never in the document (they do not
+  // count against the in-document node budget).
+  nodeCache: Map<string, HTMLElement>;
 };
 
 const renderStates = new WeakMap<HTMLElement, RenderState>();
 
-// The window budget, measured in RENDER-VISIBLE rows: a message is one row, a
-// collapsed "N background updates" run is one row (one chip), a short tool run
-// is one row. Counting visible rows (not raw items) is what keeps a fresh open
-// of a status-heavy chat painting a screen of real bubbles instead of the
-// newest 300 ITEMS collapsing to a single chip (the field failure).
-const WINDOW_ITEMS = 300;
+// Rough per-row heights the virtualizer starts from; measureElement replaces
+// each with the real box as the row mounts. Only OFF-window rows keep an
+// estimate, so a wrong guess costs at most a little scroll drift, corrected as
+// the reader arrives.
+const EST_DATE = 40;
+// The message estimate sat well under the real rows the owner's chats draw (a
+// wrapped bubble measures ~1.3x this on the narrow layouts); the whole
+// estimated block above the fold then under-counted and every scroll correction
+// had a large delta to walk off. A closer guess shrinks that delta. The scroll
+// fixes below stay correct under ANY estimate error (they settle against the
+// measured boxes), so this is an accuracy nicety, not the fix.
+const EST_MSG = 96;
+const EST_EVENT = 30;
+// A small item-count overscan for the virtualizer's own range; the real depth
+// of the DOM window is the pixel band below, expanded onto this base.
+const MSG_OVERSCAN = 1;
 
-const WINDOW_CHUNK = 300;
+// Pixel overscan: the DOM window keeps rows painted this many viewport-heights
+// beyond the visible band on each side. A fast fling scrolls compositor-side
+// ahead of the main-thread re-window, so without a band deep enough to cover
+// the frames it races past, the viewport meets unmounted space and paints blank.
+// One viewport each side (a three-viewport painted region) covers a 15,000 px/s
+// fling while holding the node count well under budget.
+const OVERSCAN_VIEWPORTS = 2;
 
-// The item index at which each render-visible row begins, walking the merged
-// item list EXACTLY as the build loop groups it: a maximal same-day run of
-// >= COLLAPSE_MIN session events is one fold row; a shorter same-day tool run
-// (with an optional trailing interrupt) is one run row; any other lone event is
-// one pill row; each message is one row. The result's length is the total
-// visible-row count, and each entry is a legal window floor (a row boundary).
-export function visibleRowStarts(
-  items: {m?: CycMessage; ev?: CycSessionEvent; ts: number}[]
-): number[] {
-  // One Date per item (the run scans below compare these strings, never re-parse)
-  // so the whole-list pass stays O(n) even on a chat with thousands of events.
-  const day = new Array<string>(items.length);
-  for (let k = 0; k < items.length; k++) day[k] = new Date(items[k].ts).toDateString();
-  const starts: number[] = [];
+// The detached row-node LRU is bounded to this many nodes. A phone window plus
+// its overscan band holds a few dozen rows; a few hundred cached nodes cover
+// several viewports of fling in both directions without the detached set
+// growing without limit. On overflow the oldest entry is dropped (its node is
+// unreferenced and collected); a dropped row simply rebuilds if it returns.
+const ROW_CACHE_MAX = 400;
+
+// The cache key for a row: its stable identity (the render-row key: `m|<id>`,
+// `e|<evKey>|<kind>`) joined with a content version, so a cached node is only
+// re-attached when it would be byte-identical to a fresh build. The version
+// folds the row's signature(s) -- which already carry the unread-anchor mark
+// and every content/status field (itemSig) -- plus the group edges the node's
+// own styling bakes in (`first`/`last`) and the first-queued banner, none of
+// which live in the signature. A mismatch on any of these misses the cache and
+// rebuilds, so a reused node never wears a stale banner or group edge.
+function rowCacheKey(identity: string, version: string): string {
+  return identity + '\u0000' + version;
+}
+
+// Take a detached node for `key`, removing it so the cache only ever holds
+// nodes that are NOT in the document (no node is attached in two places).
+function takeCachedRow(st: RenderState, key: string): HTMLElement | undefined {
+  const node = st.nodeCache.get(key);
+  if (node) st.nodeCache.delete(key);
+  return node;
+}
+
+// Stash a detached node under `key`. Re-inserting moves it to the most-recent
+// end; on overflow the least-recent entry (the first key) is evicted.
+function cacheRow(st: RenderState, key: string, node: HTMLElement): void {
+  st.nodeCache.delete(key);
+  st.nodeCache.set(key, node);
+  while (st.nodeCache.size > ROW_CACHE_MAX) {
+    const oldest = st.nodeCache.keys().next().value;
+    if (oldest === undefined) break;
+    st.nodeCache.delete(oldest);
+  }
+}
+
+const raf: (cb: () => void) => void =
+  typeof requestAnimationFrame !== 'undefined'
+    ? (cb) => requestAnimationFrame(() => cb())
+    : (cb) => setTimeout(cb, 0);
+
+function evKey(ev: CycSessionEvent): string {
+  return (ev as {uuid?: string}).uuid ?? String(ev.ts);
+}
+
+// The full render-row model over the merged item list, grouped EXACTLY as the
+// paint loop groups: a maximal same-day run of >= COLLAPSE_MIN events folds to
+// one row; a shorter same-day tool run (+ optional trailing interrupt) is one
+// row; any other lone event is one pill row; each message is one row; each day
+// opens with a date row. `rowOfItem[g]` is the model-row index a merged item
+// belongs to (its first item for multi-item event rows); `dateRowOfDay` maps a
+// day string to its date-row index.
+function buildRowModel(items: RowItem[]): {
+  rows: RowDesc[];
+  rowOfItem: number[];
+  dateRowOfDay: Map<string, number>;
+} {
+  const n = items.length;
+  const day = new Array<string>(n);
+  for (let k = 0; k < n; k++) day[k] = new Date(items[k].ts).toDateString();
+  const rows: RowDesc[] = [];
+  const rowOfItem = new Array<number>(n);
+  const dateRowOfDay = new Map<string, number>();
   let i = 0;
-  while (i < items.length) {
-    starts.push(i);
+  let curDay = '';
+  while (i < n) {
+    if (day[i] !== curDay) {
+      curDay = day[i];
+      dateRowOfDay.set(curDay, rows.length);
+      rows.push({key: 'd|' + curDay, kind: 'date', itemFrom: i, itemTo: i - 1, estimate: EST_DATE});
+    }
     const it = items[i];
     if (it.ev) {
-      const key = day[i];
       let runEnd = i;
-      while (runEnd + 1 < items.length && items[runEnd + 1].ev && day[runEnd + 1] === key) runEnd++;
+      while (runEnd + 1 < n && items[runEnd + 1].ev && day[runEnd + 1] === curDay) runEnd++;
       if (runEnd - i + 1 >= COLLAPSE_MIN) {
+        const ri = rows.length;
+        rows.push({key: 'e|' + evKey(it.ev) + '|f', kind: 'event', itemFrom: i, itemTo: runEnd, estimate: EST_EVENT});
+        for (let k = i; k <= runEnd; k++) rowOfItem[k] = ri;
         i = runEnd + 1;
         continue;
       }
       if (it.ev.kind === 'tool') {
         let j = i;
-        while (j + 1 < items.length && items[j + 1].ev?.kind === 'tool' && day[j + 1] === key) j++;
-        if (j + 1 < items.length && items[j + 1].ev?.kind === 'interrupt' && day[j + 1] === key)
-          j++;
+        while (j + 1 < n && items[j + 1].ev?.kind === 'tool' && day[j + 1] === curDay) j++;
+        if (j + 1 < n && items[j + 1].ev?.kind === 'interrupt' && day[j + 1] === curDay) j++;
+        const ri = rows.length;
+        rows.push({key: 'e|' + evKey(it.ev) + '|r', kind: 'event', itemFrom: i, itemTo: j, estimate: EST_EVENT});
+        for (let k = i; k <= j; k++) rowOfItem[k] = ri;
         i = j + 1;
         continue;
       }
+      rowOfItem[i] = rows.length;
+      rows.push({key: 'e|' + evKey(it.ev) + '|p', kind: 'event', itemFrom: i, itemTo: i, estimate: EST_EVENT});
       i += 1;
       continue;
     }
+    rowOfItem[i] = rows.length;
+    rows.push({key: 'm|' + it.m!.id, kind: 'msg', itemFrom: i, itemTo: i, estimate: EST_MSG});
     i += 1;
   }
-  return starts;
+  return {rows, rowOfItem, dateRowOfDay};
 }
 
-// The window floor that leaves `target` visible rows painted (or 0 when the
-// whole list already fits the budget). Returns a row boundary from `starts`.
-function floorForVisibleRows(starts: number[], target: number): number {
-  if (starts.length <= target) return 0;
-  return starts[starts.length - target];
+// The scroll box the list lives in, or null when the list is painted detached
+// (unit tests, a not-yet-mounted surface). No scroll box means no viewport to
+// bound the DOM to, so the paint falls back to rendering every row.
+function scrollBoxOf(inner: HTMLElement): HTMLElement | null {
+  return inner.closest<HTMLElement>('.cyc-message-list-scroll');
 }
 
-// The largest row-start <= `idx` (a legal window floor at or before `idx`), or 0.
-// Used to snap a floor computed from a raw item index (the landing-anchor pull)
-// back onto a visible-row boundary so the build loop's grouping is clean.
-function rowStartAtOrBefore(starts: number[], idx: number): number {
-  if (idx <= 0 || !starts.length) return 0;
-  let lo = 0;
-  let hi = starts.length - 1;
-  let ans = 0;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (starts[mid] <= idx) {
-      ans = starts[mid];
-      lo = mid + 1;
-    } else hi = mid - 1;
+// The persistent virtualizer for a list node. It owns the geometry (viewport
+// rect, scroll offset, measured row heights) and the visible-range math; the
+// paint below reads getVirtualItems()/getTotalSize() from it. It observes the
+// scroll box for scroll/resize and re-measures mounted rows, and on any range
+// change re-runs the last paint (a pure re-window) so scrolling reveals rows.
+function ensureVirt(inner: HTMLElement, st: RenderState): MsgVirtualizer {
+  if (st.virt) return st.virt;
+  const opts: Record<string, unknown> = {
+    count: 0,
+    getScrollElement: () => scrollBoxOf(inner),
+    estimateSize: (i: number) => st.rows[i]?.estimate ?? EST_MSG,
+    getItemKey: (i: number) => st.rows[i]?.key ?? i,
+    overscan: MSG_OVERSCAN,
+    indexAttribute: 'data-index',
+    observeElementRect,
+    observeElementOffset,
+    // Keep the estimate for a row that measures as zero height (a not-yet
+    // laid-out or display:none row, and every row under jsdom); caching 0 would
+    // collapse the list's offsets and defeat the window bound.
+    measureElement: (el: HTMLElement, entry: ResizeObserverEntry | undefined, instance: MsgVirtualizer) => {
+      const size = measureElement(el, entry, instance);
+      if (size > 0) return size;
+      const idx = instance.indexFromElement(el);
+      return (idx >= 0 && st.rows[idx]?.estimate) || EST_MSG;
+    },
+    scrollToFn: (offset: number, o: {adjustments?: number; behavior?: ScrollBehavior}, instance: MsgVirtualizer) => {
+      elementScroll(offset, o, instance);
+      const box = scrollBoxOf(inner);
+      if (box) markMachineTop(box);
+    },
+    // sync is the virtualizer's isScrolling flag: true when the change came from
+    // an active scroll, false for a measurement settle or the scroll-end tick.
+    onChange: (_v: MsgVirtualizer, sync: boolean) => scheduleRepaint(inner, st, sync)
+  };
+  const v = new Virtualizer(opts as never) as unknown as MsgVirtualizer;
+  st.opts = opts;
+  st.cleanup = v._didMount();
+  v._willUpdate();
+  st.virt = v;
+  // The virtualizer's own on-resize scroll correction writes the scroll box
+  // mid-measure, BEFORE this paint's spacer heights catch up, so a row above
+  // the fold measuring taller than its estimate shoved the visible content for
+  // one frame (the row-shift-while-older-loads bug). Turn that off and hold the
+  // anchor ourselves in anchoredRewindow, where the scrollTop move and the
+  // fresh spacer heights land together in one synchronous re-window.
+  (v as unknown as {shouldAdjustScrollPositionOnItemSizeChange?: () => boolean})
+    .shouldAdjustScrollPositionOnItemSizeChange = () => false;
+  return v;
+}
+
+// Re-window after a range change. A scroll-driven change (sync) re-windows
+// SYNCHRONOUSLY inside the scroll event, so the DOM window tracks the native
+// scroll position in the same frame the browser is about to paint; deferring it
+// to rAF let a fast fling paint one or more blank frames before the window
+// caught up (measured: 9 blank frames at 15,000 px/s on the phone even with a
+// two-viewport overscan, versus 0 when it re-windows in the event). Everything
+// else (a measurement settle, the scroll-end tick) re-windows on rAF as before.
+//
+// Re-windows on every scroll event, synchronously, so the DOM window tracks the
+// native scroll position in the frame the browser is about to paint even under
+// load. A fling scrolls compositor-side ahead of the main thread; deferring or
+// throttling the re-window lets it outrun the window and paint blank, so it
+// runs per event. Each re-window is cheap now (the reconcile keeps the overlap
+// and only touches the edge rows), so running it per event no longer costs the
+// full-window rebuild that made the branch janky. The painting guard swallows
+// the measurement notifications a paint (its own re-window, or a store paint's)
+// raises so it cannot re-enter; the swallowed notification is remembered
+// (measuredDirty) so the paint can converge it once, asynchronously.
+function scheduleRepaint(inner: HTMLElement, st: RenderState, sync = false): void {
+  // A notification raised while a paint is in flight: never re-enter (a nested
+  // synchronous re-window would run against a half-updated window and undo the
+  // caller's anchor hold -- the row-shift-while-older-loads bug when a store
+  // prepend paints mid-scroll). Record that a size changed so the paint's
+  // measure loop can schedule a single async converge, then bail.
+  if (st.painting) {
+    st.measuredDirty = true;
+    return;
   }
-  return ans;
-}
-
-// The number of visible rows painted by a window whose floor is item index
-// `from` (rows at or after `from`).
-function visibleRowsFrom(starts: number[], from: number): number {
-  if (from <= 0) return starts.length;
-  let lo = 0;
-  let hi = starts.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (starts[mid] < from) lo = mid + 1;
-    else hi = mid;
-  }
-  return starts.length - lo;
-}
-
-export function extendMessageWindow(inner: HTMLElement, by = WINDOW_CHUNK): boolean {
-  const st = renderStates.get(inner);
-  if (!st || st.from <= 0) return false;
-  const starts = st.starts;
-  if (starts && starts.length) {
-    // Move the floor up by `by` VISIBLE rows, not raw items: above a huge
-    // collapsed run one chunk of items could all sit inside a single fold, so
-    // an item-step would reveal nothing. Find the floor's current row, step
-    // back `by` rows, and land on that row's start.
-    let curRow = 0;
-    let lo = 0;
-    let hi = starts.length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (starts[mid] <= st.from) {
-        curRow = mid;
-        lo = mid + 1;
-      } else hi = mid - 1;
+  if (sync) {
+    if (st.scheduled) return;
+    st.painting = true;
+    try {
+      anchoredRewindow(inner, st);
+      recoverIfUncovered(inner, st);
+      st.onWindowChange?.();
+    } finally {
+      st.painting = false;
     }
-    const targetRow = Math.max(0, curRow - Math.max(1, by));
-    st.from = starts[targetRow] ?? 0;
-  } else {
-    st.from = Math.max(0, st.from - Math.max(1, by));
+    return;
   }
-  st.frames = [];
-  return true;
+  if (st.scheduled) return;
+  st.scheduled = true;
+  raf(() => {
+    st.scheduled = false;
+    anchoredRewindow(inner, st);
+    recoverIfUncovered(inner, st);
+    st.onWindowChange?.();
+  });
 }
 
-export function messageWindowFrom(inner: HTMLElement): number {
-  return renderStates.get(inner)?.from ?? 0;
+// Safety net for the incremental reconcile. A window can rarely collapse under
+// load (a stale row measurement shrinks the virtualizer's visible range, and
+// the incremental path builds on the shrunken previous frames instead of
+// recovering), leaving the viewport past the mounted rows -- a blank frame.
+// Detect it cheaply from the spacer geometry (no per-row layout) and, when the
+// viewport is not fully inside the mounted band, force ONE from-scratch rebuild
+// which recomputes the window and covers the viewport. A full rebuild always
+// covers, so this runs at most once and the blank never reaches the compositor.
+function recoverIfUncovered(inner: HTMLElement, st: RenderState): void {
+  const box = scrollBoxOf(inner);
+  if (!box || !box.clientHeight || !st.lastPaint) return;
+  const padTop = parseFloat(inner.style.paddingTop) || 0;
+  const padBottom = parseFloat(inner.style.paddingBottom) || 0;
+  const contentBottom = box.scrollHeight - padBottom;
+  const EPS = 4;
+  const uncovered =
+    box.scrollTop < padTop - EPS || box.scrollTop + box.clientHeight > contentBottom + EPS;
+  if (!uncovered) return;
+  st.forceFull = true;
+  anchoredRewindow(inner, st);
+}
+
+// The distance to the end (px) at or under which the list counts as sitting at
+// the bottom, so a re-window follows the end rather than holding a top anchor.
+const BOTTOM_PIN_PX = 2;
+
+// A pure re-window (a scroll, or a late measurement) recomputes the spacer
+// heights from freshly measured rows. When rows above the fold measure away
+// from their estimate that changes their offset, and without this the visible
+// content would jump by that delta (the row-shift-while-older-loads bug, which
+// lands on the ASYNC re-window after the bracket has already returned).
+//
+// Sitting at the bottom is the one case where holding a TOP anchor is wrong:
+// rows above the fold growing would drag the view up off the end, so there we
+// follow the (possibly grown) end instead -- which is also what lets go-to
+// bottom settle at distance <= 1 as its tail measures. Otherwise hold the
+// topmost row meeting the viewport top: note its on-screen offset before the
+// re-window, then after re-seat the box so the SAME row keeps that offset. The
+// reference is the live scrollTop, so a reader's own scroll (already on the
+// box) is preserved, not undone -- scrollTop only moves when a measurement
+// shifted an offset. Under jsdom every rect is zero, so no anchor is found and
+// this is a plain re-window (existing window tests are unaffected).
+function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
+  const box = scrollBoxOf(inner);
+  if (!box || !box.clientHeight || !st.lastPaint) {
+    st.lastPaint?.();
+    return;
+  }
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_PIN_PX;
+  const boxTop = box.getBoundingClientRect().top;
+  let anchorIndex: string | null = null;
+  let anchorByDivider = false;
+  let screenOffset = 0;
+  if (!atBottom) {
+    // While an unread landing holds the divider on screen, anchor on the DIVIDER
+    // row itself rather than the topmost visible row. Rows ABOVE the divider are
+    // only estimated on a fresh open (EST_MSG is far off a wrapped bubble), so
+    // when one mounts and measures on a later re-window the whole band above the
+    // fold resizes; holding the topmost row then lets the divider (below it)
+    // drift off its seat and out of view. The divider's own rows below it are
+    // already measured (the open pinned the end first), so holding the divider
+    // keeps its seat regardless of what the history above measures to. It is
+    // re-found after the paint by its MARKER, not its data-index: a message
+    // arriving or older history loading reindexes the model, so the index the
+    // divider carried now names a different row (measured: the divider slid out
+    // of view while a stale index was held in its place).
+    const divider = inner.querySelector<HTMLElement>('[data-cyc-unread]');
+    if (divider) {
+      const dr = divider.getBoundingClientRect();
+      if (dr.bottom > boxTop && dr.top < boxTop + box.clientHeight) {
+        anchorByDivider = true;
+        screenOffset = dr.top - boxTop;
+      }
+    }
+    if (!anchorByDivider) {
+      for (const row of inner.querySelectorAll<HTMLElement>('[data-index]')) {
+        const r = row.getBoundingClientRect();
+        if (r.bottom > boxTop) {
+          anchorIndex = row.dataset.index ?? null;
+          screenOffset = r.top - boxTop;
+          break;
+        }
+      }
+    }
+  }
+  st.lastPaint();
+  if (atBottom) {
+    const end = box.scrollHeight - box.clientHeight;
+    if (end - box.scrollTop > 0.5) {
+      box.scrollTop = end;
+      markMachineTop(box);
+    }
+    return;
+  }
+  if (!anchorByDivider && anchorIndex === null) return;
+  const again = anchorByDivider
+    ? inner.querySelector<HTMLElement>('[data-cyc-unread]')
+    : inner.querySelector<HTMLElement>(`[data-index="${anchorIndex}"]`);
+  if (!again) return;
+  const now = again.getBoundingClientRect().top - box.getBoundingClientRect().top;
+  const delta = now - screenOffset;
+  if (Math.abs(delta) > 0.5) {
+    box.scrollTop += delta;
+    markMachineTop(box);
+  }
+}
+
+// The visible render-row range for the current geometry, plus the top/bottom
+// spacer heights that stand in for the rows outside it. Returns null when the
+// list has no bounded viewport, telling the paint to render every row.
+// The scroll box drives the geometry directly: each paint reads the live
+// scrollTop and viewport height into the virtualizer, so the window matches the
+// native scroll position synchronously (an app scrollTop write, jsdom with no
+// scroll events) instead of waiting on the async scroll observer. The observer
+// still fires onChange so a reader's own scroll re-windows.
+function syncGeom(inner: HTMLElement, st: RenderState, box: HTMLElement): MsgVirtualizer {
+  const v = ensureVirt(inner, st);
+  st.opts!.count = st.rows.length;
+  v.setOptions(st.opts as never);
+  // A row-set change (a history prepend, an append, a trim, a chat switch) can
+  // shift indices at the front: force the virtualizer to rebuild its offset
+  // cache from index 0 (by key) so a measurement left pending from the previous
+  // paint cannot leave stale offsets for the shifted rows -- the wrong window
+  // that meets an unmounted row (the row-shift/unmount-while-older-loads bug and
+  // the failed jump to an old message). Bumping the size-cache version re-runs
+  // the memoised measurement build. A pure re-window (a scroll, a measurement
+  // settle) changes neither the count nor the head, so this is skipped and the
+  // fast incremental measurement path stands.
+  const headKey = st.rows.length ? st.rows[0].key : null;
+  if (headKey !== st.lastHeadKey || st.rows.length !== st.lastRowCount) {
+    const vi = v as unknown as {pendingMin: number | null; itemSizeCacheVersion: number};
+    vi.pendingMin = 0;
+    vi.itemSizeCacheVersion++;
+    st.lastHeadKey = headKey;
+    st.lastRowCount = st.rows.length;
+  }
+  v._willUpdate();
+  v.scrollRect = {width: box.clientWidth, height: box.clientHeight};
+  v.scrollOffset = box.scrollTop;
+  return v;
+}
+
+function computeWindow(
+  inner: HTMLElement,
+  st: RenderState
+): {r0: number; r1: number; padTop: number; padBottom: number} | null {
+  const box = scrollBoxOf(inner);
+  if (!box || !st.rows.length) return null;
+  // Prime the virtualizer (its row count, geometry, and scroll/resize
+  // observers) even when the scroll box has no height yet -- an open whose first
+  // paint ran before the surface was laid out. Without this the render-all
+  // branch below returned BEFORE the virtualizer was ever created, so no resize
+  // observer was watching the box; once the box gained its height nothing fired
+  // a re-window and the list stayed rendered whole forever (the unread open that
+  // mounted every row and never re-virtualized, even after a scroll -- with no
+  // observer there was no onChange). syncGeom sets the count so calculateRange
+  // yields a real range, so the ResizeObserver's first delivery once the box has
+  // a true height changes that range and fires onChange, which re-windows onto
+  // the viewport. A no-height paint still renders whole (correct: no viewport to
+  // bound to), it just recovers the instant the height lands.
+  const v = syncGeom(inner, st, box);
+  if (!box.clientHeight) return null;
+  const vitems = v.getVirtualItems();
+  if (!vitems.length) return null;
+  const total = v.getTotalSize();
+  // Expand the virtualizer's tight range outward to cover the pixel overscan
+  // band on each side, reading the full measurement offsets (measured where a
+  // row has mounted, estimated otherwise). The scrollTop is live, so the band
+  // tracks the native scroll position of THIS paint.
+  const meas = v.measurementsCache;
+  const last = meas.length - 1;
+  const band = box.clientHeight * OVERSCAN_VIEWPORTS;
+  const topLimit = box.scrollTop - band;
+  const botLimit = box.scrollTop + box.clientHeight + band;
+  let r0 = vitems[0].index;
+  let r1 = vitems[vitems.length - 1].index;
+  while (r0 > 0 && meas[r0 - 1] && meas[r0 - 1].end > topLimit) r0--;
+  while (r1 < last && meas[r1 + 1] && meas[r1 + 1].start < botLimit) r1++;
+  // Guarantee the mounted band actually spans the viewport, by the rows' own
+  // measured extents. The band expansion above walks by the NEXT row's start,
+  // which leaves the viewport uncovered when the measurement offsets are
+  // momentarily non-contiguous -- exactly what a history prepend leaves behind
+  // for a frame: the item indices shift, the virtualizer's range lands short of
+  // the re-seated scrollTop, and the window stops before the fold. The reader
+  // then meets an unmounted row at the top that never recovered (the
+  // shift/unmount-while-older-loads bug), because recoverIfUncovered only
+  // re-runs this same computation. Extending until the row extents cover
+  // [scrollTop, scrollTop + clientHeight] closes that gap; on a contiguous
+  // window (the normal case) both loops are no-ops.
+  const viewTop = box.scrollTop;
+  const viewBottom = box.scrollTop + box.clientHeight;
+  while (r0 > 0 && meas[r0] && meas[r0].start > viewTop) r0--;
+  while (r1 < last && meas[r1] && meas[r1].end < viewBottom) r1++;
+  const padTop = meas[r0] ? meas[r0].start : vitems[0].start;
+  const padBottom = meas[r1] ? Math.max(0, total - meas[r1].end) : 0;
+  return {r0, r1, padTop, padBottom};
+}
+
+// Recompute the DOM window at the list's CURRENT scroll offset, synchronously.
+// The render bracket (chatSurface.bracketMessageRender) preserves the reader's
+// position across a store paint by re-seating scrollTop AFTER the paint. But the
+// paint computed its window (and the top spacer) at the pre-re-seat scrollTop,
+// so for one frame the content sits at the new scrollTop against the old spacer
+// -- the rows shift by the re-seat delta, or the viewport meets an unmounted
+// row, until the next re-window lands: the shift/unmount-while-older-loads bug
+// on a prepend, which moves scrollTop by the added height. This runs the same
+// anchored re-window the async scroll observer would, but IN THIS FRAME, so the
+// spacer matches the re-seated offset. It runs the same anchored re-window the
+// async scroll observer would (anchoredRewindow), IN THIS FRAME: the window is
+// recomputed at the current scrollTop and the topmost visible row keeps its
+// on-screen position across the spacer change (the recompute would otherwise
+// shift every row by the top-spacer delta), and the coverage net mounts the
+// viewport if the paint's window fell short of it (the stuck-unmount case).
+// Under jsdom (no scroll box) anchoredRewindow is a plain re-window, so window
+// tests are unaffected.
+export function rewindowMessages(inner: HTMLElement): void {
+  const st = renderStates.get(inner);
+  if (!st) return;
+  anchoredRewindow(inner, st);
+  recoverIfUncovered(inner, st);
+}
+
+// Re-window at the list's CURRENT scroll offset WITHOUT holding a prior anchor:
+// a plain repaint that mounts whatever rows the (already moved) scrollTop now
+// covers, then the coverage net if the window fell short. Unlike
+// rewindowMessages, this does NOT re-seat scrollTop to hold the previously
+// mounted rows -- that anchor hold UNDOES a deliberate programmatic jump when
+// the destination rows are not mounted yet, so the unread landing jumping to an
+// off-window divider snapped straight back to the bottom (anchoredRewindow held
+// the still-mounted bottom rows and re-seated onto them). The landing moves the
+// scroll itself and then calls this to paint the destination in place.
+export function repaintMessagesAtScroll(inner: HTMLElement): void {
+  const st = renderStates.get(inner);
+  if (!st) return;
+  st.lastPaint?.();
+}
+
+// Register the after-window-change sweep hook (see RenderState.onWindowChange).
+export function setMessageWindowHook(inner: HTMLElement, cb: () => void): void {
+  const st = renderStates.get(inner);
+  if (st) st.onWindowChange = cb;
+}
+
+// A scan-key fragment that changes whenever the visible window moves, so the
+// render hub re-runs its DOM sweeps for the rows a scroll just revealed.
+export function messageVisibleRangeKey(inner: HTMLElement): string {
+  const st = renderStates.get(inner);
+  if (!st) return '0:0';
+  return st.fromItem + ':' + st.toItem;
+}
+
+// The model-row index whose message carries `id`, or -1. Used to scroll to a
+// row that may not be mounted yet (reply/search/audio jump, unread landing).
+function rowIndexOfMessageId(st: RenderState, id: string): number {
+  const key = 'm|' + id;
+  for (let i = 0; i < st.rows.length; i++) if (st.rows[i].key === key) return i;
+  return -1;
+}
+
+// Bring the message with `id` into view even when its row is outside the
+// current window: scroll the box to the row's computed offset, which fires the
+// re-window that mounts it. Returns false when the id is unknown. The caller
+// re-queries the DOM (after the synchronous re-window) for the mounted node.
+export function scrollMessageIntoView(
+  inner: HTMLElement,
+  id: string,
+  align: 'start' | 'center' | 'end' = 'center'
+): boolean {
+  const st = renderStates.get(inner);
+  if (!st) return false;
+  const idx = rowIndexOfMessageId(st, id);
+  if (idx < 0) return false;
+  const box = scrollBoxOf(inner);
+  if (!box || !box.clientHeight) return true; // render-all: the row is already mounted
+  // getOffsetForIndex reads the measurement cache: a row still OUTSIDE the
+  // window carries only its per-row ESTIMATE (EST_MSG), but a wrapped bubble on
+  // the narrow layout measures well over that, so a single estimate-based jump
+  // to a FAR row lands one window short of it and never mounts it -- the unread
+  // landing that came to rest mid-history with no divider in the DOM. Each pass
+  // scrolls to the current best offset and re-windows, which MEASURES the rows
+  // it just mounted and feeds their real heights back; the next offset is
+  // therefore closer, and the window walks onto the target in a few passes.
+  // Iterate until the row is mounted and the offset it computes to has stopped
+  // moving, bounded so a pathological geometry cannot spin. Under jsdom every
+  // row measures to its estimate, so the offset is stable from pass 0 and this
+  // settles in two passes with the same landing the single jump gave.
+  const g = globalThis as unknown as {CSS?: {escape?: (s: string) => string}};
+  const escId = g.CSS?.escape ? g.CSS.escape(id) : id.replace(/["\\]/g, '\\$&');
+  const sel = `.cyc-message[data-mid="${escId}"]`;
+  let prevOff = Number.NaN;
+  for (let pass = 0; pass < 12; pass++) {
+    const v = syncGeom(inner, st, box);
+    v.getVirtualItems(); // refresh the measurements cache getOffsetForIndex reads
+    const off = v.getOffsetForIndex(idx, align);
+    if (!off) break;
+    const target = off[0];
+    box.scrollTop = target;
+    markMachineTop(box);
+    // Re-window at the new offset now (computeWindow reads box.scrollTop), so the
+    // caller can find the freshly mounted row synchronously, and this pass's
+    // fresh measurements sharpen the next offset.
+    st.lastPaint?.();
+    if (inner.querySelector(sel) && Math.abs(target - prevOff) <= 1) break;
+    prevOff = target;
+  }
+  return true;
 }
 
 const EAGER_TAIL = 12;
@@ -349,10 +853,20 @@ export function messageDomEpoch(): number {
   return domEpoch;
 }
 
+/** The number of detached row nodes currently held in a list's re-attach cache.
+ *  Test-only observability for the cache bound; unused by the app. */
+export function messageRowCacheSize(inner: HTMLElement): number {
+  return renderStates.get(inner)?.nodeCache.size ?? 0;
+}
+
 export function clearMessages(inner: HTMLElement) {
   domEpoch++;
+  const st = renderStates.get(inner);
+  st?.cleanup?.();
   renderStates.delete(inner);
   inner.textContent = '';
+  inner.style.removeProperty('padding-top');
+  inner.style.removeProperty('padding-bottom');
 }
 
 export function renderMessages(
@@ -469,8 +983,20 @@ function paintMessages(
 
   if (!items.length) {
     domEpoch++;
-    renderStates.delete(inner);
+    const st0 = renderStates.get(inner);
+    if (st0) {
+      st0.frames = [];
+      st0.fromItem = 0;
+      st0.toItem = -1;
+      st0.count = 0;
+      st0.rows = [];
+      st0.lastPaint = null;
+    }
     inner.textContent = '';
+    if (inner.style.paddingTop || inner.style.paddingBottom) {
+      inner.style.removeProperty('padding-top');
+      inner.style.removeProperty('padding-bottom');
+    }
 
     if ((s as {historyPending?: boolean}).historyPending) return;
     const wrap = h('div', 'cyc-vacant-chat flex flex-auto items-center justify-center');
@@ -496,55 +1022,529 @@ function paintMessages(
     return;
   }
 
-  const prev = renderStates.get(inner);
-  const sameChat = !!(prev && prev.sessionId === s.id);
-  const starts = visibleRowStarts(items);
-  const budgetFloor = floorForVisibleRows(starts, WINDOW_ITEMS);
-  let from = sameChat ? Math.min(prev!.from, Math.max(0, items.length - 1)) : budgetFloor;
-
-  // A sameChat repaint whose reader sits at the bottom and whose window has
-  // grown well past the budget resnaps to the newest WINDOW_ITEMS VISIBLE rows,
-  // bounding the painted DOM. Measured in visible rows (a collapsed run is one),
-  // never raw items, so the resnap keeps a screen of real content, not one chip.
-  // The near-bottom guard leaves a reader who scrolled up untouched.
-  if (sameChat && prev!.frames.length && from < budgetFloor) {
-    const wayOver = visibleRowsFrom(starts, from) > WINDOW_ITEMS * 2;
-    const grew = items.length - prev!.count >= WINDOW_CHUNK;
-    if (wayOver || grew) {
-      const sc = inner.closest('.cyc-message-list-scroll');
-      if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 200) {
-        from = budgetFloor;
-      }
-    }
+  // Persistent per-list render state, holding the virtualizer across paints and
+  // chat switches. A new list, or a switch to another chat, resets the built
+  // rows but keeps the virtualizer bound to the same scroll box.
+  let st = renderStates.get(inner);
+  const sameChat = !!(st && st.sessionId === s.id);
+  if (!st) {
+    st = {
+      sessionId: s.id,
+      frames: [],
+      fromItem: 0,
+      toItem: -1,
+      count: 0,
+      rows: [],
+      virt: null,
+      cleanup: null,
+      opts: null,
+      lastPaint: null,
+      scheduled: false,
+      painting: false,
+      measuredDirty: false,
+      forceFull: false,
+      lastHeadKey: null,
+      lastRowCount: -1,
+      onWindowChange: null,
+      nodeCache: new Map()
+    };
+    renderStates.set(inner, st);
+  } else if (!sameChat) {
+    st.sessionId = s.id;
+    st.frames = [];
+    st.fromItem = 0;
+    st.toItem = -1;
+    st.count = 0;
+    // The cached nodes belong to the chat we just left; drop them so a switch
+    // never re-attaches another chat's bubble.
+    st.nodeCache.clear();
   }
+  const prevFrames = sameChat ? st.frames : [];
+  const prevFromItem = st.fromItem;
 
-  // LANDING ANCHOR (fix-msgwindow, shape 3). A firstUnreadId that falls outside
-  // the current window EXTENDS the window to include it, on EVERY paint, not
-  // only a fresh open: a tab-return repaint (or the landing's own second paint)
-  // is a sameChat repaint, and the reader-at-bottom resnap above can push the
-  // floor past an old anchor. Runs AFTER the resnap so the resnap still bounds
-  // DOM, then this guarantees the anchor is landable (its divider is painted)
-  // instead of the landing skipping to the window edge on weeks-old rows. Pull
-  // back to ~3 messages before the anchor for lead-in, then snap to a row start.
-  if (firstUnreadId !== undefined && from > 0) {
-    const u = items.findIndex((it) => it.m?.id === firstUnreadId);
-    if (u >= 0 && u < from) {
-      const WANT = 3;
-      const LOOK_BACK = 60;
-      let seen = 0;
-      let i = u;
-      while (i > 0 && seen < WANT && u - i < LOOK_BACK) {
-        i--;
-        if (items[i]?.m) seen++;
-      }
-      from = rowStartAtOrBefore(starts, Math.max(0, i));
+  // The full render-row model, then the visible slice. The virtualizer bounds
+  // the DOM to the viewport (+ overscan); with no scroll box the whole list
+  // renders (a detached list in a unit test, a short chat). winItems is the
+  // merged-item slice the visible rows cover; padTop/padBottom stand in for the
+  // rows outside it so native scroll and the box's scrollHeight stay honest.
+  const model = buildRowModel(items);
+  const rows = model.rows;
+  const rowOfItem = model.rowOfItem;
+  const dateRowOfDay = model.dateRowOfDay;
+  st.rows = rows;
+  const win = computeWindow(inner, st);
+  const windowed = !!win;
+  let fromItem: number;
+  let toItem: number;
+  let padTop = 0;
+  let padBottom = 0;
+  let startsWithDate = true;
+  if (win) {
+    let f = Infinity;
+    let t = -1;
+    for (let r = win.r0; r <= win.r1; r++) {
+      if (rows[r].itemFrom < f) f = rows[r].itemFrom;
+      if (rows[r].itemTo > t) t = rows[r].itemTo;
     }
+    if (t < f) t = f;
+    fromItem = f;
+    toItem = t;
+    padTop = win.padTop;
+    padBottom = win.padBottom;
+    startsWithDate = rows[win.r0].kind === 'date';
+  } else {
+    fromItem = 0;
+    toItem = items.length - 1;
   }
-  const winItems = from > 0 ? items.slice(from) : items;
+  const winItems = items.slice(fromItem, toItem + 1);
 
   const sigs = winItems.map((it) => itemSig(it.m, it.ev, it.ts, firstUnreadId));
 
-  const reusable = sameChat && prev!.from === from ? prev!.frames : null;
+  // The one row this paint's "first queued" banner belongs on: the first
+  // message that opens a queued run sitting ahead of the agent (past the last
+  // claude row). Both the reuse sweep and the row builders key off this single
+  // id so at most one queued head is ever stamped.
+  let firstQueuedMid: string | undefined;
+  {
+    let pq = fromItem > 0 ? !!items[fromItem - 1].m?.queued : false;
+    for (const it of winItems) {
+      const m = it.m;
+      if (!m) continue;
+      if (m.queued && !pq && it.mi! > lastClaudeMi) {
+        firstQueuedMid = m.id;
+        break;
+      }
+      pq = !!m.queued;
+    }
+  }
+
+  // The single-banner bookkeeping shared by the reuse sweep and the row
+  // builders: at most one unread divider and one queued head across the window.
+  type StampState = {unread: boolean; queued: boolean};
+
+  // Build (or re-attach from cache) one SESSION-EVENT row starting at window
+  // index `from`, settling its run span first so the cache key covers the whole
+  // run. Returns the node, the last window index it consumed, and the frame
+  // metadata; the caller owns where it lands in the group/section tree.
+  function makeEvNode(from: number, key: string): {
+    node: HTMLElement;
+    endIdx: number;
+    isFold: boolean;
+    cacheKey: string;
+    sigsSlice: string[];
+  } {
+    let i = from;
+    let isFold = false;
+    let build: () => HTMLElement;
+    let runEnd = i;
+    while (
+      runEnd + 1 < winItems.length &&
+      winItems[runEnd + 1].ev &&
+      new Date(winItems[runEnd + 1].ts).toDateString() === key
+    )
+      runEnd++;
+    if (runEnd - i + 1 >= COLLAPSE_MIN) {
+      const events: CycSessionEvent[] = [];
+      for (let k = i; k <= runEnd; k++) events.push(winItems[k].ev!);
+      isFold = true;
+      i = runEnd;
+      build = () => sessionEventFoldMessages(events);
+    } else if (winItems[from].ev!.kind === 'tool') {
+      const run: CycSessionEvent[] = [winItems[from].ev!];
+      while (
+        i + 1 < winItems.length &&
+        winItems[i + 1].ev?.kind === 'tool' &&
+        new Date(winItems[i + 1].ts).toDateString() === key
+      ) {
+        run.push(winItems[++i].ev!);
+      }
+      let interrupt: CycSessionEvent | undefined;
+      if (
+        i + 1 < winItems.length &&
+        winItems[i + 1].ev?.kind === 'interrupt' &&
+        new Date(winItems[i + 1].ts).toDateString() === key
+      ) {
+        interrupt = winItems[++i].ev!;
+      }
+      build = () =>
+        run.length > 1
+          ? sessionEventRunMessages(run, interrupt)
+          : sessionEventMessage(run[0], interrupt);
+    } else {
+      const only = winItems[from].ev!;
+      build = () => sessionEventMessage(only);
+    }
+    const ck = rowCacheKey(
+      rows[rowOfItem[fromItem + from]].key,
+      sigs.slice(from, i + 1).join('\u0001')
+    );
+    const node = takeCachedRow(st, ck) ?? build();
+    node.dataset.index = String(rowOfItem[fromItem + from]);
+    return {node, endIdx: i, isFold, cacheKey: ck, sigsSlice: sigs.slice(from, i + 1)};
+  }
+
+  // Build (or re-attach from cache) one MESSAGE row. The version key folds the
+  // signature (content, status, unread-anchor) with the group edges the node's
+  // styling bakes in (`first`/`last`) and the queued-head mark, so a re-attached
+  // bubble is byte-identical to a fresh one. A cache hit already carries its
+  // images, send-progress line, and banners, so only the single-banner
+  // bookkeeping is updated; a miss carries images, paints send state, and
+  // stamps the anchors.
+  function makeMsgNode(
+    from: number,
+    m: CycMessage,
+    first: boolean,
+    last: boolean,
+    dropped: Map<string, HTMLElement>,
+    ss: StampState
+  ): {node: HTMLElement; cacheKey: string} {
+    const hasAudio = !!(m as CycMessage & {msgId?: string}).msgId;
+    const attached = uploadsOf(m);
+    const msgCk = rowCacheKey(
+      'm|' + m.id,
+      sigs[from] +
+        '|' +
+        (first ? 'F' : '') +
+        (last ? 'L' : '') +
+        (m.id === firstQueuedMid ? 'Q' : '')
+    );
+    const cached = takeCachedRow(st, msgCk);
+    const messageNode =
+      cached ??
+      (attached.length > 1 || (attached.length === 1 && isAudioUpload(attached[0]))
+        ? attachmentMessage(m, first, last, (u) => uploadUrlOf?.(m, u) ?? '', onOpenUpload)
+        : m.upload
+          ? uploadMessage(m, first, last, uploadSrc?.(m) ?? '', onOpenUpload)
+          : m.file?.fileKind === 'image'
+            ? photoMessage(m, first, last, fileSrc?.(m) ?? '', m.file.name, onOpenFile, {
+                width: m.file.width,
+                height: m.file.height
+              })
+            : m.file?.inline && m.file.content !== undefined
+              ? snippetMessage(m, first, last, onOpenFile)
+              : m.file?.fileKind === 'binary'
+                ? downloadMessage(m, first, last, onOpenFile)
+                : m.file
+                  ? fileMessage(m, first, last, onOpenFile)
+                  : m.kind === 'voice' || (m.role === 'claude' && hasAudio)
+                    ? audioMessage(
+                        m,
+                        first,
+                        last,
+                        onPlay,
+                        onSeek,
+                        winItems.length - from <= EAGER_TAIL
+                      )
+                    : textMessage(m, first, last, onPlay));
+    messageNode.dataset.mid = m.id;
+    messageNode.dataset.index = String(rowOfItem[fromItem + from]);
+    messageNode.dataset.ts = String(m.ts);
+    if (cached) {
+      if (messageNode.dataset.cycUnread !== undefined) ss.unread = true;
+      if (messageNode.classList.contains('cyc-first-queued')) ss.queued = true;
+    } else {
+      carryStillImages(dropped.get(messageNode.dataset.mid), messageNode);
+      paintAttachmentSend(messageNode, m, attached.length > 0 || !!m.upload);
+      if (m.id === firstUnreadId && !ss.unread) {
+        markUnreadLanding(messageNode);
+        messageNode.classList.add('max-tab:!max-w-none');
+        messageNode.prepend(unreadBannerEl());
+        ss.unread = true;
+      }
+      if (m.queued && m.id === firstQueuedMid && !ss.queued) {
+        messageNode.classList.add('cyc-first-queued');
+        messageNode.prepend(
+          queuedBannerEl(
+            'Queued for ' + (s.agentName ?? DEFAULT_AGENT_NAME) + (s.model ? ' \u00b7 ' + s.model : '')
+          )
+        );
+        ss.queued = true;
+      }
+    }
+    return {node: messageNode, cacheKey: msgCk};
+  }
+
+  // Land the freshly reconciled window: spacer heights, the persistent state,
+  // the re-window closure, and a settle-measure of the mounted rows. Shared by
+  // the append path and the scroll-up prepend path.
+  function commitWindow(finalFrames: ItemFrame[]): void {
+    if (windowed) {
+      inner.style.paddingTop = padTop + 'px';
+      inner.style.paddingBottom = padBottom + 'px';
+    } else if (inner.style.paddingTop || inner.style.paddingBottom) {
+      inner.style.removeProperty('padding-top');
+      inner.style.removeProperty('padding-bottom');
+    }
+    st!.sessionId = s.id;
+    st!.frames = finalFrames;
+    st!.fromItem = fromItem;
+    st!.toItem = toItem;
+    st!.count = items.length;
+    st!.rows = rows;
+    st!.lastPaint = () =>
+      paintMessages(
+        inner,
+        s,
+        onPlay,
+        firstUnreadId,
+        onSeek,
+        onOpenFile,
+        events,
+        uploadSrc,
+        onOpenUpload,
+        fileSrc,
+        onEarlier,
+        uploadUrlOf
+      );
+    // Feed the real box heights back to the virtualizer so off-window offsets
+    // and the total scroll height converge from the estimates. measureElement
+    // only notifies (and schedules a re-window) when a size actually changed, so
+    // this settles rather than looping.
+    //
+    // Hold `painting` across the loop so a size change here cannot run a
+    // synchronous re-window nested inside this paint. A store prepend
+    // (bracketMessageRender) paints here while the reader is mid-scroll (the
+    // virtualizer still flags isScrolling), and without this a measure
+    // notification re-entered anchoredRewindow before the caller had re-seated
+    // its anchor, shifting the held row a few px (the row-shift-while-older-loads
+    // bug). `reentrant` is true when this paint is itself a scroll re-window
+    // (the sync fling path already set `painting`): that path keeps converging
+    // on its own scroll events, so it schedules nothing extra here. A standalone
+    // paint (a store prepend, a plain render) instead schedules ONE async
+    // re-window when a row measured away from its estimate, so offsets and the
+    // scroll height converge next frame with the anchor hold intact.
+    if (windowed && st!.virt) {
+      const reentrant = st!.painting;
+      st!.painting = true;
+      st!.measuredDirty = false;
+      try {
+        for (const node of inner.querySelectorAll<HTMLElement>('[data-index]'))
+          st!.virt.measureElement(node);
+      } finally {
+        st!.painting = reentrant;
+      }
+      // Skip the converge while the virtualizer is actively scrolling: the next
+      // scroll event's re-window reads the fresh measurements and converges
+      // them, and the scroll-end tick catches a fling that stops right here, so
+      // scheduling one now would only add a redundant re-window to the fling
+      // (measured as extra long frames). A settled store paint has no such
+      // follow-up, so it schedules the one converge itself.
+      const scrolling = (st!.virt as unknown as {isScrolling?: boolean}).isScrolling === true;
+      if (!reentrant && st!.measuredDirty && !scrolling) scheduleRepaint(inner, st!);
+    }
+  }
+
+  // Scroll UP: the window slid toward older rows. Keep the overlap (a prefix of
+  // the mounted frames) in place, trim the rows that left the bottom, and
+  // PREPEND only the rows that entered at the top -- the mirror of the append
+  // path's edge-only reconcile. Without it a scroll up rebuilt the whole window
+  // every frame (the measured up-fling jank). Returns true when it handled the
+  // paint; false falls through to the general path (a full rebuild).
+  function tryPrependWindow(): boolean {
+    const P = prevFromItem - fromItem; // items entering at the top
+    const keptItemCount = toItem - prevFromItem + 1; // overlap items
+    if (P <= 0 || keptItemCount <= 0 || keptItemCount > prevFrames.length) return false;
+    const kept = prevFrames.slice(0, keptItemCount);
+    if (!kept[0]) return false;
+    // The boundary into the leaving-bottom rows must be a whole row, not a
+    // mid-run placeholder, so trimming removes complete rows.
+    if (keptItemCount < prevFrames.length && !prevFrames[keptItemCount]) return false;
+    // The overlap must still match the new window's signatures at the shifted
+    // offset (a pure scroll). A concurrent store change misses here and the
+    // paint falls back to a full rebuild.
+    for (let j = 0; j < kept.length; j++) {
+      const f = kept[j];
+      if (!f) continue;
+      for (let k = 0; k < f.sigs.length; k++) {
+        if (f.sigs[k] !== sigs[P + j + k]) return false;
+      }
+    }
+    // The insertion anchor: the first kept row's LIVE section, read from the DOM
+    // rather than the frame's stored reference (a prior paint can leave that
+    // stale). Bail to a full rebuild if it is not a direct child of the list --
+    // splicing against a detached node throws and drops the whole list into the
+    // rebuild-fallback, which repaints from the top and paints blank. Checked
+    // before any DOM mutation so the fallback starts from a clean tree.
+    const firstKeptSection = kept[0]!.node.closest<HTMLElement>('.cyc-date-group');
+    if (!firstKeptSection || firstKeptSection.parentElement !== inner) return false;
+
+    // The entering-top rows: build them into a fragment as their own sections
+    // and groups. The single-banner state is seeded from the kept rows so a
+    // banner already carried below is never duplicated above.
+    const ss: StampState = {unread: false, queued: false};
+    for (const f of kept) {
+      if (!f) continue;
+      if (f.node.dataset.cycUnread !== undefined) ss.unread = true;
+      if (f.node.classList.contains('cyc-first-queued')) ss.queued = true;
+    }
+    const noDrop = new Map<string, HTMLElement>();
+    const frag = document.createDocumentFragment();
+    const pf: ItemFrame[] = [];
+    let gDay = '';
+    let gSection: HTMLElement | null = null;
+    let gGroup: HTMLDivElement | null = null;
+    let gRole: string | null = null;
+    let gPrevQueued = fromItem > 0 ? !!items[fromItem - 1].m?.queued : false;
+    for (let i = 0; i < P; i++) {
+      const it = winItems[i];
+      const from = i;
+      const key = new Date(it.ts).toDateString();
+      if (key !== gDay) {
+        gDay = key;
+        gSection = h('section', 'cyc-date-group relative');
+        const chip = dateMessage(dayLabel(it.ts));
+        const dri = dateRowOfDay.get(key);
+        if (dri !== undefined) chip.dataset.index = String(dri);
+        gSection.append(chip);
+        frag.append(gSection);
+        gGroup = null;
+        gRole = null;
+      }
+      if (it.ev) {
+        const {node, endIdx, isFold, cacheKey, sigsSlice} = makeEvNode(from, key);
+        i = endIdx;
+        (gGroup ?? gSection!).append(node);
+        pf.push({
+          sig: sigs[from],
+          sigs: sigsSlice,
+          node,
+          dayKey: gDay,
+          dateGroup: gSection,
+          group: gGroup,
+          prevRole: gRole,
+          prevQueued: gPrevQueued,
+          consumed: i - from,
+          se: true,
+          fold: isFold,
+          cacheKey
+        });
+        for (let k = from + 1; k <= i; k++) pf.push(undefined as unknown as ItemFrame);
+        continue;
+      }
+      const m = it.m!;
+      const first = m.role !== gRole;
+      const next = msgs[it.mi! + 1];
+      const last = !next || next.role !== m.role || new Date(next.ts).toDateString() !== key;
+      if (first) {
+        gGroup = h('div', 'cyc-message-group relative');
+        gSection!.append(gGroup);
+      }
+      const {node, cacheKey} = makeMsgNode(from, m, first, last, noDrop, ss);
+      gGroup!.append(node);
+      gPrevQueued = !!m.queued;
+      gRole = m.role;
+      pf.push({
+        sig: sigs[from],
+        sigs: [sigs[from]],
+        node,
+        dayKey: gDay,
+        dateGroup: gSection,
+        group: gGroup,
+        prevRole: gRole,
+        prevQueued: gPrevQueued,
+        consumed: 0,
+        last,
+        cacheKey
+      });
+    }
+
+    // Trim the rows that left the bottom, caching them for a scroll back, and
+    // prune the sections/groups they emptied.
+    const emptied: HTMLElement[] = [];
+    for (let i = keptItemCount; i < prevFrames.length; i++) {
+      const f = prevFrames[i];
+      if (!f) continue;
+      if (f.cacheKey) cacheRow(st!, f.cacheKey, f.node);
+      f.node.remove();
+      if (f.group) emptied.push(f.group);
+      if (f.dateGroup) emptied.push(f.dateGroup);
+    }
+
+    // Splice the prepend fragment in above the kept content. When the last
+    // prepend day equals the first kept day, its rows join the existing kept
+    // section (after that section's date chip) so the day keeps ONE chip; the
+    // remaining earlier-day sections are inserted before it.
+    let lastPf: ItemFrame | undefined;
+    for (let i = pf.length - 1; i >= 0; i--)
+      if (pf[i]) {
+        lastPf = pf[i];
+        break;
+      }
+    if (lastPf && lastPf.dayKey === kept[0]!.dayKey) {
+      const pSection = lastPf.dateGroup!;
+      const chip = firstKeptSection.querySelector<HTMLElement>(':scope > .cyc-date-chip');
+      const ref = chip ? chip.nextSibling : firstKeptSection.firstChild;
+      for (const child of Array.from(pSection.children)) {
+        if (child.classList.contains('cyc-date-chip')) continue;
+        firstKeptSection.insertBefore(child, ref);
+      }
+      for (const f of pf) if (f && f.dateGroup === pSection) f.dateGroup = firstKeptSection;
+      pSection.remove();
+    }
+    inner.insertBefore(frag, firstKeptSection);
+    for (const w of emptied) {
+      if (!w.isConnected) continue;
+      const empty = w.classList.contains('cyc-date-group')
+        ? w.childElementCount <= 1
+        : !w.childElementCount;
+      if (empty) w.remove();
+    }
+
+    commitWindow([...pf, ...kept]);
+    return true;
+  }
+
+  // The rows that scrolled off the TOP as the window slid down. Frames are
+  // item-indexed (a run head then a placeholder per item it consumed), so the
+  // frame at offset (fromItem - prevFromItem) is the one that now sits at the
+  // window top; everything before it left. Keeping the overlap mounted IN PLACE
+  // and only trimming the leaving head + appending the entering tail is what
+  // keeps a fling cheap: the browser re-lays-out the few edge rows, not the
+  // whole window (a from-scratch wipe re-styled and re-painted every row every
+  // scroll event -- the measured jank). A slid window shares no anchor with the
+  // old prefix, so before this it always fell through to a full rebuild.
+  let leavingHead: ItemFrame[] = [];
+  let reusable: ItemFrame[] | null = null;
+  // A forced full rebuild (the coverage net recovering a collapsed window):
+  // reuse nothing, so the window is recomputed and mounted from scratch.
+  const forceFull = st.forceFull;
+  st.forceFull = false;
+  if (forceFull) {
+    // fall through with reusable = null (full rebuild)
+  } else if (sameChat && windowed) {
+    const dropHead = fromItem - prevFromItem;
+    if (dropHead === 0) {
+      reusable = prevFrames;
+    } else if (dropHead > 0 && dropHead < prevFrames.length && prevFrames[dropHead]) {
+      // Only when the boundary lands on a real frame (not mid-run); a mid-run
+      // boundary or a store change that shifted item indices makes the
+      // signature walk below match nothing, and the paint falls back to a full
+      // rebuild (frames empty -> the node set is wiped and rebuilt from cache).
+      reusable = prevFrames.slice(dropHead);
+      leavingHead = prevFrames.slice(0, dropHead);
+    }
+  } else if (sameChat && prevFromItem === fromItem) {
+    reusable = prevFrames;
+  }
+
+  // The window slid the other way (scroll up / a jump to an earlier row): the
+  // overlap is a PREFIX of the mounted frames and new rows enter at the top.
+  // Prepend them instead of rebuilding the window; on any mismatch this returns
+  // false and the general path below takes over.
+  if (
+    !forceFull &&
+    reusable === null &&
+    sameChat &&
+    windowed &&
+    fromItem < prevFromItem &&
+    prevFromItem <= toItem &&
+    prevFrames.length > 0 &&
+    prevFrames[0] &&
+    tryPrependWindow()
+  ) {
+    return;
+  }
+
   let start = 0;
   if (reusable) {
     while (start < reusable.length) {
@@ -605,6 +1605,10 @@ function paintMessages(
             foldFrame.sigs.push(sigs[k]);
             grown.push(undefined as unknown as ItemFrame);
           }
+          // The node grew in place, so its stored version no longer matches its
+          // content; drop its cache key so it is never stashed under a stale
+          // one (it simply rebuilds if it ever leaves and returns).
+          foldFrame.cacheKey = undefined;
           start = end;
         }
       } else {
@@ -638,7 +1642,7 @@ function paintMessages(
   if (dbg) {
     dbg.push({
       items: winItems.length,
-      from,
+      from: fromItem,
       had: reusable?.length ?? -1,
       start,
       a: reusable?.[start]?.sig?.slice(0, 90) ?? null,
@@ -657,13 +1661,34 @@ function paintMessages(
   // message (a status edge, the engine's adopted timestamp) carries its
   // still-loaded <img> elements over from here, so the picture never blanks
   // and reloads for a repaint that did not change it.
+  // A rebuilt row for the same message adopts the dropped row's <img> (see
+  // carryStillImages). The source is the reused tail on a data change, or the
+  // whole previous window on a scroll re-window (reusable is null then, but the
+  // rows that stay visible should still carry their decoded pictures).
   const dropped = new Map<string, HTMLElement>();
-  if (reusable) {
-    for (let i = start; i < reusable.length; i++) {
-      const f = reusable[i];
+  {
+    const dropSource = reusable ?? prevFrames;
+    const dropStart = reusable ? start : 0;
+    for (let i = dropStart; i < dropSource.length; i++) {
+      const f = dropSource[i];
       const mid = f?.node.dataset.mid;
-      if (mid && !dropped.has(mid)) dropped.set(mid, f!.node);
+      if (mid && !dropped.has(mid)) dropped.set(mid, f.node);
+      // A row leaving the window is stashed under its content-version key so
+      // the build loop below (and later paints) re-attach it rather than
+      // rebuild it. Only rows with a key are cached (date chips are cheap).
+      if (f?.cacheKey) cacheRow(st, f.cacheKey, f.node);
     }
+  }
+  // The rows that scrolled off the top leave: cache their nodes (a scroll back
+  // re-attaches them) and drop them, leaving their now-empty groups for the
+  // prune below. A group straddling the drop boundary keeps its surviving rows
+  // (the prune checks it still has children).
+  for (const f of leavingHead) {
+    if (!f) continue;
+    if (f.cacheKey) cacheRow(st, f.cacheKey, f.node);
+    f.node.remove();
+    if (f.group) emptied.push(f.group);
+    if (f.dateGroup) emptied.push(f.dateGroup);
   }
   if (!frames.length) {
     inner.textContent = '';
@@ -692,48 +1717,38 @@ function paintMessages(
   let group: HTMLDivElement | null = base?.group ?? null;
   let prevRole: string | null = base?.prevRole ?? null;
 
-  let prevQueued = base?.prevQueued ?? (from > 0 ? !!items[from - 1].m?.queued : false);
+  let prevQueued = base?.prevQueued ?? (fromItem > 0 ? !!items[fromItem - 1].m?.queued : false);
+
+  // The window opened mid-day (its first rendered row is not a day boundary):
+  // open a chip-less day section so the partial day's rows have a container and
+  // no duplicate date chip appears. A very long single day scrolled deep shows
+  // no pinned chip until its boundary scrolls in; a documented limitation of
+  // the virtual list (the date separators between days are unaffected).
+  if (!frames.length && windowed && !startsWithDate) {
+    dayKey = new Date(winItems[0].ts).toDateString();
+    dateGroup = h('section', 'cyc-date-group relative');
+    inner.append(dateGroup);
+  }
 
   const onlyChip = (section: HTMLElement) => section.childElementCount <= 1;
-
-  // The one row this paint's "first queued" banner belongs on: the first
-  // message that opens a queued run sitting ahead of the agent (past the last
-  // claude row). Mirrors the stamp condition in the build loop so the reuse
-  // sweep and the build agree on the single row that may carry it.
-  let firstQueuedMid: string | undefined;
-  {
-    let pq = from > 0 ? !!items[from - 1].m?.queued : false;
-    for (const it of winItems) {
-      const m = it.m;
-      if (!m) continue;
-      if (m.queued && !pq && it.mi! > lastClaudeMi) {
-        firstQueuedMid = m.id;
-        break;
-      }
-      pq = !!m.queued;
-    }
-  }
 
   // Sweep the rows the walk reused verbatim: strip an unread or queued stamp off
   // any that is not this paint's anchor, and off a second row that duplicates
   // the anchor id. The freshly built tail below is stamped correctly; seeding
   // these flags from the kept rows keeps the build from adding a second banner
   // when the anchor already carries one.
-  let unreadStamped = false;
-  let queuedStamped = false;
+  const ss: StampState = {unread: false, queued: false};
   for (let j = 0; j < start; j++) {
     const f = frames[j];
     if (!f) continue;
     const node = f.node;
     const mid = node.dataset.mid ?? '';
     if (node.dataset.cycUnread !== undefined) {
-      if (!unreadStamped && firstUnreadId !== undefined && mid === firstUnreadId)
-        unreadStamped = true;
+      if (!ss.unread && firstUnreadId !== undefined && mid === firstUnreadId) ss.unread = true;
       else stripUnreadStamp(node);
     }
     if (node.classList.contains('cyc-first-queued')) {
-      if (!queuedStamped && firstQueuedMid !== undefined && mid === firstQueuedMid)
-        queuedStamped = true;
+      if (!ss.queued && firstQueuedMid !== undefined && mid === firstQueuedMid) ss.queued = true;
       else stripQueuedStamp(node);
     }
   }
@@ -749,7 +1764,10 @@ function paintMessages(
       } else {
         dateGroup = h('section', 'cyc-date-group relative');
         const label = dayLabel(it.ts);
-        dateGroup.append(dateMessage(label));
+        const chip = dateMessage(label);
+        const dri = dateRowOfDay.get(key);
+        if (dri !== undefined) chip.dataset.index = String(dri);
+        dateGroup.append(chip);
         inner.append(dateGroup);
       }
       group = null;
@@ -757,58 +1775,12 @@ function paintMessages(
     }
 
     if (it.ev) {
-      let node: HTMLElement;
-      let isFold = false;
-
-      // A maximal run of consecutive session events within this same day (any
-      // mix of VISIBLE_EVENT kinds; a message item breaks it because the outer
-      // loop advances per item). At or above COLLAPSE_MIN the whole run folds
-      // into one expandable head; below it, fall through to today's behavior
-      // (the short tool burst still groups via sessionEventRunMessages, a lone
-      // event stays a single pill).
-      let runEnd = i;
-      while (
-        runEnd + 1 < winItems.length &&
-        winItems[runEnd + 1].ev &&
-        new Date(winItems[runEnd + 1].ts).toDateString() === key
-      )
-        runEnd++;
-
-      if (runEnd - i + 1 >= COLLAPSE_MIN) {
-        const events: CycSessionEvent[] = [];
-        for (let k = i; k <= runEnd; k++) events.push(winItems[k].ev!);
-        node = sessionEventFoldMessages(events);
-        isFold = true;
-        i = runEnd;
-      } else if (it.ev.kind === 'tool') {
-        const run: CycSessionEvent[] = [it.ev];
-        while (
-          i + 1 < winItems.length &&
-          winItems[i + 1].ev?.kind === 'tool' &&
-          new Date(winItems[i + 1].ts).toDateString() === key
-        ) {
-          run.push(winItems[++i].ev!);
-        }
-
-        let interrupt: CycSessionEvent | undefined;
-        if (
-          i + 1 < winItems.length &&
-          winItems[i + 1].ev?.kind === 'interrupt' &&
-          new Date(winItems[i + 1].ts).toDateString() === key
-        ) {
-          interrupt = winItems[++i].ev!;
-        }
-        node =
-          run.length > 1
-            ? sessionEventRunMessages(run, interrupt)
-            : sessionEventMessage(run[0], interrupt);
-      } else {
-        node = sessionEventMessage(it.ev);
-      }
+      const {node, endIdx, isFold, cacheKey, sigsSlice} = makeEvNode(from, key);
+      i = endIdx;
       (group ?? dateGroup!).append(node);
       frames.push({
         sig: sigs[from],
-        sigs: sigs.slice(from, i + 1),
+        sigs: sigsSlice,
         node,
         dayKey,
         dateGroup,
@@ -817,7 +1789,8 @@ function paintMessages(
         prevQueued,
         consumed: i - from,
         se: true,
-        fold: isFold
+        fold: isFold,
+        cacheKey
       });
 
       for (let k = from + 1; k <= i; k++) frames.push(undefined as unknown as ItemFrame);
@@ -840,57 +1813,7 @@ function paintMessages(
         dateGroup!.append(group);
       }
     }
-    const hasAudio = !!(m as CycMessage & {msgId?: string}).msgId;
-
-    const attached = uploadsOf(m);
-    const messageNode =
-      attached.length > 1 || (attached.length === 1 && isAudioUpload(attached[0]))
-        ? attachmentMessage(m, first, last, (u) => uploadUrlOf?.(m, u) ?? '', onOpenUpload)
-        : m.upload
-          ? uploadMessage(m, first, last, uploadSrc?.(m) ?? '', onOpenUpload)
-          : m.file?.fileKind === 'image'
-            ? photoMessage(m, first, last, fileSrc?.(m) ?? '', m.file.name, onOpenFile, {
-                width: m.file.width,
-                height: m.file.height
-              })
-            : m.file?.inline && m.file.content !== undefined
-              ? snippetMessage(m, first, last, onOpenFile)
-              : m.file?.fileKind === 'binary'
-                ? downloadMessage(m, first, last, onOpenFile)
-                : m.file
-                  ? fileMessage(m, first, last, onOpenFile)
-                  : m.kind === 'voice' || (m.role === 'claude' && hasAudio)
-                    ? audioMessage(
-                        m,
-                        first,
-                        last,
-                        onPlay,
-                        onSeek,
-                        winItems.length - i <= EAGER_TAIL
-                      )
-                    : textMessage(m, first, last, onPlay);
-    messageNode.dataset.mid = m.id;
-    // The message's ts rides the node for DISPLAY only (a stamp label); the one
-    // durable id in data-mid is what every user action resolves the bubble by.
-    messageNode.dataset.ts = String(m.ts);
-    carryStillImages(dropped.get(messageNode.dataset.mid), messageNode);
-    paintAttachmentSend(messageNode, m, attached.length > 0 || !!m.upload);
-    if (m.id === firstUnreadId && !unreadStamped) {
-      markUnreadLanding(messageNode);
-      messageNode.classList.add('max-tab:!max-w-none');
-      messageNode.prepend(unreadBannerEl());
-      unreadStamped = true;
-    }
-
-    if (m.queued && !prevQueued && it.mi! > lastClaudeMi && !queuedStamped) {
-      messageNode.classList.add('cyc-first-queued');
-      messageNode.prepend(
-        queuedBannerEl(
-          'Queued for ' + (s.agentName ?? DEFAULT_AGENT_NAME) + (s.model ? ' · ' + s.model : '')
-        )
-      );
-      queuedStamped = true;
-    }
+    const {node: messageNode, cacheKey: msgCk} = makeMsgNode(from, m, first, last, dropped, ss);
     prevQueued = !!m.queued;
     group!.append(messageNode);
 
@@ -905,7 +1828,8 @@ function paintMessages(
       prevRole,
       prevQueued,
       consumed: 0,
-      last
+      last,
+      cacheKey: msgCk
     });
   }
 
@@ -947,7 +1871,8 @@ function paintMessages(
     break;
   }
 
-  renderStates.set(inner, {sessionId: s.id, frames, from, count: items.length, starts});
+  // Spacers, persistent state, the re-window closure, and a settle-measure.
+  commitWindow(frames);
 }
 
 /** A date chip whose box overlaps the unread divider carries this; the chip

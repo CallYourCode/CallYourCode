@@ -1,8 +1,9 @@
 import {touchCapable} from '@/shared/capabilities';
 import type {CycMessage, CycReplyTo, CycSession} from '@/types';
 import * as engine from '@/engine/store';
-import {extendMessageWindow} from './messageList';
-import {smoothScrollTo} from '@/shared/smoothScroll';
+import {scrollMessageIntoView} from './messageList';
+import {markMachineTop} from './machineScroll';
+import {seatScrollTop, smoothScrollTo} from '@/shared/smoothScroll';
 import {toast} from '@/components/widgets';
 import {replyAuthor, replyTargetFor, replySource} from '@/replyModel';
 import {active} from '@/sessionSelectors';
@@ -41,10 +42,67 @@ export interface MessageTravelDeps {
   render(): void;
   openChat(id: string, after?: () => void): void;
   isChatViewOpen(): boolean;
+  // Drop the surface's "pinned to bottom" state as the jump leaves the bottom,
+  // so the resize observer does not re-pin and yank the target off-screen.
+  releaseBottomPin?(): void;
+}
+
+// A single animation-frame tick, for the jump settle loop below.
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) =>
+    typeof requestAnimationFrame !== 'undefined'
+      ? requestAnimationFrame(() => resolve())
+      : setTimeout(resolve, 16)
+  );
 }
 
 export function createMessageTravel(deps: MessageTravelDeps) {
   const {composer, messageListInner} = deps;
+
+  const midSel = (id: string) => `.cyc-message[data-mid="${escapeMid(id)}"]`;
+
+  // Hold the jump target centred until it settles. The offset a jump seats on
+  // is first computed from row estimates; as the rows above the target mount
+  // and measure away from those estimates the window slides and the target can
+  // drift out of view (or the one-shot centre lands off, and on tablet/laptop
+  // the row was gone 2s later). Re-centre it every frame -- re-mounting it if
+  // the window slid past it -- until its centred offset holds, bounded so this
+  // always terminates. Runs after the smooth first leg the reader sees.
+  const settleToMessage = async (id: string): Promise<void> => {
+    const container = deps.scroller();
+    const first = messageListInner.querySelector<HTMLElement>(midSel(id));
+    if (first) await smoothScrollTo({container, element: first, position: 'center'});
+    const MAX_FRAMES = 60; // ~1s ceiling, under the 2s a caller waits to read it
+    let stable = 0;
+    for (let i = 0; i < MAX_FRAMES; i++) {
+      const el = messageListInner.querySelector<HTMLElement>(midSel(id));
+      if (!el) {
+        // The window slid off the target (estimate drift remounted a different
+        // slice); re-window to bring it back, then re-check next frame.
+        if (!scrollMessageIntoView(messageListInner, id, 'center')) return;
+        await nextFrame();
+        continue;
+      }
+      const top = seatScrollTop({container, element: el, position: 'center'});
+      if (Math.abs(top - container.scrollTop) <= 2) {
+        if (++stable >= 3) {
+          highlightMessage(el);
+          return;
+        }
+      } else {
+        stable = 0;
+        container.scrollTop = top;
+        markMachineTop(container);
+      }
+      await nextFrame();
+    }
+    const el = messageListInner.querySelector<HTMLElement>(midSel(id));
+    if (el) {
+      container.scrollTop = seatScrollTop({container, element: el, position: 'center'});
+      markMachineTop(container);
+      highlightMessage(el);
+    }
+  };
 
   const quoteInto = (s: CycSession, m: CycMessage, quote: string) => {
     const capped = firstWords(quote, 25);
@@ -73,20 +131,31 @@ export function createMessageTravel(deps: MessageTravelDeps) {
     const m = wantId
       ? s.messages.find((x) => x.id === wantId)
       : s.messages.find((x) => x.ts === ts && x.role === role);
+    // The jump is an intentional move away from the bottom: drop the pin BEFORE
+    // the scroll below re-windows (which resizes the list and would otherwise
+    // trip the resize observer into re-pinning to the bottom, unmounting the
+    // target). A jump that ends up at the bottom is re-pinned by the scroll
+    // listener. Only once we have a target to travel to.
+    if (m) deps.releaseBottomPin?.();
     /* Bubbles are keyed by data-mid (messageList sets messageNode.dataset.mid);
      * the old data-cyc-message-key selector matched nothing, so every jump
      * (pill, audio chip, reply) toasted "not loaded" even with the message on
      * screen. Found by driving the live app, 2026-09-06. */
-    const sel = (id: string) => `.cyc-message[data-mid="${escapeMid(id)}"]`;
+    const sel = midSel;
     let el = m && messageListInner.querySelector<HTMLElement>(sel(m.id));
 
-    if (m && !el && extendMessageWindow(messageListInner, Number.MAX_SAFE_INTEGER)) {
-      deps.renderEarlier();
+    // The target row may sit outside the virtual window (never mounted). Scroll
+    // the box to its computed offset, which re-windows and mounts it, then
+    // re-query and centre it with the settle below.
+    if (m && !el && scrollMessageIntoView(messageListInner, m.id, 'center')) {
       el = messageListInner.querySelector<HTMLElement>(sel(m.id));
     }
-    if (!el) return false;
-    smoothScrollTo({container: deps.scroller(), element: el, position: 'center'});
+    if (!m || !el) return false;
     highlightMessage(el);
+    // Centre and hold it against the measure-vs-estimate drift; the target is
+    // resolved and mounted now, so the jump has succeeded and we return true
+    // while the centring settles.
+    void settleToMessage(m.id);
     return true;
   };
 

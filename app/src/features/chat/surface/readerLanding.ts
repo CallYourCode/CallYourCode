@@ -6,6 +6,7 @@ import {dataState, sessionState} from '@/sessionState';
 import {speaker} from '@/audio/speaker';
 import {mayStartSpeech} from '@/speechGate';
 import {UNREAD_LANDING_SELECTOR} from '../messages/messageFrame';
+import {scrollMessageIntoView, repaintMessagesAtScroll, rewindowMessages} from './messageList';
 
 interface ReaderLandingDeps {
   heardTsOf(session: CycSession): number;
@@ -115,14 +116,102 @@ export function createReaderLanding(options: ReaderLandingOptions) {
     for (const message of queue) deps.play(sessionId, message.msgId!, message.text);
   };
 
-  const scrollToFirstUnread = (): boolean => {
-    const marker = messages.querySelector<HTMLElement>(UNREAD_LANDING_SELECTOR);
-    if (!marker) return false;
+  const scrollToFirstUnread = (firstUnreadId?: string): boolean => {
     const box = scroll;
-    const headroom = box.clientHeight / 3;
-    const delta = marker.getBoundingClientRect().top - box.getBoundingClientRect().top;
-    const target = Math.max(0, box.scrollTop + delta - headroom);
-    silentScrollTo(Math.min(target, box.scrollHeight - box.clientHeight));
+    const virtualized = !!messages.closest('.cyc-message-list-scroll');
+    const H = box.clientHeight;
+    const headroom = H / 3;
+    // Everything below is anchored to the DISTANCE-TO-END, never to a raw
+    // scrollTop. The unread divider sits near the end of a heavy chat, and the
+    // rows below it are already mounted and MEASURED on a bottom-pinned open, so
+    // its distance to the content end is stable. The rows ABOVE it are only
+    // estimated (EST_MSG is far off a wrapped bubble), so scrollHeight swings by
+    // tens of thousands of px as they mount and measure -- a scrollTop-anchored
+    // jump chased that moving total and either ran away up or clamped back to the
+    // end (measured: the open never left the bottom, or shot to the top).
+    // Anchoring to distance-to-end absorbs every upper-row change: scrollTop is
+    // recomputed from the live scrollHeight each step, so the divider holds its
+    // seat regardless of what the history above measures to.
+    const dteOf = () => box.scrollHeight - box.scrollTop - H;
+    // Move to a target distance-to-end and RE-ASSERT it: each repaint remeasures
+    // the newly mounted rows and shifts scrollHeight, which would otherwise leave
+    // the actual distance-to-end off the target (scrollTop was written against the
+    // pre-repaint total). Recompute scrollTop from the live scrollHeight until it
+    // stops moving, so the seat is by distance-to-end, not by a stale total.
+    const setDte = (dte: number): void => {
+      for (let k = 0; k < 5; k++) {
+        const top = Math.max(0, Math.min(box.scrollHeight - H, box.scrollHeight - H - dte));
+        if (Math.abs(top - box.scrollTop) <= 0.5) break;
+        silentScrollTo(top);
+        if (!virtualized) break;
+        repaintMessagesAtScroll(messages);
+      }
+    };
+    // Reveal the divider by walking up from the end in bounded distance-to-end
+    // steps until it mounts. Bounded per step so no jump overshoots into a
+    // clamp; bounded in count so a pathological geometry cannot spin.
+    let marker = messages.querySelector<HTMLElement>(UNREAD_LANDING_SELECTOR);
+    if (!marker && firstUnreadId && virtualized) {
+      const step = Math.max(1, H * 0.9);
+      for (let dte = step, pass = 0; !marker && pass < 40; dte += step, pass++) {
+        if (dte >= box.scrollHeight - H) break;
+        setDte(dte);
+        marker = messages.querySelector<HTMLElement>(UNREAD_LANDING_SELECTOR);
+      }
+    }
+    // A detached / non-virtual list mounts every row: scroll straight to it.
+    if (!marker && firstUnreadId) {
+      scrollMessageIntoView(messages, firstUnreadId, 'start');
+      marker = messages.querySelector<HTMLElement>(UNREAD_LANDING_SELECTOR);
+    }
+    if (!marker) return false;
+    // Seat the divider a third of the way down and HOLD it there through the
+    // measurement settle, correcting by its live distance-to-end so upper-row
+    // growth cannot drift it. Bounded so it cannot spin; the divider node is
+    // re-found each pass in case a window slide recreated it.
+    for (let pass = 0; pass < 12; pass++) {
+      const found = messages.querySelector<HTMLElement>(UNREAD_LANDING_SELECTOR);
+      if (!found) break;
+      marker = found;
+      const delta = marker.getBoundingClientRect().top - box.getBoundingClientRect().top;
+      if (Math.abs(delta - headroom) <= 1) break;
+      const targetDte = Math.max(0, dteOf() + (headroom - delta));
+      const prevTop = box.scrollTop;
+      setDte(targetDte);
+      if (Math.abs(box.scrollTop - prevTop) <= 1) break;
+    }
+    // Final settle under the app's OWN re-window, to a FIXED POINT. The
+    // positioning above used a plain repaint (no anchor hold) to move freely; the
+    // app then settles measurements with an ANCHORED re-window (it holds the
+    // topmost visible row) on a debounced scroll-end tick ~half a second later.
+    // That later re-window mounts the row the window edge now reaches, measures
+    // it away from its estimate, and re-seats onto the top row -- which drifts
+    // the divider (below that top row) off its seat, out of view (measured: it
+    // slid ~a long row up). So run the SAME anchored re-window here until it is a
+    // no-op: mount and measure the edge row it would, re-seat the divider by its
+    // distance-to-end, and repeat until an anchored re-window changes neither the
+    // scroll offset nor the mounted-row count AND the divider still sits at its
+    // seat. The app's later tick then finds nothing to move. Bounded so it cannot
+    // spin.
+    if (virtualized) {
+      let prevKey = '';
+      for (let pass = 0; pass < 12; pass++) {
+        rewindowMessages(messages);
+        const found = messages.querySelector<HTMLElement>(UNREAD_LANDING_SELECTOR);
+        if (!found) break;
+        marker = found;
+        const delta = marker.getBoundingClientRect().top - box.getBoundingClientRect().top;
+        if (Math.abs(delta - headroom) > 2) {
+          setDte(Math.max(0, dteOf() + (headroom - delta)));
+          prevKey = '';
+          continue;
+        }
+        const key =
+          Math.round(box.scrollTop) + ':' + messages.querySelectorAll('[data-index]').length;
+        if (key === prevKey) break;
+        prevKey = key;
+      }
+    }
     return true;
   };
 

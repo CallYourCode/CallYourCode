@@ -36,9 +36,23 @@ function settle(container: HTMLElement): Promise<void> {
   });
 }
 
+// A single animation-frame tick, for the re-targeting settle loops below.
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) =>
+    typeof requestAnimationFrame !== 'undefined'
+      ? requestAnimationFrame(() => resolve())
+      : setTimeout(resolve, 16)
+  );
+}
+
 // The container scrollTop that seats the element at the requested alignment,
 // clamped to the container's own scroll range. Computed from the two boxes'
-// live rects, so it holds wherever the container currently sits.
+// live rects, so it holds wherever the container currently sits. Exported so a
+// caller settling a jump (messageTravel) re-targets against the SAME math the
+// one-shot below uses.
+export function seatScrollTop(request: ScrollRequest): number {
+  return containedTop(request);
+}
 function containedTop(request: ScrollRequest): number {
   const {container, element} = request;
   const block = blockFor(request);
@@ -85,13 +99,43 @@ export function smoothScrollTo(request: ScrollRequest): Promise<void> {
 // nothing else, and its target (scrollHeight - clientHeight) is the exact end
 // of the content, any clearance margin on the pad-bottom spacer included, so
 // the landing is the true bottom with the keyboard open or shut.
-export function smoothScrollToBottom(container: HTMLElement): Promise<void> {
-  const top = container.scrollHeight - container.clientHeight;
-  if (!prefersMotion()) {
-    container.scrollTo({top, behavior: 'auto'});
-    return Promise.resolve();
+//
+// The end is re-computed every step: (scrollHeight - clientHeight) grows as
+// rows mount and measure taller than their estimate (scrollHeight sampled
+// 41,454 -> 52,987 mid-scroll), so a one-shot scrollTo stopped at the stale
+// target 11k-25k px short. This walks the scroll toward the CURRENT end until
+// the distance holds at <= 1px for a few frames, bounded so it always ends.
+//
+// A FAR target is jumped instantly, never smooth-animated: over a deep virtual
+// list a smooth animation would drag the window through every intermediate
+// offset, mounting and measuring each row on the way so the end keeps receding
+// and the animation never lands (and thousands of nodes churn). A jump mounts
+// only the tail, so the end settles after one small correction, which -- being
+// near now -- keeps the smooth finish motion users expect.
+export async function smoothScrollToBottom(container: HTMLElement): Promise<void> {
+  const target = () => container.scrollHeight - container.clientHeight;
+  const smooth = prefersMotion();
+  const MAX_STEPS = 40; // hard ceiling, never spins forever
+  const STABLE_FRAMES = 4;
+  let stable = 0;
+  for (let i = 0; i < MAX_STEPS; i++) {
+    const top = target();
+    if (top - container.scrollTop <= 1) {
+      if (++stable >= STABLE_FRAMES) return;
+      await nextFrame();
+      continue;
+    }
+    stable = 0;
+    const near = top - container.scrollTop <= 2 * container.clientHeight;
+    if (smooth && near) {
+      container.scrollTo({top, behavior: 'smooth'});
+      await settle(container);
+    } else {
+      container.scrollTo({top, behavior: 'auto'});
+      await nextFrame();
+    }
   }
-  const done = settle(container);
-  container.scrollTo({top, behavior: 'smooth'});
-  return done;
+  // Ceiling reached: land exactly on the end so a slow-settling list is never
+  // left short.
+  container.scrollTo({top: target(), behavior: 'auto'});
 }

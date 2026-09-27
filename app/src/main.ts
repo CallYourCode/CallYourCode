@@ -398,6 +398,7 @@ function buildApp() {
     refreshSettleGrace,
     bracketMessageRender,
     scrollToBottom,
+    releaseBottomPin,
     setNewBelow,
     hideUnreadBanner,
     settleNow,
@@ -455,7 +456,8 @@ function buildApp() {
     renderEarlier: () => renderEarlier(),
     render: () => render(),
     openChat: (id, after) => openChat(id, after),
-    isChatViewOpen: () => mainColumns.dataset.view === 'chat'
+    isChatViewOpen: () => mainColumns.dataset.view === 'chat',
+    releaseBottomPin: () => releaseBottomPin()
   });
 
   installMessageMenu({

@@ -38,6 +38,7 @@
     "ws": "^8.20.0"
   },
   "dependencies": {
+    "@tanstack/virtual-core": "^3.17.0",
     "@use-gesture/vanilla": "^10.3.1",
     "@xterm/addon-fit": "0.10.0",
     "@xterm/xterm": "5.5.0",
