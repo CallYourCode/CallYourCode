@@ -173,6 +173,11 @@ type ItemFrame = {
   // neighbour arriving below it flips this in place (setMessageLast) instead
   // of rebuilding the row. Absent on session-event frames.
   last?: boolean;
+  // The row-cache key this node was built under (see the detached-node LRU on
+  // RenderState). A row leaving the window is stashed under this key so the
+  // same row (same content, same group edges) re-entering re-attaches its
+  // decoded node instead of rebuilding it. Absent on date rows (cheap to make).
+  cacheKey?: string;
 };
 
 // One merged transcript entry: a message or a session event, at its ts. The
@@ -216,10 +221,25 @@ type RenderState = {
   // True while a synchronous re-window is in flight, so the measurement
   // notifications that paint itself triggers do not re-enter it.
   painting: boolean;
+  // Set for one paint to force a from-scratch window rebuild, bypassing the
+  // incremental edge reconcile. The coverage net (below) sets it when an
+  // incremental re-window left the viewport uncovered (a rare window collapse
+  // under load); a full rebuild recomputes the window and recovers, so the
+  // blank never reaches the compositor.
+  forceFull: boolean;
   // Wired by the render hub: after a scroll-driven re-window, re-run the DOM
   // sweeps (waveform hydration, sticky dates, play state) over the freshly
   // mounted rows so a row scrolled into view hydrates like a store paint.
   onWindowChange: (() => void) | null;
+  // A bounded LRU of DETACHED row nodes, keyed by row identity + content
+  // version (rowCacheKey). A scroll that slides the window drops the rows
+  // leaving it into here and re-attaches the rows entering it from here, so a
+  // fast fling re-attaches decoded bubbles instead of rebuilding them from
+  // scratch (markdown parse, syntax paint) on every scroll event -- the
+  // measured scroll jank. Bounded so the detached set cannot grow without
+  // limit; entries are the row node only, never in the document (they do not
+  // count against the in-document node budget).
+  nodeCache: Map<string, HTMLElement>;
 };
 
 const renderStates = new WeakMap<HTMLElement, RenderState>();
@@ -248,6 +268,45 @@ const MSG_OVERSCAN = 1;
 // One viewport each side (a three-viewport painted region) covers a 15,000 px/s
 // fling while holding the node count well under budget.
 const OVERSCAN_VIEWPORTS = 2;
+
+// The detached row-node LRU is bounded to this many nodes. A phone window plus
+// its overscan band holds a few dozen rows; a few hundred cached nodes cover
+// several viewports of fling in both directions without the detached set
+// growing without limit. On overflow the oldest entry is dropped (its node is
+// unreferenced and collected); a dropped row simply rebuilds if it returns.
+const ROW_CACHE_MAX = 400;
+
+// The cache key for a row: its stable identity (the render-row key: `m|<id>`,
+// `e|<evKey>|<kind>`) joined with a content version, so a cached node is only
+// re-attached when it would be byte-identical to a fresh build. The version
+// folds the row's signature(s) -- which already carry the unread-anchor mark
+// and every content/status field (itemSig) -- plus the group edges the node's
+// own styling bakes in (`first`/`last`) and the first-queued banner, none of
+// which live in the signature. A mismatch on any of these misses the cache and
+// rebuilds, so a reused node never wears a stale banner or group edge.
+function rowCacheKey(identity: string, version: string): string {
+  return identity + '\u0000' + version;
+}
+
+// Take a detached node for `key`, removing it so the cache only ever holds
+// nodes that are NOT in the document (no node is attached in two places).
+function takeCachedRow(st: RenderState, key: string): HTMLElement | undefined {
+  const node = st.nodeCache.get(key);
+  if (node) st.nodeCache.delete(key);
+  return node;
+}
+
+// Stash a detached node under `key`. Re-inserting moves it to the most-recent
+// end; on overflow the least-recent entry (the first key) is evicted.
+function cacheRow(st: RenderState, key: string, node: HTMLElement): void {
+  st.nodeCache.delete(key);
+  st.nodeCache.set(key, node);
+  while (st.nodeCache.size > ROW_CACHE_MAX) {
+    const oldest = st.nodeCache.keys().next().value;
+    if (oldest === undefined) break;
+    st.nodeCache.delete(oldest);
+  }
+}
 
 const raf: (cb: () => void) => void =
   typeof requestAnimationFrame !== 'undefined'
@@ -381,14 +440,23 @@ function ensureVirt(inner: HTMLElement, st: RenderState): MsgVirtualizer {
 // caught up (measured: 9 blank frames at 15,000 px/s on the phone even with a
 // two-viewport overscan, versus 0 when it re-windows in the event). Everything
 // else (a measurement settle, the scroll-end tick) re-windows on rAF as before.
-// The painting guard swallows the measurement notifications the synchronous
-// paint itself raises, so it cannot re-enter.
+//
+// Re-windows on every scroll event, synchronously, so the DOM window tracks the
+// native scroll position in the frame the browser is about to paint even under
+// load. A fling scrolls compositor-side ahead of the main thread; deferring or
+// throttling the re-window lets it outrun the window and paint blank, so it
+// runs per event. Each re-window is cheap now (the reconcile keeps the overlap
+// and only touches the edge rows), so running it per event no longer costs the
+// full-window rebuild that made the branch janky. The painting guard swallows
+// the measurement notifications the synchronous paint itself raises, so it
+// cannot re-enter.
 function scheduleRepaint(inner: HTMLElement, st: RenderState, sync = false): void {
   if (sync) {
     if (st.painting || st.scheduled) return;
     st.painting = true;
     try {
       anchoredRewindow(inner, st);
+      recoverIfUncovered(inner, st);
       st.onWindowChange?.();
     } finally {
       st.painting = false;
@@ -400,8 +468,31 @@ function scheduleRepaint(inner: HTMLElement, st: RenderState, sync = false): voi
   raf(() => {
     st.scheduled = false;
     anchoredRewindow(inner, st);
+    recoverIfUncovered(inner, st);
     st.onWindowChange?.();
   });
+}
+
+// Safety net for the incremental reconcile. A window can rarely collapse under
+// load (a stale row measurement shrinks the virtualizer's visible range, and
+// the incremental path builds on the shrunken previous frames instead of
+// recovering), leaving the viewport past the mounted rows -- a blank frame.
+// Detect it cheaply from the spacer geometry (no per-row layout) and, when the
+// viewport is not fully inside the mounted band, force ONE from-scratch rebuild
+// which recomputes the window and covers the viewport. A full rebuild always
+// covers, so this runs at most once and the blank never reaches the compositor.
+function recoverIfUncovered(inner: HTMLElement, st: RenderState): void {
+  const box = scrollBoxOf(inner);
+  if (!box || !box.clientHeight || !st.lastPaint) return;
+  const padTop = parseFloat(inner.style.paddingTop) || 0;
+  const padBottom = parseFloat(inner.style.paddingBottom) || 0;
+  const contentBottom = box.scrollHeight - padBottom;
+  const EPS = 4;
+  const uncovered =
+    box.scrollTop < padTop - EPS || box.scrollTop + box.clientHeight > contentBottom + EPS;
+  if (!uncovered) return;
+  st.forceFull = true;
+  anchoredRewindow(inner, st);
 }
 
 // The distance to the end (px) at or under which the list counts as sitting at
@@ -602,6 +693,12 @@ export function messageDomEpoch(): number {
   return domEpoch;
 }
 
+/** The number of detached row nodes currently held in a list's re-attach cache.
+ *  Test-only observability for the cache bound; unused by the app. */
+export function messageRowCacheSize(inner: HTMLElement): number {
+  return renderStates.get(inner)?.nodeCache.size ?? 0;
+}
+
 export function clearMessages(inner: HTMLElement) {
   domEpoch++;
   const st = renderStates.get(inner);
@@ -784,7 +881,9 @@ function paintMessages(
       lastPaint: null,
       scheduled: false,
       painting: false,
-      onWindowChange: null
+      forceFull: false,
+      onWindowChange: null,
+      nodeCache: new Map()
     };
     renderStates.set(inner, st);
   } else if (!sameChat) {
@@ -793,6 +892,9 @@ function paintMessages(
     st.fromItem = 0;
     st.toItem = -1;
     st.count = 0;
+    // The cached nodes belong to the chat we just left; drop them so a switch
+    // never re-attaches another chat's bubble.
+    st.nodeCache.clear();
   }
   const prevFrames = sameChat ? st.frames : [];
   const prevFromItem = st.fromItem;
@@ -835,7 +937,423 @@ function paintMessages(
 
   const sigs = winItems.map((it) => itemSig(it.m, it.ev, it.ts, firstUnreadId));
 
-  const reusable = sameChat && prevFromItem === fromItem ? prevFrames : null;
+  // The one row this paint's "first queued" banner belongs on: the first
+  // message that opens a queued run sitting ahead of the agent (past the last
+  // claude row). Both the reuse sweep and the row builders key off this single
+  // id so at most one queued head is ever stamped.
+  let firstQueuedMid: string | undefined;
+  {
+    let pq = fromItem > 0 ? !!items[fromItem - 1].m?.queued : false;
+    for (const it of winItems) {
+      const m = it.m;
+      if (!m) continue;
+      if (m.queued && !pq && it.mi! > lastClaudeMi) {
+        firstQueuedMid = m.id;
+        break;
+      }
+      pq = !!m.queued;
+    }
+  }
+
+  // The single-banner bookkeeping shared by the reuse sweep and the row
+  // builders: at most one unread divider and one queued head across the window.
+  type StampState = {unread: boolean; queued: boolean};
+
+  // Build (or re-attach from cache) one SESSION-EVENT row starting at window
+  // index `from`, settling its run span first so the cache key covers the whole
+  // run. Returns the node, the last window index it consumed, and the frame
+  // metadata; the caller owns where it lands in the group/section tree.
+  function makeEvNode(from: number, key: string): {
+    node: HTMLElement;
+    endIdx: number;
+    isFold: boolean;
+    cacheKey: string;
+    sigsSlice: string[];
+  } {
+    let i = from;
+    let isFold = false;
+    let build: () => HTMLElement;
+    let runEnd = i;
+    while (
+      runEnd + 1 < winItems.length &&
+      winItems[runEnd + 1].ev &&
+      new Date(winItems[runEnd + 1].ts).toDateString() === key
+    )
+      runEnd++;
+    if (runEnd - i + 1 >= COLLAPSE_MIN) {
+      const events: CycSessionEvent[] = [];
+      for (let k = i; k <= runEnd; k++) events.push(winItems[k].ev!);
+      isFold = true;
+      i = runEnd;
+      build = () => sessionEventFoldMessages(events);
+    } else if (winItems[from].ev!.kind === 'tool') {
+      const run: CycSessionEvent[] = [winItems[from].ev!];
+      while (
+        i + 1 < winItems.length &&
+        winItems[i + 1].ev?.kind === 'tool' &&
+        new Date(winItems[i + 1].ts).toDateString() === key
+      ) {
+        run.push(winItems[++i].ev!);
+      }
+      let interrupt: CycSessionEvent | undefined;
+      if (
+        i + 1 < winItems.length &&
+        winItems[i + 1].ev?.kind === 'interrupt' &&
+        new Date(winItems[i + 1].ts).toDateString() === key
+      ) {
+        interrupt = winItems[++i].ev!;
+      }
+      build = () =>
+        run.length > 1
+          ? sessionEventRunMessages(run, interrupt)
+          : sessionEventMessage(run[0], interrupt);
+    } else {
+      const only = winItems[from].ev!;
+      build = () => sessionEventMessage(only);
+    }
+    const ck = rowCacheKey(
+      rows[rowOfItem[fromItem + from]].key,
+      sigs.slice(from, i + 1).join('\u0001')
+    );
+    const node = takeCachedRow(st, ck) ?? build();
+    node.dataset.index = String(rowOfItem[fromItem + from]);
+    return {node, endIdx: i, isFold, cacheKey: ck, sigsSlice: sigs.slice(from, i + 1)};
+  }
+
+  // Build (or re-attach from cache) one MESSAGE row. The version key folds the
+  // signature (content, status, unread-anchor) with the group edges the node's
+  // styling bakes in (`first`/`last`) and the queued-head mark, so a re-attached
+  // bubble is byte-identical to a fresh one. A cache hit already carries its
+  // images, send-progress line, and banners, so only the single-banner
+  // bookkeeping is updated; a miss carries images, paints send state, and
+  // stamps the anchors.
+  function makeMsgNode(
+    from: number,
+    m: CycMessage,
+    first: boolean,
+    last: boolean,
+    dropped: Map<string, HTMLElement>,
+    ss: StampState
+  ): {node: HTMLElement; cacheKey: string} {
+    const hasAudio = !!(m as CycMessage & {msgId?: string}).msgId;
+    const attached = uploadsOf(m);
+    const msgCk = rowCacheKey(
+      'm|' + m.id,
+      sigs[from] +
+        '|' +
+        (first ? 'F' : '') +
+        (last ? 'L' : '') +
+        (m.id === firstQueuedMid ? 'Q' : '')
+    );
+    const cached = takeCachedRow(st, msgCk);
+    const messageNode =
+      cached ??
+      (attached.length > 1 || (attached.length === 1 && isAudioUpload(attached[0]))
+        ? attachmentMessage(m, first, last, (u) => uploadUrlOf?.(m, u) ?? '', onOpenUpload)
+        : m.upload
+          ? uploadMessage(m, first, last, uploadSrc?.(m) ?? '', onOpenUpload)
+          : m.file?.fileKind === 'image'
+            ? photoMessage(m, first, last, fileSrc?.(m) ?? '', m.file.name, onOpenFile, {
+                width: m.file.width,
+                height: m.file.height
+              })
+            : m.file?.inline && m.file.content !== undefined
+              ? snippetMessage(m, first, last, onOpenFile)
+              : m.file?.fileKind === 'binary'
+                ? downloadMessage(m, first, last, onOpenFile)
+                : m.file
+                  ? fileMessage(m, first, last, onOpenFile)
+                  : m.kind === 'voice' || (m.role === 'claude' && hasAudio)
+                    ? audioMessage(
+                        m,
+                        first,
+                        last,
+                        onPlay,
+                        onSeek,
+                        winItems.length - from <= EAGER_TAIL
+                      )
+                    : textMessage(m, first, last, onPlay));
+    messageNode.dataset.mid = m.id;
+    messageNode.dataset.index = String(rowOfItem[fromItem + from]);
+    messageNode.dataset.ts = String(m.ts);
+    if (cached) {
+      if (messageNode.dataset.cycUnread !== undefined) ss.unread = true;
+      if (messageNode.classList.contains('cyc-first-queued')) ss.queued = true;
+    } else {
+      carryStillImages(dropped.get(messageNode.dataset.mid), messageNode);
+      paintAttachmentSend(messageNode, m, attached.length > 0 || !!m.upload);
+      if (m.id === firstUnreadId && !ss.unread) {
+        markUnreadLanding(messageNode);
+        messageNode.classList.add('max-tab:!max-w-none');
+        messageNode.prepend(unreadBannerEl());
+        ss.unread = true;
+      }
+      if (m.queued && m.id === firstQueuedMid && !ss.queued) {
+        messageNode.classList.add('cyc-first-queued');
+        messageNode.prepend(
+          queuedBannerEl(
+            'Queued for ' + (s.agentName ?? DEFAULT_AGENT_NAME) + (s.model ? ' \u00b7 ' + s.model : '')
+          )
+        );
+        ss.queued = true;
+      }
+    }
+    return {node: messageNode, cacheKey: msgCk};
+  }
+
+  // Land the freshly reconciled window: spacer heights, the persistent state,
+  // the re-window closure, and a settle-measure of the mounted rows. Shared by
+  // the append path and the scroll-up prepend path.
+  function commitWindow(finalFrames: ItemFrame[]): void {
+    if (windowed) {
+      inner.style.paddingTop = padTop + 'px';
+      inner.style.paddingBottom = padBottom + 'px';
+    } else if (inner.style.paddingTop || inner.style.paddingBottom) {
+      inner.style.removeProperty('padding-top');
+      inner.style.removeProperty('padding-bottom');
+    }
+    st!.sessionId = s.id;
+    st!.frames = finalFrames;
+    st!.fromItem = fromItem;
+    st!.toItem = toItem;
+    st!.count = items.length;
+    st!.rows = rows;
+    st!.lastPaint = () =>
+      paintMessages(
+        inner,
+        s,
+        onPlay,
+        firstUnreadId,
+        onSeek,
+        onOpenFile,
+        events,
+        uploadSrc,
+        onOpenUpload,
+        fileSrc,
+        onEarlier,
+        uploadUrlOf
+      );
+    // Feed the real box heights back to the virtualizer so off-window offsets
+    // and the total scroll height converge from the estimates. measureElement
+    // only notifies (and schedules a re-window) when a size actually changed, so
+    // this settles rather than looping.
+    if (windowed && st!.virt) {
+      for (const node of inner.querySelectorAll<HTMLElement>('[data-index]'))
+        st!.virt.measureElement(node);
+    }
+  }
+
+  // Scroll UP: the window slid toward older rows. Keep the overlap (a prefix of
+  // the mounted frames) in place, trim the rows that left the bottom, and
+  // PREPEND only the rows that entered at the top -- the mirror of the append
+  // path's edge-only reconcile. Without it a scroll up rebuilt the whole window
+  // every frame (the measured up-fling jank). Returns true when it handled the
+  // paint; false falls through to the general path (a full rebuild).
+  function tryPrependWindow(): boolean {
+    const P = prevFromItem - fromItem; // items entering at the top
+    const keptItemCount = toItem - prevFromItem + 1; // overlap items
+    if (P <= 0 || keptItemCount <= 0 || keptItemCount > prevFrames.length) return false;
+    const kept = prevFrames.slice(0, keptItemCount);
+    if (!kept[0]) return false;
+    // The boundary into the leaving-bottom rows must be a whole row, not a
+    // mid-run placeholder, so trimming removes complete rows.
+    if (keptItemCount < prevFrames.length && !prevFrames[keptItemCount]) return false;
+    // The overlap must still match the new window's signatures at the shifted
+    // offset (a pure scroll). A concurrent store change misses here and the
+    // paint falls back to a full rebuild.
+    for (let j = 0; j < kept.length; j++) {
+      const f = kept[j];
+      if (!f) continue;
+      for (let k = 0; k < f.sigs.length; k++) {
+        if (f.sigs[k] !== sigs[P + j + k]) return false;
+      }
+    }
+    // The insertion anchor: the first kept row's LIVE section, read from the DOM
+    // rather than the frame's stored reference (a prior paint can leave that
+    // stale). Bail to a full rebuild if it is not a direct child of the list --
+    // splicing against a detached node throws and drops the whole list into the
+    // rebuild-fallback, which repaints from the top and paints blank. Checked
+    // before any DOM mutation so the fallback starts from a clean tree.
+    const firstKeptSection = kept[0]!.node.closest<HTMLElement>('.cyc-date-group');
+    if (!firstKeptSection || firstKeptSection.parentElement !== inner) return false;
+
+    // The entering-top rows: build them into a fragment as their own sections
+    // and groups. The single-banner state is seeded from the kept rows so a
+    // banner already carried below is never duplicated above.
+    const ss: StampState = {unread: false, queued: false};
+    for (const f of kept) {
+      if (!f) continue;
+      if (f.node.dataset.cycUnread !== undefined) ss.unread = true;
+      if (f.node.classList.contains('cyc-first-queued')) ss.queued = true;
+    }
+    const noDrop = new Map<string, HTMLElement>();
+    const frag = document.createDocumentFragment();
+    const pf: ItemFrame[] = [];
+    let gDay = '';
+    let gSection: HTMLElement | null = null;
+    let gGroup: HTMLDivElement | null = null;
+    let gRole: string | null = null;
+    let gPrevQueued = fromItem > 0 ? !!items[fromItem - 1].m?.queued : false;
+    for (let i = 0; i < P; i++) {
+      const it = winItems[i];
+      const from = i;
+      const key = new Date(it.ts).toDateString();
+      if (key !== gDay) {
+        gDay = key;
+        gSection = h('section', 'cyc-date-group relative');
+        const chip = dateMessage(dayLabel(it.ts));
+        const dri = dateRowOfDay.get(key);
+        if (dri !== undefined) chip.dataset.index = String(dri);
+        gSection.append(chip);
+        frag.append(gSection);
+        gGroup = null;
+        gRole = null;
+      }
+      if (it.ev) {
+        const {node, endIdx, isFold, cacheKey, sigsSlice} = makeEvNode(from, key);
+        i = endIdx;
+        (gGroup ?? gSection!).append(node);
+        pf.push({
+          sig: sigs[from],
+          sigs: sigsSlice,
+          node,
+          dayKey: gDay,
+          dateGroup: gSection,
+          group: gGroup,
+          prevRole: gRole,
+          prevQueued: gPrevQueued,
+          consumed: i - from,
+          se: true,
+          fold: isFold,
+          cacheKey
+        });
+        for (let k = from + 1; k <= i; k++) pf.push(undefined as unknown as ItemFrame);
+        continue;
+      }
+      const m = it.m!;
+      const first = m.role !== gRole;
+      const next = msgs[it.mi! + 1];
+      const last = !next || next.role !== m.role || new Date(next.ts).toDateString() !== key;
+      if (first) {
+        gGroup = h('div', 'cyc-message-group relative');
+        gSection!.append(gGroup);
+      }
+      const {node, cacheKey} = makeMsgNode(from, m, first, last, noDrop, ss);
+      gGroup!.append(node);
+      gPrevQueued = !!m.queued;
+      gRole = m.role;
+      pf.push({
+        sig: sigs[from],
+        sigs: [sigs[from]],
+        node,
+        dayKey: gDay,
+        dateGroup: gSection,
+        group: gGroup,
+        prevRole: gRole,
+        prevQueued: gPrevQueued,
+        consumed: 0,
+        last,
+        cacheKey
+      });
+    }
+
+    // Trim the rows that left the bottom, caching them for a scroll back, and
+    // prune the sections/groups they emptied.
+    const emptied: HTMLElement[] = [];
+    for (let i = keptItemCount; i < prevFrames.length; i++) {
+      const f = prevFrames[i];
+      if (!f) continue;
+      if (f.cacheKey) cacheRow(st!, f.cacheKey, f.node);
+      f.node.remove();
+      if (f.group) emptied.push(f.group);
+      if (f.dateGroup) emptied.push(f.dateGroup);
+    }
+
+    // Splice the prepend fragment in above the kept content. When the last
+    // prepend day equals the first kept day, its rows join the existing kept
+    // section (after that section's date chip) so the day keeps ONE chip; the
+    // remaining earlier-day sections are inserted before it.
+    let lastPf: ItemFrame | undefined;
+    for (let i = pf.length - 1; i >= 0; i--)
+      if (pf[i]) {
+        lastPf = pf[i];
+        break;
+      }
+    if (lastPf && lastPf.dayKey === kept[0]!.dayKey) {
+      const pSection = lastPf.dateGroup!;
+      const chip = firstKeptSection.querySelector<HTMLElement>(':scope > .cyc-date-chip');
+      const ref = chip ? chip.nextSibling : firstKeptSection.firstChild;
+      for (const child of Array.from(pSection.children)) {
+        if (child.classList.contains('cyc-date-chip')) continue;
+        firstKeptSection.insertBefore(child, ref);
+      }
+      for (const f of pf) if (f && f.dateGroup === pSection) f.dateGroup = firstKeptSection;
+      pSection.remove();
+    }
+    inner.insertBefore(frag, firstKeptSection);
+    for (const w of emptied) {
+      if (!w.isConnected) continue;
+      const empty = w.classList.contains('cyc-date-group')
+        ? w.childElementCount <= 1
+        : !w.childElementCount;
+      if (empty) w.remove();
+    }
+
+    commitWindow([...pf, ...kept]);
+    return true;
+  }
+
+  // The rows that scrolled off the TOP as the window slid down. Frames are
+  // item-indexed (a run head then a placeholder per item it consumed), so the
+  // frame at offset (fromItem - prevFromItem) is the one that now sits at the
+  // window top; everything before it left. Keeping the overlap mounted IN PLACE
+  // and only trimming the leaving head + appending the entering tail is what
+  // keeps a fling cheap: the browser re-lays-out the few edge rows, not the
+  // whole window (a from-scratch wipe re-styled and re-painted every row every
+  // scroll event -- the measured jank). A slid window shares no anchor with the
+  // old prefix, so before this it always fell through to a full rebuild.
+  let leavingHead: ItemFrame[] = [];
+  let reusable: ItemFrame[] | null = null;
+  // A forced full rebuild (the coverage net recovering a collapsed window):
+  // reuse nothing, so the window is recomputed and mounted from scratch.
+  const forceFull = st.forceFull;
+  st.forceFull = false;
+  if (forceFull) {
+    // fall through with reusable = null (full rebuild)
+  } else if (sameChat && windowed) {
+    const dropHead = fromItem - prevFromItem;
+    if (dropHead === 0) {
+      reusable = prevFrames;
+    } else if (dropHead > 0 && dropHead < prevFrames.length && prevFrames[dropHead]) {
+      // Only when the boundary lands on a real frame (not mid-run); a mid-run
+      // boundary or a store change that shifted item indices makes the
+      // signature walk below match nothing, and the paint falls back to a full
+      // rebuild (frames empty -> the node set is wiped and rebuilt from cache).
+      reusable = prevFrames.slice(dropHead);
+      leavingHead = prevFrames.slice(0, dropHead);
+    }
+  } else if (sameChat && prevFromItem === fromItem) {
+    reusable = prevFrames;
+  }
+
+  // The window slid the other way (scroll up / a jump to an earlier row): the
+  // overlap is a PREFIX of the mounted frames and new rows enter at the top.
+  // Prepend them instead of rebuilding the window; on any mismatch this returns
+  // false and the general path below takes over.
+  if (
+    !forceFull &&
+    reusable === null &&
+    sameChat &&
+    windowed &&
+    fromItem < prevFromItem &&
+    prevFromItem <= toItem &&
+    prevFrames.length > 0 &&
+    prevFrames[0] &&
+    tryPrependWindow()
+  ) {
+    return;
+  }
+
   let start = 0;
   if (reusable) {
     while (start < reusable.length) {
@@ -896,6 +1414,10 @@ function paintMessages(
             foldFrame.sigs.push(sigs[k]);
             grown.push(undefined as unknown as ItemFrame);
           }
+          // The node grew in place, so its stored version no longer matches its
+          // content; drop its cache key so it is never stashed under a stale
+          // one (it simply rebuilds if it ever leaves and returns).
+          foldFrame.cacheKey = undefined;
           start = end;
         }
       } else {
@@ -960,7 +1482,22 @@ function paintMessages(
       const f = dropSource[i];
       const mid = f?.node.dataset.mid;
       if (mid && !dropped.has(mid)) dropped.set(mid, f.node);
+      // A row leaving the window is stashed under its content-version key so
+      // the build loop below (and later paints) re-attach it rather than
+      // rebuild it. Only rows with a key are cached (date chips are cheap).
+      if (f?.cacheKey) cacheRow(st, f.cacheKey, f.node);
     }
+  }
+  // The rows that scrolled off the top leave: cache their nodes (a scroll back
+  // re-attaches them) and drop them, leaving their now-empty groups for the
+  // prune below. A group straddling the drop boundary keeps its surviving rows
+  // (the prune checks it still has children).
+  for (const f of leavingHead) {
+    if (!f) continue;
+    if (f.cacheKey) cacheRow(st, f.cacheKey, f.node);
+    f.node.remove();
+    if (f.group) emptied.push(f.group);
+    if (f.dateGroup) emptied.push(f.dateGroup);
   }
   if (!frames.length) {
     inner.textContent = '';
@@ -1004,44 +1541,23 @@ function paintMessages(
 
   const onlyChip = (section: HTMLElement) => section.childElementCount <= 1;
 
-  // The one row this paint's "first queued" banner belongs on: the first
-  // message that opens a queued run sitting ahead of the agent (past the last
-  // claude row). Mirrors the stamp condition in the build loop so the reuse
-  // sweep and the build agree on the single row that may carry it.
-  let firstQueuedMid: string | undefined;
-  {
-    let pq = fromItem > 0 ? !!items[fromItem - 1].m?.queued : false;
-    for (const it of winItems) {
-      const m = it.m;
-      if (!m) continue;
-      if (m.queued && !pq && it.mi! > lastClaudeMi) {
-        firstQueuedMid = m.id;
-        break;
-      }
-      pq = !!m.queued;
-    }
-  }
-
   // Sweep the rows the walk reused verbatim: strip an unread or queued stamp off
   // any that is not this paint's anchor, and off a second row that duplicates
   // the anchor id. The freshly built tail below is stamped correctly; seeding
   // these flags from the kept rows keeps the build from adding a second banner
   // when the anchor already carries one.
-  let unreadStamped = false;
-  let queuedStamped = false;
+  const ss: StampState = {unread: false, queued: false};
   for (let j = 0; j < start; j++) {
     const f = frames[j];
     if (!f) continue;
     const node = f.node;
     const mid = node.dataset.mid ?? '';
     if (node.dataset.cycUnread !== undefined) {
-      if (!unreadStamped && firstUnreadId !== undefined && mid === firstUnreadId)
-        unreadStamped = true;
+      if (!ss.unread && firstUnreadId !== undefined && mid === firstUnreadId) ss.unread = true;
       else stripUnreadStamp(node);
     }
     if (node.classList.contains('cyc-first-queued')) {
-      if (!queuedStamped && firstQueuedMid !== undefined && mid === firstQueuedMid)
-        queuedStamped = true;
+      if (!ss.queued && firstQueuedMid !== undefined && mid === firstQueuedMid) ss.queued = true;
       else stripQueuedStamp(node);
     }
   }
@@ -1068,59 +1584,12 @@ function paintMessages(
     }
 
     if (it.ev) {
-      let node: HTMLElement;
-      let isFold = false;
-
-      // A maximal run of consecutive session events within this same day (any
-      // mix of VISIBLE_EVENT kinds; a message item breaks it because the outer
-      // loop advances per item). At or above COLLAPSE_MIN the whole run folds
-      // into one expandable head; below it, fall through to today's behavior
-      // (the short tool burst still groups via sessionEventRunMessages, a lone
-      // event stays a single pill).
-      let runEnd = i;
-      while (
-        runEnd + 1 < winItems.length &&
-        winItems[runEnd + 1].ev &&
-        new Date(winItems[runEnd + 1].ts).toDateString() === key
-      )
-        runEnd++;
-
-      if (runEnd - i + 1 >= COLLAPSE_MIN) {
-        const events: CycSessionEvent[] = [];
-        for (let k = i; k <= runEnd; k++) events.push(winItems[k].ev!);
-        node = sessionEventFoldMessages(events);
-        isFold = true;
-        i = runEnd;
-      } else if (it.ev.kind === 'tool') {
-        const run: CycSessionEvent[] = [it.ev];
-        while (
-          i + 1 < winItems.length &&
-          winItems[i + 1].ev?.kind === 'tool' &&
-          new Date(winItems[i + 1].ts).toDateString() === key
-        ) {
-          run.push(winItems[++i].ev!);
-        }
-
-        let interrupt: CycSessionEvent | undefined;
-        if (
-          i + 1 < winItems.length &&
-          winItems[i + 1].ev?.kind === 'interrupt' &&
-          new Date(winItems[i + 1].ts).toDateString() === key
-        ) {
-          interrupt = winItems[++i].ev!;
-        }
-        node =
-          run.length > 1
-            ? sessionEventRunMessages(run, interrupt)
-            : sessionEventMessage(run[0], interrupt);
-      } else {
-        node = sessionEventMessage(it.ev);
-      }
-      node.dataset.index = String(rowOfItem[fromItem + from]);
+      const {node, endIdx, isFold, cacheKey, sigsSlice} = makeEvNode(from, key);
+      i = endIdx;
       (group ?? dateGroup!).append(node);
       frames.push({
         sig: sigs[from],
-        sigs: sigs.slice(from, i + 1),
+        sigs: sigsSlice,
         node,
         dayKey,
         dateGroup,
@@ -1129,7 +1598,8 @@ function paintMessages(
         prevQueued,
         consumed: i - from,
         se: true,
-        fold: isFold
+        fold: isFold,
+        cacheKey
       });
 
       for (let k = from + 1; k <= i; k++) frames.push(undefined as unknown as ItemFrame);
@@ -1152,58 +1622,7 @@ function paintMessages(
         dateGroup!.append(group);
       }
     }
-    const hasAudio = !!(m as CycMessage & {msgId?: string}).msgId;
-
-    const attached = uploadsOf(m);
-    const messageNode =
-      attached.length > 1 || (attached.length === 1 && isAudioUpload(attached[0]))
-        ? attachmentMessage(m, first, last, (u) => uploadUrlOf?.(m, u) ?? '', onOpenUpload)
-        : m.upload
-          ? uploadMessage(m, first, last, uploadSrc?.(m) ?? '', onOpenUpload)
-          : m.file?.fileKind === 'image'
-            ? photoMessage(m, first, last, fileSrc?.(m) ?? '', m.file.name, onOpenFile, {
-                width: m.file.width,
-                height: m.file.height
-              })
-            : m.file?.inline && m.file.content !== undefined
-              ? snippetMessage(m, first, last, onOpenFile)
-              : m.file?.fileKind === 'binary'
-                ? downloadMessage(m, first, last, onOpenFile)
-                : m.file
-                  ? fileMessage(m, first, last, onOpenFile)
-                  : m.kind === 'voice' || (m.role === 'claude' && hasAudio)
-                    ? audioMessage(
-                        m,
-                        first,
-                        last,
-                        onPlay,
-                        onSeek,
-                        winItems.length - i <= EAGER_TAIL
-                      )
-                    : textMessage(m, first, last, onPlay);
-    messageNode.dataset.mid = m.id;
-    messageNode.dataset.index = String(rowOfItem[fromItem + from]);
-    // The message's ts rides the node for DISPLAY only (a stamp label); the one
-    // durable id in data-mid is what every user action resolves the bubble by.
-    messageNode.dataset.ts = String(m.ts);
-    carryStillImages(dropped.get(messageNode.dataset.mid), messageNode);
-    paintAttachmentSend(messageNode, m, attached.length > 0 || !!m.upload);
-    if (m.id === firstUnreadId && !unreadStamped) {
-      markUnreadLanding(messageNode);
-      messageNode.classList.add('max-tab:!max-w-none');
-      messageNode.prepend(unreadBannerEl());
-      unreadStamped = true;
-    }
-
-    if (m.queued && !prevQueued && it.mi! > lastClaudeMi && !queuedStamped) {
-      messageNode.classList.add('cyc-first-queued');
-      messageNode.prepend(
-        queuedBannerEl(
-          'Queued for ' + (s.agentName ?? DEFAULT_AGENT_NAME) + (s.model ? ' · ' + s.model : '')
-        )
-      );
-      queuedStamped = true;
-    }
+    const {node: messageNode, cacheKey: msgCk} = makeMsgNode(from, m, first, last, dropped, ss);
     prevQueued = !!m.queued;
     group!.append(messageNode);
 
@@ -1218,7 +1637,8 @@ function paintMessages(
       prevRole,
       prevQueued,
       consumed: 0,
-      last
+      last,
+      cacheKey: msgCk
     });
   }
 
@@ -1260,46 +1680,8 @@ function paintMessages(
     break;
   }
 
-  // Spacers stand in for the rows outside the window; skip touching the style
-  // in the render-all case so a no-op repaint of a detached list mutates
-  // nothing (the reuse guarantees the row nodes carry).
-  if (windowed) {
-    inner.style.paddingTop = padTop + 'px';
-    inner.style.paddingBottom = padBottom + 'px';
-  } else if (inner.style.paddingTop || inner.style.paddingBottom) {
-    inner.style.removeProperty('padding-top');
-    inner.style.removeProperty('padding-bottom');
-  }
-
-  st.sessionId = s.id;
-  st.frames = frames;
-  st.fromItem = fromItem;
-  st.toItem = toItem;
-  st.count = items.length;
-  st.rows = rows;
-  st.lastPaint = () =>
-    paintMessages(
-      inner,
-      s,
-      onPlay,
-      firstUnreadId,
-      onSeek,
-      onOpenFile,
-      events,
-      uploadSrc,
-      onOpenUpload,
-      fileSrc,
-      onEarlier,
-      uploadUrlOf
-    );
-
-  // Feed the real box heights back to the virtualizer so off-window offsets and
-  // the total scroll height converge from the estimates. measureElement only
-  // notifies (and thus schedules a re-window) when a size actually changed, so
-  // this settles rather than looping.
-  if (windowed && st.virt) {
-    for (const node of inner.querySelectorAll<HTMLElement>('[data-index]')) st.virt.measureElement(node);
-  }
+  // Spacers, persistent state, the re-window closure, and a settle-measure.
+  commitWindow(frames);
 }
 
 /** A date chip whose box overlaps the unread divider carries this; the chip
