@@ -96,7 +96,7 @@ async function start(): Promise<ReplyDialsStore> {
   await store.resetBits();
   await store.setLevel(DEFAULT_REPLY_LEVEL);
   await store.setComplexity(DEFAULT_COMPLEXITY);
-  await store.setToggles({ verbosityOn: true, complexityOn: false, promptBitsOn: true });
+  await store.setToggles({ verbosityOn: true, complexityOn: false, promptBitsOn: false });
   expect(store.state(), "the dials did not go back to their ship position").toEqual(defaultState());
   return store;
 }

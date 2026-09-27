@@ -139,8 +139,9 @@ export const SETTINGS_DEFAULTS: AppSettings = {
   // #462: complexity is the dial he turns on when he wants it, not one offered
   // out of the box; verbosity stays on. An explicit ON is stored and honoured.
   verbosityOn: true, complexityOn: false,
-  // #465: the prompt-bits menu has always been offered
-  promptBitsOn: true,
+  // #585 follow-up (owner call): the prompt-bits menu ships OFF; it is turned
+  // on from settings, like the complexity dial. The plugin owns the live value.
+  promptBitsOn: false,
   // a diagnostic box over the chat: nobody has it on until they ask for it
   geom: false
 };

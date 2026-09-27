@@ -459,10 +459,10 @@ test("E-plugins: a default engine declares reply-dials, and its composer == the 
     const fixture = JSON.parse(readFileSync(
       new URL("../fixtures/reply-dials.decl.json", import.meta.url).pathname, "utf8"));
     expect(dials).toEqual(fixture);
-    /* SHIP DEFAULT (his call): bits + verbosity ship on, complexity ships OFF, so
-     * a fresh engine declares TWO widgets in pill order. */
+    /* SHIP DEFAULT (#585 follow-up, owner call): only verbosity ships on;
+     * complexity and prompt-bits ship OFF, so a fresh engine declares ONE widget. */
     expect(dials.composer.map((w: any) => [w.type, w.key])).toEqual([
-      ["menu", "bits"], ["slider", "verbosity"],
+      ["slider", "verbosity"],
     ]);
   });
 

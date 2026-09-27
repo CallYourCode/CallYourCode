@@ -5,7 +5,7 @@
  * contract, not a junk drawer. */
 
 import { json, type LogFn } from "../platform/httpx";
-import { chordMap, cleanStrings, sidList, type OwnerStore } from "../access/owner-store";
+import { chordMap, sidList, type OwnerStore } from "../access/owner-store";
 import type { Owners } from "../access/owners";
 
 export type SettingsDeps = {
@@ -19,10 +19,13 @@ export function makeSettingsRoutes(deps: SettingsDeps) {
     if (path !== "/settings") return null;
 
     if (req.method === "GET") {
-      /* A device's session, or an ENGINE's issued token: the engine polls the
-       * two dials it answers at (replyLevel/complexity), and in HOSTED it has
-       * no Clerk session -- its token names the owner whose globals it reads.
-       * Read-only: POST below stays device-only. */
+      /* A device's session, or an ENGINE's issued token: the engine used to poll
+       * the two dials here, and in HOSTED it has no Clerk session -- its token
+       * names the owner whose globals it reads. The reply dials moved onto the
+       * engine's own reply-dials plugin (#585), which owns them now; this route
+       * still ECHOES whatever an old app-settings.json holds for them so the app
+       * can migrate those values into the plugin once. Read-only: POST below
+       * stays device-only. */
       let store: OwnerStore | null = await deps.owners.deviceOwner(req);
       if (!store && deps.hosted) {
         const eng = deps.owners.engineAuth(req);
@@ -43,19 +46,18 @@ export function makeSettingsRoutes(deps: SettingsDeps) {
         changed = changed || appSettings.speed !== body.speed;
         appSettings.speed = body.speed;
       }
-      for (const k of ["notify", "sound", "activity", "verbosityOn", "complexityOn", "promptBitsOn", "geom"] as const) {
+      for (const k of ["notify", "sound", "activity", "geom"] as const) {
         if (typeof body[k] === "boolean") {
           changed = changed || appSettings[k] !== body[k];
           appSettings[k] = body[k];
         }
       }
-      // The two dials: 1..5 on both scales, whole numbers, nothing else stored.
-      for (const k of ["replyLevel", "complexity"] as const) {
-        if (Number.isInteger(body[k]) && body[k] >= 1 && body[k] <= 5) {
-          changed = changed || appSettings[k] !== body[k];
-          appSettings[k] = body[k];
-        }
-      }
+      /* THE REPLY DIALS ARE NO LONGER WRITTEN HERE (#585). replyLevel, complexity,
+       * verbosityOn, complexityOn, promptBitsOn and `strings` are owned by the
+       * engine's reply-dials plugin; the app edits them by plugin RPC and never
+       * POSTs them here, so this route drops them rather than being a second
+       * writer. Old values already on disk are still read at boot and echoed by
+       * GET, so the one-time app -> plugin migration can find them. */
       /* The keymap, REPLACED WHOLE. A binding put back on its default is the
        * key being absent, so merging key-by-key like everything above would
        * make unbinding impossible to express. Compared by value because it is
@@ -66,14 +68,6 @@ export function makeSettingsRoutes(deps: SettingsDeps) {
       if (km) {
         changed = changed || JSON.stringify(appSettings.keymap) !== JSON.stringify(km);
         appSettings.keymap = km;
-      }
-      // The wording overrides (#362), replaced whole and stored verbatim so the
-      // page's holds() round-trip matches. Absent leaves what is here; a present
-      // bag (even {}) is the answer.
-      const st = cleanStrings(body.strings);
-      if (st) {
-        changed = changed || JSON.stringify(appSettings.strings) !== JSON.stringify(st);
-        appSettings.strings = st;
       }
       // The merged order, replaced whole for the same reason as the keymap: a
       // row put back to its default position is its id moving, not vanishing.

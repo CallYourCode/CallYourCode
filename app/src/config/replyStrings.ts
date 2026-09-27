@@ -13,9 +13,9 @@ export const DEFAULT_REPLY_TEXT: Record<number, string> = {
     ' (Reply with a copy of your terminal output via the chat tool. Send the' +
     ' same detail you would print in the terminal.)',
   2:
-    ' (Reply with the chat tool, the way you would message someone. complete' +
-    ' but not exhaustive, structured where structure helps, a few short' +
-    ' paragraphs at most.)',
+    ' (Reply with the chat tool, the way you would message someone. 1-2 lines' +
+    ' answer. No blobs of text. A list of short and simple line items where it' +
+    ' helps.)',
   3:
     ' (Reply with the chat tool AND the speak tool. Send a short spoken summary' +
     ' of the reply via speak tool and a full text message via chat tool.)',

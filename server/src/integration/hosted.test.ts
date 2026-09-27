@@ -427,18 +427,24 @@ test("owner-scoping: engine A's token cannot reach owner B's account", async () 
   expect((await enrollEngine(s.url, a.eng, bearer(tokenA))).status).toBe(403); // barred until restored
 });
 
-test("an enrolled engine reads its owner's /settings (the two dials), read-only", async () => {
+test("an enrolled engine reads its owner's /settings, read-only", async () => {
+  /* The engine used to poll the two reply dials here; they moved onto its own
+   * reply-dials plugin (#585), so the app server no longer writes them. What is
+   * still true, and what this pins, is the engine token's SHAPE on /settings: it
+   * may READ the owner's globals (its own dials migration reads any old values
+   * off this route) and it may NOT write. Proven on `speed`, a global the app
+   * server still owns. */
   const jwks = startJwks();
   const dir = await mkdtemp(join(tmpdir(), "cyc-hosted-"));
   dirs.push(dir);
   const s = await startHosted(dir, jwks.url);
 
   const tokenA = await mint({ sub: "user_alice" });
-  await post(`${s.url}/settings`, { replyLevel: 5 }, bearer(tokenA));
+  await post(`${s.url}/settings`, { speed: 1.5 }, bearer(tokenA));
   const a = await enrolledBearer(s.url, await fakeEngine("e-a"), bearer(tokenA));
 
   const viaEngine = await getJson(`${s.url}/settings`, a.bearer);
-  expect(viaEngine.replyLevel).toBe(5);
+  expect(viaEngine.speed).toBe(1.5);
   // the engine token does not open the WRITE side
-  expect((await post(`${s.url}/settings`, { replyLevel: 1 }, a.bearer)).status).toBe(401);
+  expect((await post(`${s.url}/settings`, { speed: 1 }, a.bearer)).status).toBe(401);
 });

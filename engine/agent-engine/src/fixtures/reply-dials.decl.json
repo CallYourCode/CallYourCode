@@ -4,42 +4,6 @@
   "version": 1,
   "composer": [
     {
-      "type": "menu",
-      "icon": "edit",
-      "label": "Prompt bits",
-      "key": "bits",
-      "items": [
-        {
-          "text": "short answer",
-          "insert": "short answer"
-        },
-        {
-          "text": "discuss. don't do.",
-          "insert": "discuss. don't do."
-        },
-        {
-          "text": "add to task list, don't discuss or do.",
-          "insert": "add to task list, don't discuss or do."
-        },
-        {
-          "text": "do in a background agent.",
-          "insert": "do in a background agent."
-        },
-        {
-          "text": "explain with examples.",
-          "insert": "explain with examples."
-        },
-        {
-          "text": "Answer with a md file with the show tool.",
-          "insert": "Answer with a md file with the show tool."
-        },
-        {
-          "text": "Show an interactive HTML page with the show tool.",
-          "insert": "Show an interactive HTML page with the show tool."
-        }
-      ]
-    },
-    {
       "type": "slider",
       "icon": "equalizer",
       "label": "Verbosity",
@@ -54,7 +18,7 @@
         {
           "n": 2,
           "name": "Chat",
-          "hint": "Reply with the chat tool, the way you would message someone. complete but not exhaustive, structured where structure helps, a few short paragraphs at most."
+          "hint": "Reply with the chat tool, the way you would message someone. 1-2 lines answer. No blobs of text. A list of short and simple line items where it helps."
         },
         {
           "n": 3,

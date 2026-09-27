@@ -83,9 +83,9 @@ export const DEFAULT_REPLY_NAMES: Record<number, string> = {
 export const DEFAULT_REPLY_TEXT: Record<number, string> = {
   1: " (Reply with a copy of your terminal output via the chat tool. Send the" +
      " same detail you would print in the terminal.)",
-  2: " (Reply with the chat tool, the way you would message someone. complete" +
-     " but not exhaustive, structured where structure helps, a few short" +
-     " paragraphs at most.)",
+  2: " (Reply with the chat tool, the way you would message someone. 1-2 lines" +
+     " answer. No blobs of text. A list of short and simple line items where it" +
+     " helps.)",
   3: " (Reply with the chat tool AND the speak tool. Send a short spoken summary" +
      " of the reply via speak tool and a full text message via chat tool.)",
   4: " (Answer with the speak tool. The spoken answer must stand on its own:" +
@@ -358,7 +358,11 @@ export function defaultState(): DialsState {
     complexity: DEFAULT_COMPLEXITY,
     verbosityOn: true,
     complexityOn: false,
-    promptBitsOn: true,
+    /* SHIP DEFAULT (owner call): the prompt-bits menu ships OFF now (#585
+     * follow-up). Like the complexity dial, it stays present and keeps its
+     * value; off means the composer does not offer it, and it is turned back
+     * on from settings. */
+    promptBitsOn: false,
     overrides: {},
   };
 }
@@ -566,14 +570,19 @@ export class ReplyDialsStore {
     await this.commit();
   }
 
-  /* One-shot import from the app-server bag (2.5b). Names and texts become
-   * overrides only where they DIFFER from the compiled defaults; bits replace the
-   * list (over-cap items dropped and counted); toggles copied. Idempotent. */
+  /* One-shot import from the app-server bag (2.5b), the app -> plugin migration
+   * of the old app-server-owned dials. Names and texts become overrides only
+   * where they DIFFER from the compiled defaults; bits replace the list (over-cap
+   * items dropped and counted); toggles copied; the two dial LEVELS (level,
+   * complexity) copied when a valid rung rides along, so the owner's stated level
+   * survives the move. Idempotent: run twice, one state. */
   async importFromApp(bag: {
     strings?: { reply?: unknown; complexity?: unknown; bits?: unknown };
     verbosityOn?: unknown;
     complexityOn?: unknown;
     promptBitsOn?: unknown;
+    level?: unknown;
+    complexity?: unknown;
   }): Promise<{ imported: { names: number; texts: number; bits: number; toggles: number }; dropped: { bits: number } }> {
     let names = 0, texts = 0, toggles = 0, bitsCount = 0, bitsDropped = 0;
     const strings = bag.strings ?? {};
@@ -613,6 +622,11 @@ export class ReplyDialsStore {
     for (const [k, v] of Object.entries({ verbosityOn: bag.verbosityOn, complexityOn: bag.complexityOn, promptBitsOn: bag.promptBitsOn })) {
       if (typeof v === "boolean") { (this.s as any)[k] = v; toggles++; }
     }
+
+    // the dial levels ride along when the migration carries them; a bad rung is
+    // ignored (the ship default stands), never a throw
+    if (validRung(bag.level)) this.s.level = bag.level;
+    if (typeof bag.complexity === "number" && DEFAULT_COMPLEXITY_NAMES[bag.complexity]) this.s.complexity = bag.complexity;
 
     await this.commit();
     return { imported: { names, texts, bits: bitsCount, toggles }, dropped: { bits: bitsDropped } };
@@ -747,13 +761,20 @@ export function replyDialsPlugin(deps: DialsDeps, core?: (id: string) => PluginC
     get: async () => {
       const s = store.state();
       const w = effectiveWording();
+      /* The SHIP DEFAULTS ride along too, so the app can tell a pristine engine
+       * (every field on its default) from a touched one without a second copy of
+       * them: that pristine test is the once-guard for the app -> plugin
+       * migration (a touched engine is never re-migrated over). */
+      const ds = defaultState();
       return {
         level: s.level, complexity: s.complexity, migrated: store.isMigrated(),
         verbosityOn: s.verbosityOn, complexityOn: s.complexityOn, promptBitsOn: s.promptBitsOn,
         verbosity: w.verbosity, complexity_rungs: w.complexity_rungs,
         bits: store.bits(),
         defaults: { names: DEFAULT_REPLY_NAMES, texts: DEFAULT_REPLY_TEXT, bits: DEFAULT_PROMPT_BITS,
-          complexityNames: DEFAULT_COMPLEXITY_NAMES, complexityTexts: DEFAULT_COMPLEXITY_TEXT },
+          complexityNames: DEFAULT_COMPLEXITY_NAMES, complexityTexts: DEFAULT_COMPLEXITY_TEXT,
+          level: ds.level, complexity: ds.complexity,
+          verbosityOn: ds.verbosityOn, complexityOn: ds.complexityOn, promptBitsOn: ds.promptBitsOn },
       };
     },
 
