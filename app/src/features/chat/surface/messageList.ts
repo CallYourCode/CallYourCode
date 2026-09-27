@@ -724,16 +724,37 @@ export function scrollMessageIntoView(
   if (idx < 0) return false;
   const box = scrollBoxOf(inner);
   if (!box || !box.clientHeight) return true; // render-all: the row is already mounted
-  const v = syncGeom(inner, st, box);
-  v.getVirtualItems(); // refresh the measurements cache getOffsetForIndex reads
-  const off = v.getOffsetForIndex(idx, align);
-  if (off) {
-    box.scrollTop = off[0];
+  // getOffsetForIndex reads the measurement cache: a row still OUTSIDE the
+  // window carries only its per-row ESTIMATE (EST_MSG), but a wrapped bubble on
+  // the narrow layout measures well over that, so a single estimate-based jump
+  // to a FAR row lands one window short of it and never mounts it -- the unread
+  // landing that came to rest mid-history with no divider in the DOM. Each pass
+  // scrolls to the current best offset and re-windows, which MEASURES the rows
+  // it just mounted and feeds their real heights back; the next offset is
+  // therefore closer, and the window walks onto the target in a few passes.
+  // Iterate until the row is mounted and the offset it computes to has stopped
+  // moving, bounded so a pathological geometry cannot spin. Under jsdom every
+  // row measures to its estimate, so the offset is stable from pass 0 and this
+  // settles in two passes with the same landing the single jump gave.
+  const g = globalThis as unknown as {CSS?: {escape?: (s: string) => string}};
+  const escId = g.CSS?.escape ? g.CSS.escape(id) : id.replace(/["\\]/g, '\\$&');
+  const sel = `.cyc-message[data-mid="${escId}"]`;
+  let prevOff = Number.NaN;
+  for (let pass = 0; pass < 12; pass++) {
+    const v = syncGeom(inner, st, box);
+    v.getVirtualItems(); // refresh the measurements cache getOffsetForIndex reads
+    const off = v.getOffsetForIndex(idx, align);
+    if (!off) break;
+    const target = off[0];
+    box.scrollTop = target;
     markMachineTop(box);
+    // Re-window at the new offset now (computeWindow reads box.scrollTop), so the
+    // caller can find the freshly mounted row synchronously, and this pass's
+    // fresh measurements sharpen the next offset.
+    st.lastPaint?.();
+    if (inner.querySelector(sel) && Math.abs(target - prevOff) <= 1) break;
+    prevOff = target;
   }
-  // Re-window at the new offset now (computeWindow reads box.scrollTop), so the
-  // caller can find the freshly mounted row synchronously.
-  st.lastPaint?.();
   return true;
 }
 

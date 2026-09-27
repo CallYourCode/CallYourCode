@@ -8,7 +8,7 @@ vi.mock('../speechGate', () => ({mayStartSpeech: () => false}));
 vi.mock('../engine/store', () => ({get: (): undefined => undefined}));
 
 import type {CycMessage, CycSession, CycSessionEvent} from '../types';
-import {renderMessages} from '../features/chat/surface/messageList';
+import {renderMessages, clearMessages, rewindowMessages} from '../features/chat/surface/messageList';
 import {createReaderLanding} from '../features/chat/surface/readerLanding';
 import type {ReadMarker} from '../engine/store/readState';
 
@@ -352,5 +352,165 @@ describe('the anchor sits at the first claude row the count counts', () => {
     expect(result.reader.scrollToFirstUnread()).toBe(false);
     result.scroll.scrollTop = result.scroll.scrollHeight;
     expect(result.geometry.distanceToBottom()).toBe(0);
+  });
+});
+
+/* THE UNREAD LANDING FAR BACK IN A HEAVY CHAT, through the VIRTUALIZED seam.
+ *
+ * On a narrow layout the rendered bubble measures well over the per-row
+ * estimate. A cold open pins the window to the end first, so the divider anchor
+ * sits far above the window on only its ESTIMATE. The first placement seats the
+ * divider from that estimate; re-windowing then measures the rows it exposed and
+ * the divider's true top drifts away, and without a re-settle the open comes to
+ * rest mid-history with no divider in view (the reported regression). Driven
+ * here through a virtual mount whose rows carry a stubbed layout (jsdom lays out
+ * nothing) so the seat can be asserted: the divider mounts, the view leaves the
+ * bottom, and the divider comes to rest inside the viewport with lead-in above.
+ */
+describe('the landing settles the divider far back in a virtualized heavy chat', () => {
+  const VH = 800;
+  const H_MSG = 150; // over EST_MSG (96)
+  const H_EVENT = 30;
+
+  const rowH = (el: HTMLElement): number =>
+    el.classList.contains('cyc-session-event')
+      ? H_EVENT
+      : el.classList.contains('cyc-msg-date')
+        ? 40
+        : el.classList.contains('cyc-message')
+          ? H_MSG
+          : 0;
+
+  function virtualMount() {
+    const scroll = document.createElement('div');
+    scroll.className = 'cyc-message-list-scroll';
+    const inner = document.createElement('div');
+    scroll.append(inner);
+    document.body.append(scroll);
+    let top = 0;
+    Object.defineProperty(scroll, 'clientHeight', {value: VH, configurable: true});
+    Object.defineProperty(scroll, 'clientWidth', {value: 390, configurable: true});
+    // scrollHeight tracks the padded virtual content: the top/bottom spacers plus
+    // the mounted rows' own heights, the same total the browser would derive.
+    Object.defineProperty(scroll, 'scrollHeight', {
+      configurable: true,
+      get: () => {
+        const pt = parseFloat(inner.style.paddingTop) || 0;
+        const pb = parseFloat(inner.style.paddingBottom) || 0;
+        let sum = 0;
+        for (const r of inner.querySelectorAll<HTMLElement>('[data-index]')) sum += rowH(r);
+        return pt + pb + sum;
+      }
+    });
+    Object.defineProperty(scroll, 'scrollTop', {
+      configurable: true,
+      get: () => top,
+      set: (v: number) => {
+        top = Math.max(0, v);
+      }
+    });
+    return {scroll, inner};
+  }
+
+  // Stand in a layout for the mounted rows: each row's on-screen top is the top
+  // spacer plus the heights of the mounted rows before it, minus the live
+  // scroll. This is the REAL (measured) geometry, deliberately at odds with the
+  // virtualizer's estimate-built spacer until the exposed rows are measured --
+  // exactly the divergence the re-settle must converge.
+  function installRects(inner: HTMLElement, scroll: HTMLElement) {
+    const orig = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement): DOMRect {
+      if (this === scroll) {
+        return {top: 0, left: 0, right: 390, bottom: VH, width: 390, height: VH, x: 0, y: 0, toJSON() {}} as DOMRect;
+      }
+      if (this.dataset.index === undefined) {
+        return {top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON() {}} as DOMRect;
+      }
+      let t = parseFloat(inner.style.paddingTop) || 0;
+      for (const r of inner.querySelectorAll<HTMLElement>('[data-index]')) {
+        if (r === this) break;
+        t += rowH(r);
+      }
+      t -= scroll.scrollTop;
+      const h = rowH(this);
+      return {top: t, left: 0, right: 390, bottom: t + h, width: 390, height: h, x: 0, y: t, toJSON() {}} as DOMRect;
+    };
+    return () => {
+      HTMLElement.prototype.getBoundingClientRect = orig;
+    };
+  }
+
+  test('a 60+ claude-row-back anchor lands with the divider seated in the viewport', () => {
+    // A read run, then 70 unread claude replies interleaved with status pills:
+    // the anchor is the first of the 70, ~140 rows above a bottom-pinned window.
+    const messages: CycMessage[] = [];
+    for (let i = 1; i <= 40; i++) messages.push(claude(i, 'read ' + i, i * 10));
+    const marker = messages[messages.length - 1]; // last read row (identity)
+    let ts = marker.ts;
+    for (let i = 41; i <= 110; i++) {
+      ts += 10;
+      messages.push(userRow(i, 'context ' + i, ts));
+      ts += 10;
+      messages.push(claude(i + 1000, 'unread reply ' + i, ts));
+    }
+    const unread = messages.filter((m) => m.role === 'claude' && m.ts > marker.ts).length;
+    expect(unread).toBeGreaterThan(50);
+    const session = {id: 's1', name: 's1', messages, unread} as CycSession;
+
+    const {scroll, inner} = virtualMount();
+    const restore = installRects(inner, scroll);
+    try {
+      const reader = createReaderLanding({
+        deps: {
+          heardTsOf: () => marker.ts,
+          readMarkerOf: () => ({mid: (marker as {mid?: string}).mid, ts: marker.ts}),
+          play: () => {},
+          suppressAutoSpeak: () => false,
+          isChatViewOpen: () => true
+        },
+        messages: inner,
+        scroll,
+        silentScrollTo: (position) => {
+          scroll.scrollTop = position;
+        },
+        openMarker: () => ({ts: marker.ts}),
+        setOpenMarker: () => {}
+      });
+      const firstUnreadId = reader.firstUnheardId(session);
+      expect(firstUnreadId).toBeDefined();
+
+      renderMessages(inner, session, () => {}, firstUnreadId, undefined, undefined, []);
+      // A cold open pins to the end first.
+      scroll.scrollTop = scroll.scrollHeight;
+      renderMessages(inner, session, () => {}, firstUnreadId, undefined, undefined, []);
+
+      // The scrollToFirstUnread pass mounts and settles the divider.
+      expect(reader.scrollToFirstUnread(firstUnreadId)).toBe(true);
+
+      let divider = inner.querySelector<HTMLElement>('[data-cyc-unread]');
+      expect(divider).not.toBeNull();
+      // It left the bottom (walked up to the far anchor)...
+      const toEnd = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
+      expect(toEnd).toBeGreaterThan(VH);
+      // ...and the divider came to rest inside the viewport with lead-in above,
+      // held there through the measurement settle (not stuck at the top, not
+      // off-screen).
+      let top = divider!.getBoundingClientRect().top;
+      expect(top).toBeGreaterThan(0);
+      expect(top).toBeLessThan(VH);
+      // The follow-up re-windows the app runs after a scroll (measurement
+      // settle, scroll-end) must not shift the divider back off its seat: the
+      // landing has to leave NO pending measurement drift behind it.
+      rewindowMessages(inner);
+      rewindowMessages(inner);
+      divider = inner.querySelector<HTMLElement>('[data-cyc-unread]');
+      expect(divider).not.toBeNull();
+      top = divider!.getBoundingClientRect().top;
+      expect(top).toBeGreaterThan(0);
+      expect(top).toBeLessThan(VH);
+    } finally {
+      restore();
+      clearMessages(inner);
+    }
   });
 });

@@ -6,7 +6,7 @@ import {dataState, sessionState} from '@/sessionState';
 import {speaker} from '@/audio/speaker';
 import {mayStartSpeech} from '@/speechGate';
 import {UNREAD_LANDING_SELECTOR} from '../messages/messageFrame';
-import {scrollMessageIntoView} from './messageList';
+import {scrollMessageIntoView, rewindowMessages} from './messageList';
 
 interface ReaderLandingDeps {
   heardTsOf(session: CycSession): number;
@@ -127,9 +127,31 @@ export function createReaderLanding(options: ReaderLandingOptions) {
     if (!marker) return false;
     const box = scroll;
     const headroom = box.clientHeight / 3;
-    const delta = marker.getBoundingClientRect().top - box.getBoundingClientRect().top;
-    const target = Math.max(0, box.scrollTop + delta - headroom);
-    silentScrollTo(Math.min(target, box.scrollHeight - box.clientHeight));
+    const virtualized = !!messages.closest('.cyc-message-list-scroll');
+    // Seat the divider a third of the way down and HOLD it there across the
+    // measurement settle. Placing it moves the offset, which re-windows and
+    // measures rows that were only ESTIMATED before; on the narrow layout their
+    // real heights run over the estimate, so the divider's true top drifts away
+    // from where the first placement put it and the landing would come to rest
+    // above (or below) it. Re-window synchronously after each move and
+    // re-measure the divider until its seat holds, bounded so it cannot spin.
+    // The divider node can be recreated as the window slides, so it is re-found
+    // each pass. On a detached / non-virtual list there is no scroll box to
+    // re-window; getBoundingClientRect already reflects the new scroll there, so
+    // the loop still converges in one or two passes.
+    for (let pass = 0; pass < 8; pass++) {
+      const found = messages.querySelector<HTMLElement>(UNREAD_LANDING_SELECTOR);
+      if (!found) break;
+      marker = found;
+      const delta = marker.getBoundingClientRect().top - box.getBoundingClientRect().top;
+      const target = Math.max(
+        0,
+        Math.min(box.scrollTop + delta - headroom, box.scrollHeight - box.clientHeight)
+      );
+      if (Math.abs(target - box.scrollTop) <= 1) break;
+      silentScrollTo(target);
+      if (virtualized) rewindowMessages(messages);
+    }
     return true;
   };
 

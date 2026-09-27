@@ -175,5 +175,44 @@ for (const vp of VIEWPORTS) {
       expect(allRows(inner)).toBeLessThan(Math.ceil(vp.h / 40) + 60);
       clearMessages(inner);
     });
+
+    // The unread landing far back in a heavy chat (50+ unread): the anchor sits
+    // ~60 turns (well over 50 claude rows) above a window pinned to the end. The
+    // bounded convergence walk in scrollMessageIntoView must land on it while the
+    // DOM stays bounded -- no runaway passes, no blank. The measured height is
+    // stubbed above the 96px estimate to sharpen offsets across passes the way a
+    // real narrow-layout bubble does; jsdom lays out nothing, so this guards the
+    // mount and the DOM bound rather than the on-screen seat (the probes cover
+    // the seat at each viewport).
+    test('walks onto a far off-window anchor while the DOM stays bounded', () => {
+      const s = bigChat();
+      const {scroll, inner} = mount(vp.w, vp.h);
+      const orig = HTMLElement.prototype.getBoundingClientRect;
+      HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+        const c = this.classList;
+        const height = c.contains('cyc-session-event')
+          ? 30
+          : c.contains('cyc-message')
+            ? 150 // well over EST_MSG (96)
+            : c.contains('cyc-msg-date')
+              ? 40
+              : 0;
+        return {top: 0, left: 0, right: 0, bottom: height, width: vp.w, height, x: 0, y: 0, toJSON() {}} as DOMRect;
+      };
+      try {
+        // Seed the window at the bottom (a cold open pins to the end first), then
+        // land on an anchor ~60 turns (well over 50 claude rows) above it.
+        scroll.scrollTop = 5_000_000;
+        paint(inner, s);
+        const anchor = s.messages[s.messages.length - 120];
+        expect(hasMid(inner, anchor.id)).toBe(false);
+        expect(scrollMessageIntoView(inner, anchor.id, 'start')).toBe(true);
+        expect(hasMid(inner, anchor.id)).toBe(true);
+        expect(allRows(inner)).toBeLessThan(Math.ceil(vp.h / 40) + 60);
+      } finally {
+        HTMLElement.prototype.getBoundingClientRect = orig;
+      }
+      clearMessages(inner);
+    });
   });
 }
