@@ -167,6 +167,13 @@ export const HISTORICAL_DIAL_TEXTS: readonly string[] = [
   // complexity, pre-reword: rung 3 ("Short and Simple")
   "(Keep this short and simple: the answer, the one reason it is the answer," +
     " and stop there.)",
+  // verbosity, pre-reword (2026-07-26): a speak-only rung, before the reword
+  "(Reply with the speak tool. Keep it concise, complete, short and simple;" +
+    " whole sentences, it will be read aloud.)",
+  // verbosity, pre-reword (2026-07-30): a chat-only rung naming the terminal,
+  // before the reword
+  "(Reply with the chat tool. Send the same detail you would print in the" +
+    " terminal: full output, structure intact. Do not use the speak tool.)",
 ] as const;
 
 /* A whitespace-tolerant END-anchored matcher for ONE known dial string: its

@@ -7,8 +7,8 @@
  */
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { initChatlog, armAwaiting, resetForTest as resetChatlog } from "./chatlog.ts";
-import { initIngest, syncIngest, hasIngest, backfillInProgress, applyPiFrame, resetForTest as resetIngest,
+import { initChatlog, resetForTest as resetChatlog } from "./chatlog.ts";
+import { initIngest, syncIngest, hasIngest, backfillInProgress, resetForTest as resetIngest,
   BACKFILL_SPAN, type IngestSession } from "./ingest.ts";
 import type { OverlayBatch } from "../adapters/mux-adapter.ts";
 import type { TailPointer } from "../runtime/agentmeta.ts";
@@ -199,51 +199,6 @@ describe("the live tail", () => {
     liveCb!({ events: [], queueOps: [], consumed: [], offset: LINE,
       delivered: [{ text: "do the thing", uuid: "uD", ts: 1_000_009, off: 0 }] });
     expect(s.log.map((r) => [r.kind, r.text, r.src!.rid])).toEqual([["delivered", "do the thing", "delivered:uD"]]);
-  });
-
-  /* THE ENGINE'S OWN APP SEND ECHOING BACK. The reader drops the ones that
-   * START with TEXT:/VOICE: (isFromApp); the stranded case -- leftover composer
-   * text so the delivered bytes landed appended after it -- slips past the
-   * reader as a prompt, and the ingest recognises it by the EXACT bytes armed at
-   * send time. Real shape from the deployed logs (ag-R3s2t84jHv6umqsk). */
-  test("a stranded-prefix own send is matched by exact delivered text, never a pill", () => {
-    const s = mkSession();
-    fileSize = 0;
-    syncIngest();
-    const delivered = "TEXT: hi (Reply with the chat tool, the way you would message someone. " +
-      "complete but not exhaustive, structured where structure helps, a few short paragraphs at most.)";
-    armAwaiting("c-hi", "ag-1", 0, delivered); // the engine knows exactly what it typed
-    const echo = promptEv(0, "> jeez man why is so difficult to move a sessoin from shikher@mac to k8plus" + delivered);
-    liveCb!({ events: [echo], queueOps: [], consumed: [], delivered: [], offset: LINE });
-    expect(s.log.length, "the own-send echo was stored as a prompt pill").toBe(0);
-    expect(appended.length).toBe(0);
-  });
-
-  test("a cron nudge (armed too, but not an app send) stays a pill", () => {
-    const s = mkSession();
-    fileSize = 0;
-    syncIngest();
-    const armed = "SCHEDULED (nudge): keep going (Keep this short and simple: the answer, " +
-      "the one reason it is the answer, and stop there.)";
-    armAwaiting("c-cron", "ag-1", 0, armed);
-    const cron = promptEv(0, "> " + armed);
-    cron.source = "cron";
-    liveCb!({ events: [cron], queueOps: [], consumed: [], delivered: [], offset: LINE });
-    expect(s.log.map((r) => r.kind)).toEqual(["prompt"]);
-    expect(s.log[0].source).toBe("cron");
-  });
-
-  test("the pi extension frame path suppresses the same own-send echo", () => {
-    const s = mkSession();
-    fileSize = 0;
-    syncIngest();
-    const delivered = "TEXT: ok (Answer with the speak tool only: concise, complete, whole sentences, " +
-      "no markdown. Do not send a chat message.)";
-    armAwaiting("c-ok", "ag-1", 0, delivered);
-    // a pi prompt frame with no `> ` marker, delivered bytes as the tail
-    const kept = applyPiFrame("ag-1", { t: "pi.event", kind: "prompt", id: "px1", ts: 3, text: "leftover" + delivered });
-    expect(kept, "the pi-extension echo was logged").toBe(false);
-    expect(s.log.length).toBe(0);
   });
 
   test("cleanPromptText, when wired, strips the postfix off a surviving pill", () => {

@@ -736,8 +736,8 @@ test("strips an edited (override) verbosity wording, not just the compiled defau
   expect(stripDialPostfix("> hi (say it briefly, my way.)", known)).toBe("> hi");
 });
 
-test("HISTORICAL_DIAL_TEXTS are the three recovered wordings, all parenthesised", () => {
-  expect(HISTORICAL_DIAL_TEXTS.length).toBe(3);
+test("HISTORICAL_DIAL_TEXTS are the recovered wordings, all parenthesised", () => {
+  expect(HISTORICAL_DIAL_TEXTS.length).toBe(5);
   for (const t of HISTORICAL_DIAL_TEXTS) expect(t.startsWith("(") && t.endsWith(")")).toBe(true);
 });
 
