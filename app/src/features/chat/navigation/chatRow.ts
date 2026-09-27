@@ -296,10 +296,15 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
     }
     const chips: Node[] = [];
     // The running-subagents chip leads the shelf so a busy chat reads as busy at
-    // a glance; the same muted chip face as its neighbours, only shown while the
-    // count is above 0.
+    // a glance; the chip face of its neighbours in the copper accent (owner,
+    // 2026-09-28), only shown while the count is above 0.
     if (o.subagentsChip) {
-      const chip = h('span', 'cyc-list-row-subagents ' + ROW_CHIP_UTILS);
+      const chip = h(
+        'span',
+        'cyc-list-row-subagents ' +
+          ROW_CHIP_UTILS.replace('bg-[var(--cyc-text-muted-tint)] text-[var(--cyc-text-muted)]', '') +
+          ' bg-[color-mix(in_srgb,var(--cyc-accent)_14%,transparent)] text-[var(--cyc-accent)]'
+      );
       chip.textContent = o.subagentsChip;
       chips.push(chip);
     }

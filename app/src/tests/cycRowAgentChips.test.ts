@@ -95,16 +95,20 @@ describe('harness and model chips on a session row', () => {
 });
 
 describe('running-subagents chip on a session row', () => {
-  test('shows the handed count and wears the same chip face', () => {
+  test('shows the handed count and wears the chip shape in the copper accent', () => {
     const row = chatRow(sess(), {now: NOW, subagentsChip: '5 agents'});
     const chip = chipOf(row, 'cyc-list-row-subagents');
     expect(chip?.textContent).toBe('5 agents');
-    // the shared chip face, like the harness/model chips
+    // the shared chip shape, like the harness/model chips, but copper so a
+    // busy chat stands out (owner, 2026-09-28)
     const host = chatRow(sess(), {now: NOW, mergedTab: 'homebox'}).querySelector<HTMLElement>(
       '.cyc-list-row-tab'
     )!;
-    for (const c of [...host.classList].filter((c) => c !== 'cyc-list-row-tab'))
+    const muted = ['bg-[var(--cyc-text-muted-tint)]', 'text-[var(--cyc-text-muted)]'];
+    for (const c of [...host.classList].filter((c) => c !== 'cyc-list-row-tab' && !muted.includes(c)))
       expect(chip!.classList.contains(c), `subagents chip missing ${c}`).toBe(true);
+    expect(chip!.classList.contains('text-[var(--cyc-accent)]')).toBe(true);
+    for (const c of muted) expect(chip!.classList.contains(c), `subagents chip still muted: ${c}`).toBe(false);
   });
 
   test('no chip when the count is absent (hidden at 0)', () => {
