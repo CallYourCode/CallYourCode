@@ -11,6 +11,7 @@
 
 import { test, expect } from "bun:test";
 import { eventFromRecord, classifyInput, turnEdgeFromLine, queueOpFromLine, deliveredTextFromLine,
+  stripLeadingAppPrefix,
   SessionTailParser, TurnStatusParser, findTranscriptBySessionId, sessionFilePath } from "./session-events";
 import { mungeCwd } from "../../../shared/claude-projects.ts";
 import { join } from "node:path";
@@ -210,6 +211,35 @@ test("an app-delivered input is not doubled into the overlay (it is a bubble)", 
   expect(eventFromRecord(userTurn("TEXT: did it fire?"))).toBeNull();
   expect(eventFromRecord(userTurn("VOICE: status please"))).toBeNull();
   expect(eventFromRecord(queuedCommand("TEXT: did it fire?"))).toBeNull();
+});
+
+/* THE STRANDED-PREFIX ECHO the reader alone CANNOT catch, so the ingest's
+ * exact-delivery match (chat/ingest isOwnAppEcho) has to. When the pane composer
+ * already held leftover text, the app's send landed appended after it
+ * (`<stranded>TEXT: <msg><postfix>`), so the turn no longer STARTS with the app
+ * prefix isFromApp keys on. It surfaces here as a prompt -- the exact real-log
+ * shape (ag-R3s2t84jHv6umqsk, 2026-09-23): the reader is proven NOT to be where
+ * this is stopped. */
+test("a stranded-prefix app echo slips past the reader as a prompt (the ingest catches it)", () => {
+  const ev = eventFromRecord(userTurn(
+    "jeez man why is so difficult to move a sessoin from shikher@mac to k8plus" +
+    "TEXT: hi (Reply with the chat tool, the way you would message someone. complete but not " +
+    "exhaustive, structured where structure helps, a few short paragraphs at most.)"));
+  expect(ev!.kind).toBe("prompt");
+  expect(ev!.text).toContain("TEXT: hi");
+});
+
+/* stripLeadingAppPrefix (defence in depth, chat/ingest): the clean-start echo
+ * that DID begin with the tag stores without it, `> ` marker kept; a tag a
+ * person typed mid-line is exact-prefix only, so it is left alone. */
+test("stripLeadingAppPrefix drops a leading app tag, keeps the marker, spares mid-line", () => {
+  expect(stripLeadingAppPrefix("> TEXT: hi")).toBe("> hi");
+  expect(stripLeadingAppPrefix("> VOICE: status please")).toBe("> status please");
+  expect(stripLeadingAppPrefix("TEXT: no marker")).toBe("no marker");
+  // the stranded shape: the tag is mid-line, not a leading prefix, so untouched
+  expect(stripLeadingAppPrefix("> jeez man...TEXT: hi")).toBe("> jeez man...TEXT: hi");
+  // a genuine prompt that merely mentions the words is untouched
+  expect(stripLeadingAppPrefix("> grep for TEXT: in the file")).toBe("> grep for TEXT: in the file");
 });
 
 test("a cron input is a prompt sourced cron, idle and busy alike", () => {

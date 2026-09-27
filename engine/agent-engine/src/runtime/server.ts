@@ -29,7 +29,7 @@ import { resolvePorts } from "../../../shared/ports.ts";
 import { loadPlugins, declarePlugins } from "../plugins/registry.ts";
 import type { PluginSpec, PluginDecl } from "../plugins/platform/spec.ts";
 import { scanChat } from "../chat/chat-search.ts";
-import { replyDialsStore } from "../plugins/reply-dials/index.ts";
+import { replyDialsStore, knownDialTexts, stripDialPostfix } from "../plugins/reply-dials/index.ts";
 import { repairRunTree } from "../../../shared/runfiles.ts";
 import { dataDir, ensureBaseTree, keysFile, stagingUploadsDir } from "../storage/datadir.ts";
 import { type HostWiring } from "../plugins/platform/host.ts";
@@ -593,6 +593,10 @@ initIngest({
     scheduleAgentSave(aid);
   },
   log: (e, f) => LOG.line(e, f),
+  // a prompt pill stores clean text: strip the reply instruction the reply-dials
+  // plugin appended (its current + historical wordings). Defence in depth behind
+  // the exact-delivery echo match; the leading app tag is stripped in the ingest.
+  cleanPromptText: (text) => stripDialPostfix(text, knownDialTexts(replyDials)),
 });
 
 // ---------------------------------------------------------------- speech

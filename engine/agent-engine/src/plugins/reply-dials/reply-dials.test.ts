@@ -40,6 +40,9 @@ import {
   DEFAULT_REPLY_LEVEL,
   RUNGS,
   replyDialsPlugin,
+  HISTORICAL_DIAL_TEXTS,
+  knownDialTexts,
+  stripDialPostfix,
 } from "./index.ts";
 import { declarePlugins } from "../registry.ts";
 import { MENU_ITEM_TEXT_MAX, MENU_MAX_ITEMS } from "../platform/spec.ts";
@@ -662,6 +665,80 @@ test("rpc import: the app's one-shot lands through the route and answers its cou
   expect(j.result.imported).toMatchObject({ names: 1, bits: 1, toggles: 1 });
   expect(store.verbosityName(1)).toBe("Term");
   expect(store.bits()).toEqual(["only this"]);
+});
+
+// ===================== the prompt-pill postfix stripper ====================
+
+/* Real samples from the deployed chat logs (~/.callyourcode/agents/<id>/chats/
+ * *.jsonl, 2026-09-23): the exact strings a cron nudge and an agent send stored
+ * with the reply instruction appended. The stripper's whole job is to take these
+ * back to the words a person would recognise, and nothing that follows -- the
+ * counts (3151/3032/119) are how many pills each wording sat on. */
+
+test("strips the current default verbosity/complexity postfix off a pill", async () => {
+  const { store } = await tmpStore();
+  await store.load();
+  const known = knownDialTexts(store);
+  // verbosity rung 2 default, the exact wire text with its leading space
+  expect(stripDialPostfix("> hi" + DEFAULT_REPLY_TEXT[2], known)).toBe("> hi");
+  // both dials on: two parentheticals stack and both come off
+  const both = "> do the thing" + DEFAULT_REPLY_TEXT[3] + DEFAULT_COMPLEXITY_TEXT[5];
+  expect(stripDialPostfix(both, known)).toBe("> do the thing");
+});
+
+test("strips the pre-reword historical wordings recovered from the logs", async () => {
+  const { store } = await tmpStore();
+  await store.load();
+  const known = knownDialTexts(store);
+  // the cron nudge that filled the logs (3032 pills): verbosity rung 3, pre-reword
+  const cron = "> SCHEDULED (nudge): continue building items that are left and don't need my input " +
+    "(Reply with the chat tool, complete and structured. Then ALSO call the speak tool with a " +
+    "short spoken summary of that reply: two or three sentences, the answer and nothing else.)";
+  expect(stripDialPostfix(cron, known))
+    .toBe("> SCHEDULED (nudge): continue building items that are left and don't need my input");
+  // complexity rung 3, pre-reword (3151 pills)
+  const cx = "> keep at it (Keep this short and simple: the answer, the one reason it is the answer, " +
+    "and stop there.)";
+  expect(stripDialPostfix(cx, known)).toBe("> keep at it");
+  // verbosity rung 2, pre-reword with the colon + "Do not use the speak tool" (119 pills)
+  const v2 = "> ping (Reply with the chat tool, the way you would message someone: complete but not " +
+    "exhaustive, structured where structure helps, a few short paragraphs at most. Do not use the speak tool.)";
+  expect(stripDialPostfix(v2, known)).toBe("> ping");
+});
+
+test("matches a historical wording even when a pane read rewrapped its whitespace", async () => {
+  const { store } = await tmpStore();
+  await store.load();
+  const known = knownDialTexts(store);
+  // the [3] log variant: a newline and indent fell in the middle of "that reply"
+  const wrapped = "> go (Reply with the chat tool, complete and structured. Then ALSO call the speak " +
+    "tool with a short spoken summary of that         \n  reply: two or three sentences, the " +
+    "answer and nothing else.)";
+  expect(stripDialPostfix(wrapped, known)).toBe("> go");
+});
+
+test("leaves a parenthetical the agent itself wrote (never arbitrary text)", async () => {
+  const { store } = await tmpStore();
+  await store.load();
+  const known = knownDialTexts(store);
+  const own = "> shipped it (see the diff on branch fix-prompt-echo)";
+  expect(stripDialPostfix(own, known)).toBe(own);
+  // a pill with no postfix at all is untouched
+  expect(stripDialPostfix("> SCHEDULED (nudge): continue building", known))
+    .toBe("> SCHEDULED (nudge): continue building");
+});
+
+test("strips an edited (override) verbosity wording, not just the compiled default", async () => {
+  const { store } = await tmpStore();
+  await store.load();
+  await store.setWording({ reply: { 2: { text: " (say it briefly, my way.)" } } });
+  const known = knownDialTexts(store);
+  expect(stripDialPostfix("> hi (say it briefly, my way.)", known)).toBe("> hi");
+});
+
+test("HISTORICAL_DIAL_TEXTS are the three recovered wordings, all parenthesised", () => {
+  expect(HISTORICAL_DIAL_TEXTS.length).toBe(3);
+  for (const t of HISTORICAL_DIAL_TEXTS) expect(t.startsWith("(") && t.endsWith(")")).toBe(true);
 });
 
 test("the reply-dials decl carries widgets and NOT ONE function", async () => {

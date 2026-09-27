@@ -1026,6 +1026,19 @@ const APP_PREFIXES = ["VOICE: ", "TEXT: "] as const;
  *  the claude extractor does (the text is already a user bubble in the chat;
  *  a faint session row of it would be a duplicate). */
 export const isFromApp = (s: string): boolean => APP_PREFIXES.some((p) => s.startsWith(p));
+
+/** Strip ONE leading app prefix (the exact "TEXT: "/"VOICE: " the engine
+ *  prepends) from a recorded prompt, preserving the overlay's `> ` marker when
+ *  it is there. Exact known prefixes only: a person who types "TEXT: " mid-line
+ *  is untouched. Defence in depth for the app echo that escaped the delivery
+ *  match (isFromApp already drops the ones that START with the prefix): the
+ *  surviving pill should at least not carry the app tag. */
+export function stripLeadingAppPrefix(s: string): string {
+  const gt = s.startsWith("> ") ? "> " : "";
+  const rest = s.slice(gt.length);
+  for (const p of APP_PREFIXES) if (rest.startsWith(p)) return gt + rest.slice(p.length);
+  return s;
+}
 export type QueueOp = { op: "enqueue" | "consumed"; content: string; ts: number };
 
 /* The authoritative "claude has read it" signal is the message's own `user`

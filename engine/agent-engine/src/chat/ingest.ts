@@ -26,7 +26,7 @@
  * the transcript opens one (reconcile.ts reads jsonlStatus for this).
  */
 
-import type { SessionEvent } from "../sessions/session-events.ts";
+import { isFromApp, stripLeadingAppPrefix, type SessionEvent } from "../sessions/session-events.ts";
 import type { OverlayBatch, TailSub } from "../adapters/mux-adapter.ts";
 import { piFrameToEvent, piFrameStatus, type PiFrame } from "../adapters/pi-events.ts";
 import type { TailPointer } from "../runtime/agentmeta.ts";
@@ -75,6 +75,11 @@ export type IngestDeps = {
   log(event: string, fields: Record<string, unknown>): void;
   /** the clock a turn stamp reads; injectable so a seam test pins the instants */
   now?: () => number;
+  /** strip the reply-dials postfix off a kind:"prompt" record before it is
+   *  logged (server.ts composes it over the reply-dials store; the leading app
+   *  tag is stripped in recOf, which owns the reader import). Absent in a
+   *  minimal test wiring, where it is identity. */
+  cleanPromptText?(text: string): string;
 };
 
 /** One span of a backfill read, and how the job yields between spans. */
@@ -124,13 +129,39 @@ export function markInContext(content: string, _paneId?: string) {
   if (hit) clearQueued(hit.sessionId, hit.ts);
 }
 
+/* Is this transcript prompt the engine's OWN app send (TEXT:/VOICE:) coming
+ * back, when the pane composer already held stranded text so the delivered
+ * bytes landed appended AFTER it (`<stranded>TEXT: <msg><postfix>`)? Then the
+ * turn no longer STARTS with the app prefix the reader's isFromApp drops on, so
+ * it slipped through as a prompt pill (with the TEXT: tag and the reply
+ * instruction showing). The engine knows exactly what it typed: the delivered
+ * bytes are armed at send time in awaitingByText (the reverse index off the
+ * delivered string), and they are always the TAIL of what landed, so endsWith on
+ * the EXACT armed string is the match. Restricted to app sends (isFromApp) so a
+ * cron nudge or an agent send -- also armed, also carrying a postfix -- stays a
+ * pill, exactly as before. */
+function isOwnAppEcho(text: string): boolean {
+  for (const armed of awaitingByText.keys()) {
+    if (armed && isFromApp(armed) && text.endsWith(armed)) return true;
+  }
+  return false;
+}
+
 /** A transcript event as the record the log keeps of it. */
 function recOf(s: IngestSession, sid: string, ev: SessionEvent) {
   const kind: SessionRecKind = ev.kind;
+  // a prompt pill stores clean text: strip the leading app tag (an echo that
+  // escaped the exact-delivery match) here, then the injected reply-dials
+  // postfix stripper. Non-prompt kinds are untouched.
+  let text = ev.text;
+  if (kind === "prompt") {
+    text = stripLeadingAppPrefix(text);
+    if (deps?.cleanPromptText) text = deps.cleanPromptText(text);
+  }
   return {
     ts: ev.ts,
     kind,
-    text: ev.text,
+    text,
     ...(ev.tool ? { tool: { name: ev.tool } } : {}),
     // where an input reached the agent from, for the overlay's source chip
     ...(ev.source ? { source: ev.source } : {}),
@@ -143,7 +174,11 @@ function recOf(s: IngestSession, sid: string, ev: SessionEvent) {
  *  new (the rest were already logged: a replay past the pointer). */
 function appendBatch(s: IngestSession, sid: string, batch: OverlayBatch, live: boolean): number {
   let added = 0;
-  for (const ev of batch.events) if (logSession(s, recOf(s, sid, ev))) added++;
+  for (const ev of batch.events) {
+    // the engine's own app send echoing back (stranded-prefix case): never a pill
+    if (ev.kind === "prompt" && isOwnAppEcho(ev.text)) continue;
+    if (logSession(s, recOf(s, sid, ev))) added++;
+  }
   /* A.5: the app's own message landing in the transcript is the `delivered`
    * fact, logged with the user record's identity as its key. Backfill skips
    * it: an old landing is not news, and the bubble it would clear is gone. */
@@ -190,6 +225,7 @@ export function applyPiFrame(id: string, frame: PiFrame): boolean {
   }
   const ev = piFrameToEvent(frame);
   if (!ev) return false;
+  if (ev.kind === "prompt" && isOwnAppEcho(ev.text)) return false; // own app echo
   const rec = logSession(s, recOf(s, sid, ev));
   if (rec) d.log("ingest.pi-event", { session: id, sid, kind: ev.kind, rid: ev.uuid });
   return !!rec;

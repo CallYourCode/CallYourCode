@@ -143,6 +143,78 @@ export const DEFAULT_PROMPT_BITS: string[] = [
 export const DEFAULT_REPLY_LEVEL = 3;
 export const DEFAULT_COMPLEXITY = 3;
 
+/* PRE-REWORD DIAL WORDINGS, exactly as they were appended before the
+ * 2026-08-16 reviews (WORDING-VERBOSITY-FINAL / WORDING-COMPLEXITY-FINAL) and
+ * before the overrides that followed. Recovered VERBATIM from the deployed
+ * chat logs (~/.callyourcode/agents/<id>/chats/*.jsonl: kind:"prompt" records
+ * that still carry them), so the postfix stripper below can clean a pill an
+ * older engine delivered, not just one this build would append. These are the
+ * ONLY historical strings it removes: they are exact known wordings, never an
+ * arbitrary parenthetical. Whitespace inside is matched tolerantly (a pane read
+ * can rewrap a long line), so the run-collapsed form here stands for every
+ * wrapping the same words were stored under. */
+export const HISTORICAL_DIAL_TEXTS: readonly string[] = [
+  // verbosity, pre-reword: rung 3 named both tools with a "Then ALSO call the
+  // speak tool" clause
+  "(Reply with the chat tool, complete and structured. Then ALSO call the speak" +
+    " tool with a short spoken summary of that reply: two or three sentences," +
+    " the answer and nothing else.)",
+  // verbosity, pre-reword: rung 2 carried a colon and a "Do not use the speak
+  // tool" clause
+  "(Reply with the chat tool, the way you would message someone: complete but" +
+    " not exhaustive, structured where structure helps, a few short paragraphs" +
+    " at most. Do not use the speak tool.)",
+  // complexity, pre-reword: rung 3 ("Short and Simple")
+  "(Keep this short and simple: the answer, the one reason it is the answer," +
+    " and stop there.)",
+] as const;
+
+/* A whitespace-tolerant END-anchored matcher for ONE known dial string: its
+ * exact words in order, any run of whitespace between them collapsed to \s+, a
+ * leading run of whitespace swallowed too. Built from a KNOWN string only, so it
+ * can never match a parenthetical the agent happened to write. */
+function dialTailRe(known: string): RegExp {
+  const esc = known.trim()
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\s+/g, "\\s+");
+  return new RegExp("\\s*" + esc + "\\s*$");
+}
+
+/* The set of dial postfix strings the stripper knows: this engine's CURRENT
+ * effective wordings (overrides folded in), the compiled defaults, and the
+ * recovered historical wordings. Deliberately over-complete: a pill delivered
+ * at one wording should clean even after the dial is edited to another. */
+export function knownDialTexts(store: ReplyDialsStore): string[] {
+  const out: string[] = [];
+  for (const n of RUNGS) {
+    out.push(store.verbosityText(n), store.complexityText(n),
+      DEFAULT_REPLY_TEXT[n] ?? "", DEFAULT_COMPLEXITY_TEXT[n] ?? "");
+  }
+  out.push(...HISTORICAL_DIAL_TEXTS);
+  return out;
+}
+
+/* Strip a trailing run of KNOWN dial postfixes off a recorded prompt (defence
+ * in depth: even an echo that escaped the exact-delivery match, or a genuine
+ * pill the dials appended to -- a cron nudge, an agent send -- should not store
+ * the reply instruction). Removes only the exact known strings, one at a time
+ * from the end, until none match; both dials on stack two postfixes and both
+ * come off. A parenthetical the agent itself wrote is not a known string and
+ * survives. */
+export function stripDialPostfix(text: string, knownTexts: string[]): string {
+  const res = knownTexts.filter((t) => t && t.trim()).map(dialTailRe);
+  let out = text;
+  for (;;) {
+    let hit = false;
+    for (const re of res) {
+      const m = re.exec(out);
+      if (m && m[0].trim()) { out = out.slice(0, m.index).replace(/\s+$/, ""); hit = true; }
+    }
+    if (!hit) break;
+  }
+  return out;
+}
+
 /* THE SLIDER STEP HINT, from the appended string itself (#595/#598). The hint the
  * composer draws under a rung IS that rung's appended text, cleaned for display:
  * the wire's leading space and the wrapping parens stripped. It is display cleanup
