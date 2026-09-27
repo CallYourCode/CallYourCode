@@ -725,8 +725,12 @@ export function createListPane(deps: ListPaneDeps) {
             ? {
                 widget: w,
                 onSet: (n: number) => {
+                  // The reply-dials plugin owns its state (#585): a dial move is
+                  // a plugin RPC to the engine that owns this chat, like every
+                  // other plugin slider. setReplyDial is that call, kept named so
+                  // the migration seam and the editor share one entry point.
                   if (p.id === 'reply-dials') {
-                    queueMicrotask(() => void engine.setReplyDial(w.key, n));
+                    queueMicrotask(() => void engine.setReplyDial(s.engineKey, w.key, n));
                   } else {
                     void engine.pluginRpc(s.engineKey, p.id, 'set', s.paneId, {key: w.key, n});
                   }

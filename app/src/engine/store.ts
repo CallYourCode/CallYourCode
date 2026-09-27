@@ -971,7 +971,7 @@ export {
   TERMINAL_PANE_OVERRIDE,
   type TerminalWatcher
 } from './store/terminal';
-export {setReplyStrings, setReplyDial, pushReplyDials, syncReplyDials} from './store/dials';
+export {setReplyDial, syncReplyDials} from './store/dials';
 
 function rekeySession(engineKey: string, from: string, to: string): string | null {
   const oldId = sid(engineKey, from);

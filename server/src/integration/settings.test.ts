@@ -104,87 +104,95 @@ test("defaults, partial update, and surviving a restart", async () => {
     { speed: 1.5, notify: true, sound: false, activity: false });
 }, 40_000);
 
-/* COMPLEXITY DEFAULTS OFF ON A FRESH APP SERVER (#462), verbosity stays on, and
- * an explicit ON round-trips and survives a restart.
+/* THE REPLY DIALS ARE PLUGIN-OWNED NOW (#585). Their DEFAULTS still ship from
+ * this file's SETTINGS_DEFAULTS (complexity off, verbosity on, prompt-bits off),
+ * because the app draws a first-paint fallback off /settings; but the app server
+ * is no longer a WRITER of them -- the engine's reply-dials plugin owns the live
+ * value, and a POST of any dial key is dropped rather than stored. Proven against
+ * the REAL server process, since the whole point is what this server does with
+ * the bytes.
  *
- * Proven against the REAL server process, not the routed mock, because the
- * default lives in this file's SETTINGS_DEFAULTS: the app reads whatever a fresh
- * /settings returns, so "off by default" is a claim about the byte this server
- * ships before anybody has chosen. */
-test("complexity defaults off, verbosity on, and an explicit ON persists", async () => {
+ * complexity: dial VALUE / on-switch, replyLevel/verbosity likewise, plus the
+ * wording `strings` bag: all six move to the plugin. */
+test("the reply dials ship their defaults but the app server refuses to write them", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cyc-appsettings-"));
   dirs.push(dir);
   const s1 = await startServer(dir);
 
-  // the shipped default, before anybody chose: complexity OFF, verbosity ON
+  // the shipped defaults, before anybody chose: complexity OFF, verbosity ON,
+  // prompt-bits OFF (#585 follow-up), and no stated level on a fresh account
   let j = await getJson(`${s1.url}/settings`);
   expect(j.complexityOn, "a fresh app server offered complexity by default").toBe(false);
   expect(j.verbosityOn, "verbosity should stay on by default").toBe(true);
+  expect(j.promptBitsOn, "prompt-bits should ship off").toBe(false);
+  expect(j.replyLevel, "a fresh server states no reply level").toBeUndefined();
+  expect(j.complexity, "a fresh server states no complexity level").toBeUndefined();
 
-  // an explicit ON is stored and honoured
-  await postJson(`${s1.url}/settings`, { complexityOn: true });
+  // a POST of the plugin-owned dials is DROPPED whole: nothing lands, seq is flat
+  await postJson(`${s1.url}/settings`, {
+    complexityOn: true, verbosityOn: false, promptBitsOn: true,
+    replyLevel: 5, complexity: 2, strings: { reply: { 3: { text: " (x)" } } },
+  });
   j = await getJson(`${s1.url}/settings`);
-  expect(j.complexityOn).toBe(true);
-  expect(j.seq).toBe(1);
+  expect(j.complexityOn, "the app server stored a plugin-owned dial").toBe(false);
+  expect(j.verbosityOn).toBe(true);
+  expect(j.promptBitsOn).toBe(false);
+  expect(j.replyLevel, "the app server stored a plugin-owned level").toBeUndefined();
+  expect(j.strings, "the app server stored a plugin-owned wording bag").toBeUndefined();
+  expect(j.seq, "a dropped dial write bumped seq").toBe(0);
 
-  // ...and survives the process dying and coming back
-  await s1.stop();
-  servers = servers.filter((x) => x !== s1);
-  const s2 = await startServer(dir);
-  j = await getJson(`${s2.url}/settings`);
-  expect(j.complexityOn, "an explicit complexity ON was lost across a restart").toBe(true);
+  // a real device-owned key still writes right beside them
+  await postJson(`${s1.url}/settings`, { speed: 1.5 });
+  j = await getJson(`${s1.url}/settings`);
+  expect(j.speed).toBe(1.5);
+  expect(j.seq).toBe(1);
 }, 40_000);
 
-/* THE PROMPT-BITS SWITCH AND THE WORDING BAG (#463/#464/#465), against the real
- * server. promptBitsOn is a plain synced boolean. `strings` is stored WHOLE and
- * echoed VERBATIM -- the page's holds() check compares the POST body to the GET
- * answer byte for byte, so a rebuilt-and-reordered copy would read as "not saved";
- * this server stores what it was given (a plain, bounded object) and hands it back
- * unchanged. Replaced wholesale like the keymap, junk refused, and it persists. */
-test("promptBitsOn round-trips; the wording bag is stored whole and echoed verbatim", async () => {
+/* READING IS TOLERANT OF OLD FILES (#585). The reply dials moved to the plugin,
+ * but an app-settings.json written before the move still holds them, and the app
+ * needs to READ those values once to migrate them into the plugin. So the server
+ * keeps loading them at boot and echoing them on GET -- it just never writes them
+ * again. Proven by seeding the settings file this server boots onto. */
+test("old reply-dial values on disk are read and echoed for the one-time migration, never rewritten", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cyc-appsettings-"));
   dirs.push(dir);
+
+  // an app-settings.json from before the move: the owner's live dials, including
+  // the rung-2 wording that is now the shipped default anyway
+  const RUNG2 = " (Reply with the chat tool, the way you would message someone. 1-2 lines" +
+    " answer. No blobs of text. A list of short and simple line items where it helps.)";
+  await Bun.write(join(dir, "app-settings.json"), JSON.stringify({
+    speed: 1, replyLevel: 2, complexity: 3,
+    verbosityOn: true, complexityOn: false, promptBitsOn: false,
+    strings: { reply: { 2: { text: RUNG2 } } },
+  }));
+
   const s1 = await startServer(dir);
 
+  // read back verbatim so the app can hand them to the plugin's import op
   let j = await getJson(`${s1.url}/settings`);
-  expect(j.promptBitsOn, "the prompt-bits menu ships OFF by default (#585 follow-up)").toBe(false);
-  expect(j.strings, "a fresh server holds no wording edits").toBeUndefined();
-
-  // the switch round-trips
-  await postJson(`${s1.url}/settings`, { promptBitsOn: false });
-  j = await getJson(`${s1.url}/settings`);
+  expect(j.replyLevel, "the old stated level was not read from disk").toBe(2);
+  expect(j.complexity).toBe(3);
+  expect(j.verbosityOn).toBe(true);
+  expect(j.complexityOn).toBe(false);
   expect(j.promptBitsOn).toBe(false);
+  expect(j.strings, "the old wording bag was not echoed for migration")
+    .toEqual({ reply: { 2: { text: RUNG2 } } });
 
-  // a wording bag: verbosity name+text, an editable complexity name (#464), and a
-  // plain prompt-bit list (#465). Stored whole and echoed exactly.
-  const bag = {
-    reply: { 3: { name: "Read out", text: " (edited)" } },
-    complexity: { 2: { name: "Tipsy" } },
-    bits: ["one", "two", "three"],
-  };
-  await postJson(`${s1.url}/settings`, { strings: bag });
+  // ...and still not writable: a POST that would move one is dropped
+  await postJson(`${s1.url}/settings`, { replyLevel: 5, strings: { reply: { 1: { text: " (z)" } } } });
   j = await getJson(`${s1.url}/settings`);
-  expect(j.strings, "the wording bag was not echoed verbatim, so the page's holds() would fail")
-    .toEqual(bag);
+  expect(j.replyLevel, "a plugin-owned level was overwritten via the app server").toBe(2);
+  expect(j.strings, "a plugin-owned wording bag was overwritten via the app server")
+    .toEqual({ reply: { 2: { text: RUNG2 } } });
 
-  // REPLACED WHOLE, like the keymap: a new bag replaces the old rather than merging
-  const bag2 = { bits: ["only this"] };
-  await postJson(`${s1.url}/settings`, { strings: bag2 });
-  j = await getJson(`${s1.url}/settings`);
-  expect(j.strings, "the wording bag was merged instead of replaced").toEqual(bag2);
-
-  // junk is refused, not stored: a non-object leaves what is there
-  await postJson(`${s1.url}/settings`, { strings: "not an object" });
-  j = await getJson(`${s1.url}/settings`);
-  expect(j.strings, "a non-object strings value was stored").toEqual(bag2);
-
-  // both survive a restart
+  // the old values survive a restart (they are read, just never rewritten)
   await s1.stop();
   servers = servers.filter((x) => x !== s1);
   const s2 = await startServer(dir);
   j = await getJson(`${s2.url}/settings`);
-  expect(j.strings, "the wording bag was lost across a restart").toEqual(bag2);
-  expect(j.promptBitsOn, "the prompt-bits switch was lost across a restart").toBe(false);
+  expect(j.replyLevel, "the old level was lost across a restart").toBe(2);
+  expect(j.strings).toEqual({ reply: { 2: { text: RUNG2 } } });
 }, 40_000);
 
 /* THE KEYMAP, and the two things about it that are not like the other globals.
