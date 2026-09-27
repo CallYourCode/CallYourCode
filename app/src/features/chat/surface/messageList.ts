@@ -554,14 +554,37 @@ function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_PIN_PX;
   const boxTop = box.getBoundingClientRect().top;
   let anchorIndex: string | null = null;
+  let anchorByDivider = false;
   let screenOffset = 0;
   if (!atBottom) {
-    for (const row of inner.querySelectorAll<HTMLElement>('[data-index]')) {
-      const r = row.getBoundingClientRect();
-      if (r.bottom > boxTop) {
-        anchorIndex = row.dataset.index ?? null;
-        screenOffset = r.top - boxTop;
-        break;
+    // While an unread landing holds the divider on screen, anchor on the DIVIDER
+    // row itself rather than the topmost visible row. Rows ABOVE the divider are
+    // only estimated on a fresh open (EST_MSG is far off a wrapped bubble), so
+    // when one mounts and measures on a later re-window the whole band above the
+    // fold resizes; holding the topmost row then lets the divider (below it)
+    // drift off its seat and out of view. The divider's own rows below it are
+    // already measured (the open pinned the end first), so holding the divider
+    // keeps its seat regardless of what the history above measures to. It is
+    // re-found after the paint by its MARKER, not its data-index: a message
+    // arriving or older history loading reindexes the model, so the index the
+    // divider carried now names a different row (measured: the divider slid out
+    // of view while a stale index was held in its place).
+    const divider = inner.querySelector<HTMLElement>('[data-cyc-unread]');
+    if (divider) {
+      const dr = divider.getBoundingClientRect();
+      if (dr.bottom > boxTop && dr.top < boxTop + box.clientHeight) {
+        anchorByDivider = true;
+        screenOffset = dr.top - boxTop;
+      }
+    }
+    if (!anchorByDivider) {
+      for (const row of inner.querySelectorAll<HTMLElement>('[data-index]')) {
+        const r = row.getBoundingClientRect();
+        if (r.bottom > boxTop) {
+          anchorIndex = row.dataset.index ?? null;
+          screenOffset = r.top - boxTop;
+          break;
+        }
       }
     }
   }
@@ -574,8 +597,10 @@ function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
     }
     return;
   }
-  if (anchorIndex === null) return;
-  const again = inner.querySelector<HTMLElement>(`[data-index="${anchorIndex}"]`);
+  if (!anchorByDivider && anchorIndex === null) return;
+  const again = anchorByDivider
+    ? inner.querySelector<HTMLElement>('[data-cyc-unread]')
+    : inner.querySelector<HTMLElement>(`[data-index="${anchorIndex}"]`);
   if (!again) return;
   const now = again.getBoundingClientRect().top - box.getBoundingClientRect().top;
   const delta = now - screenOffset;
@@ -625,8 +650,21 @@ function computeWindow(
   st: RenderState
 ): {r0: number; r1: number; padTop: number; padBottom: number} | null {
   const box = scrollBoxOf(inner);
-  if (!box || !box.clientHeight || !st.rows.length) return null;
+  if (!box || !st.rows.length) return null;
+  // Prime the virtualizer (its row count, geometry, and scroll/resize
+  // observers) even when the scroll box has no height yet -- an open whose first
+  // paint ran before the surface was laid out. Without this the render-all
+  // branch below returned BEFORE the virtualizer was ever created, so no resize
+  // observer was watching the box; once the box gained its height nothing fired
+  // a re-window and the list stayed rendered whole forever (the unread open that
+  // mounted every row and never re-virtualized, even after a scroll -- with no
+  // observer there was no onChange). syncGeom sets the count so calculateRange
+  // yields a real range, so the ResizeObserver's first delivery once the box has
+  // a true height changes that range and fires onChange, which re-windows onto
+  // the viewport. A no-height paint still renders whole (correct: no viewport to
+  // bound to), it just recovers the instant the height lands.
   const v = syncGeom(inner, st, box);
+  if (!box.clientHeight) return null;
   const vitems = v.getVirtualItems();
   if (!vitems.length) return null;
   const total = v.getTotalSize();
@@ -685,6 +723,21 @@ export function rewindowMessages(inner: HTMLElement): void {
   if (!st) return;
   anchoredRewindow(inner, st);
   recoverIfUncovered(inner, st);
+}
+
+// Re-window at the list's CURRENT scroll offset WITHOUT holding a prior anchor:
+// a plain repaint that mounts whatever rows the (already moved) scrollTop now
+// covers, then the coverage net if the window fell short. Unlike
+// rewindowMessages, this does NOT re-seat scrollTop to hold the previously
+// mounted rows -- that anchor hold UNDOES a deliberate programmatic jump when
+// the destination rows are not mounted yet, so the unread landing jumping to an
+// off-window divider snapped straight back to the bottom (anchoredRewindow held
+// the still-mounted bottom rows and re-seated onto them). The landing moves the
+// scroll itself and then calls this to paint the destination in place.
+export function repaintMessagesAtScroll(inner: HTMLElement): void {
+  const st = renderStates.get(inner);
+  if (!st) return;
+  st.lastPaint?.();
 }
 
 // Register the after-window-change sweep hook (see RenderState.onWindowChange).

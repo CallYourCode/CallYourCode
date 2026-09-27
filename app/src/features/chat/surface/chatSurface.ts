@@ -551,12 +551,29 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     let anchorMid: string | null = null;
     let anchorDelta = 0;
     let anchorScreenTop = 0;
-    for (const row of messageListScroll.querySelectorAll<HTMLElement>('.cyc-message[data-mid]')) {
-      if (row.offsetTop >= before) {
-        anchorMid = row.dataset.mid ?? null;
-        anchorDelta = row.offsetTop - before;
-        anchorScreenTop = row.getBoundingClientRect().top - boxTop;
-        break;
+    // Prefer the unread DIVIDER as the store-paint anchor when it is on screen:
+    // a landing holds it a third down, and a message arriving (or older history
+    // loading) reindexes the rows, so the generic first-below-the-fold anchor can
+    // miss and fall back to carrying the raw height change, sliding the divider
+    // off its seat and out of view. Anchoring on the divider by its stable mid
+    // keeps its seat across the paint.
+    const dividerRow = messageListScroll.querySelector<HTMLElement>('.cyc-message[data-cyc-unread][data-mid]');
+    if (dividerRow) {
+      const dr = dividerRow.getBoundingClientRect();
+      if (dr.bottom > boxTop && dr.top < boxTop + messageListScroll.clientHeight) {
+        anchorMid = dividerRow.dataset.mid ?? null;
+        anchorDelta = dividerRow.offsetTop - before;
+        anchorScreenTop = dr.top - boxTop;
+      }
+    }
+    if (anchorMid === null) {
+      for (const row of messageListScroll.querySelectorAll<HTMLElement>('.cyc-message[data-mid]')) {
+        if (row.offsetTop >= before) {
+          anchorMid = row.dataset.mid ?? null;
+          anchorDelta = row.offsetTop - before;
+          anchorScreenTop = row.getBoundingClientRect().top - boxTop;
+          break;
+        }
       }
     }
     paint();
@@ -634,6 +651,27 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     const padDelta = padNow - padTopSeen;
     padTopSeen = padNow;
     if (pointerHeld || !messageListInner.childElementCount) return;
+    // Hold the unread divider on its landing seat through async row-height changes
+    // ABOVE the fold. A waveform/image/markdown row hydrating a beat after the
+    // open reflows its height; when that does not change the visible index range
+    // the virtualizer fires no re-window, so nothing re-seats the divider and it
+    // slides off screen (measured on the larger viewports, where more hydratable
+    // rows mount above the fold). This observer DOES see the content resize, so
+    // while the landing holds (until the reader's own scroll releases it) re-seat
+    // the divider a third of the way down and re-window so it stays mounted.
+    if (holdDivider && !pinnedToBottom) {
+      const divider = messageListInner.querySelector<HTMLElement>('[data-cyc-unread]');
+      if (divider) {
+        const seat = messageListScroll.clientHeight / 3;
+        const now =
+          divider.getBoundingClientRect().top - messageListScroll.getBoundingClientRect().top;
+        if (Math.abs(now - seat) > 1) {
+          silentScrollTo(messageListScroll.scrollTop + (now - seat));
+          rewindowMessages(messageListInner);
+        }
+        return;
+      }
+    }
     if (pinnedToBottom) {
       if (distToEnd() > 0) scrollToBottom();
     } else if (padDelta) {
@@ -714,9 +752,21 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     noteHeardMarked
   } = readerLanding;
 
+  // True from an unread landing until the reader takes over: the onListResize
+  // observer re-seats the divider on its landing spot through async row-height
+  // changes above the fold (content hydration reflows a row without changing the
+  // visible index range, so no re-window fires to re-seat it). Released on the
+  // reader's own scroll, so it never fights a real gesture; also on a pin, a chat
+  // switch, or the anchor being answered/cleared.
+  let holdDivider = false;
+
   // Pass the current anchor id so the landing can mount the divider row when it
   // sits outside the virtual window (see readerLanding.scrollToFirstUnread).
-  const scrollToFirstUnread = (): boolean => scrollToFirstUnreadRaw(firstUnreadId);
+  const scrollToFirstUnread = (): boolean => {
+    const ok = scrollToFirstUnreadRaw(firstUnreadId);
+    if (ok && firstUnreadId !== undefined) holdDivider = true;
+    return ok;
+  };
 
   const anchorSourceKnown = (s: CycSession): boolean =>
     dataState.mode !== 'live' || (s as CycEngineSession).heardTs !== undefined;
@@ -744,6 +794,11 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       const height = messageListScroll.scrollHeight;
       const clientH = messageListScroll.clientHeight;
       const machine = isMachineTop(top);
+
+      // The reader's own scroll ends the divider hold: a real gesture owns the
+      // offset from here on. Machine writes (the hold's own re-seat, the landing)
+      // are tagged, so they never release it.
+      if (!machine) holdDivider = false;
 
       if (
         openLanding &&
@@ -935,6 +990,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     openMarker = undefined;
     openCaptured = false;
     openLanding = false;
+    holdDivider = false;
     closeOpen('answered');
     closeSettleGrace(false);
     openToken = null;
@@ -1026,6 +1082,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       hideUnreadBanner();
 
       openLanding = true;
+      holdDivider = false;
       // The landing decides the pin for this chat; until it runs, nothing
       // carried over from the last chat may move the view.
       pinnedToBottom = false;

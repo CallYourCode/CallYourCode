@@ -43,6 +43,8 @@ vi.mock('../features/chat/surface/messageList', () => ({
   clearMessages: vi.fn(),
   attachStickyDates: () => ({refresh: vi.fn()}),
   scrollMessageIntoView: vi.fn(() => false),
+  repaintMessagesAtScroll: vi.fn(),
+  rewindowMessages: vi.fn(),
   messageVisibleRangeKey: () => '0:0',
   setMessageWindowHook: vi.fn()
 }));

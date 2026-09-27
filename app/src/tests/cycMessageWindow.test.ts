@@ -3,6 +3,7 @@ import type {CycMessage, CycSession, CycSessionEvent} from '../types';
 import {
   renderMessages,
   scrollMessageIntoView,
+  rewindowMessages,
   messageVisibleRangeKey,
   COLLAPSE_MIN
 } from '../features/chat/surface/messageList';
@@ -268,5 +269,40 @@ describe('the item model is unchanged inside the window', () => {
     // At the top the first claude row is within the window; its divider paints.
     paint(inner, s, firstClaude.id);
     expect(inner.querySelector('.cyc-msg-unread')).not.toBeNull();
+  });
+});
+
+describe('an unread open stays windowed', () => {
+  test('opening a heavy chat with an unread anchor paints a bounded window', () => {
+    const s = denseChat();
+    const unread = s.messages[s.messages.length - 20]; // a claude row near the tail
+    const {inner} = mount(800);
+    paint(inner, s, unread.id);
+    const rows = allRows(inner).length;
+    expect(rows).toBeGreaterThan(0);
+    expect(rows).toBeLessThan(80);
+    expect(rows).toBeLessThan(s.messages.length);
+  });
+
+  test('an unread open that first paints before the scroll box has a height re-virtualizes once it does', () => {
+    const s = denseChat();
+    const unread = s.messages[s.messages.length - 20];
+    // clientHeight 0: the surface painted before layout settled (the fast-boot
+    // race that shipped the unread open with every row mounted and no window).
+    const {scroll, inner} = mount(0);
+    paint(inner, s, unread.id);
+    // With no viewport height there is nothing to bound the DOM to, so this paint
+    // renders every row -- correct, but it must not be the resting state.
+    expect(allRows(inner).length).toBeGreaterThan(200);
+    // The scroll box gains its height (layout settles); the re-window the app runs
+    // -- driven in the field by the virtualizer's resize observer, which the paint
+    // now primes even with no height -- bounds the DOM to the viewport.
+    Object.defineProperty(scroll, 'clientHeight', {value: 800, configurable: true});
+    Object.defineProperty(scroll, 'offsetHeight', {value: 800, configurable: true});
+    rewindowMessages(inner);
+    const rows = allRows(inner).length;
+    expect(rows).toBeGreaterThan(0);
+    expect(rows).toBeLessThan(80);
+    expect(rows).toBeLessThan(s.messages.length);
   });
 });
