@@ -51,7 +51,7 @@ import { initClips } from "../chat/clips.ts";
 import { initReadState } from "../sessions/readstate.ts";
 import { initContextCache, claudeTitleOf } from "../sessions/context-cache.ts";
 import { initSubagentCount } from "../sessions/subagent-count.ts";
-import { readPiSubagentRuns } from "../readers/pi-subagent-runs.ts";
+import { refreshPiSubagentCache, piSubagentRunsCached } from "../readers/pi-subagent-runs.ts";
 import { initChatlog, logSession, sweepRestoredQueued } from "../chat/chatlog.ts";
 import { bumpRowsGen } from "../chat/wirecache.ts";
 import { initTts, ttsWithVoice, sweepGrowingClips } from "../voice/tts.ts";
@@ -393,7 +393,8 @@ initContextCache({
 initSubagentCount({
   sessions: () => sessions.values(),
   transcriptFile: (h) => adapter.transcriptFile(h),
-  piRuns: (path) => readPiSubagentRuns(path),
+  refreshPiRuns: () => refreshPiSubagentCache(),
+  piRuns: async (path) => piSubagentRunsCached(path),
   conversationRuns: (c, sid) => adapter.conversationRuns(c, sid),
   claudeTranscriptPath: (c, csid) => adapter.transcriptPathFor(c, csid),
   broadcastSessions: () => broadcastSessions(),

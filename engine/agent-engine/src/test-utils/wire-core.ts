@@ -73,7 +73,7 @@ import { initContextCache, claudeTitleOf,
   resetForTest as resetContextCache } from "../sessions/context-cache.ts";
 import { initSubagentCount,
   resetForTest as resetSubagentCount } from "../sessions/subagent-count.ts";
-import { readPiSubagentRuns } from "../readers/pi-subagent-runs.ts";
+import { refreshPiSubagentCache, piSubagentRunsCached } from "../readers/pi-subagent-runs.ts";
 import { sessions, sessionByHandle, resolveSession, loadSessionState, sessionStateReady,
   agentMetas, blobOwner, restoredChats, chatStore, indexMsgBlobs, agentIdFor,
   chatRefFor, persistPatch, metaFor, scheduleAgentSave, scheduleHeardSave,
@@ -659,7 +659,8 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
     initSubagentCount({
       sessions: () => sessions.values(),
       transcriptFile: (h) => adapter.transcriptFile(h),
-      piRuns: (path) => readPiSubagentRuns(path),
+      refreshPiRuns: () => refreshPiSubagentCache(),
+      piRuns: async (path) => piSubagentRunsCached(path),
       conversationRuns: (c, sid) => adapter.conversationRuns(c, sid),
       claudeTranscriptPath: (c, csid) => adapter.transcriptPathFor(c, csid),
       broadcastSessions: () => broadcastSessions(),

@@ -36,6 +36,7 @@ const run = (over: Partial<AgentRun> = {}): AgentRun => ({
 let claudeRuns: AgentRun[] = [];
 let piRunsById: AgentRun[] = [];
 let conversationRunsCalls = 0;
+let refreshPiRunsCalls = 0;
 let broadcasts = 0;
 
 const claude: SubagentCountSession = {
@@ -46,6 +47,10 @@ const pi: SubagentCountSession = {
   id: "s-pi", agent: { id: "pi" }, cwd: CWD, harnessSessionId: null,
   muxHandle: "w1:p6", alive: true,
 };
+const pi2: SubagentCountSession = {
+  id: "s-pi2", agent: { id: "pi" }, cwd: CWD, harnessSessionId: null,
+  muxHandle: "w1:p7", alive: true,
+};
 
 function writeBytes(s: string): void { writeFileSync(path, s); }
 
@@ -53,6 +58,7 @@ function wire(sessions: SubagentCountSession[]): void {
   initSubagentCount({
     sessions: () => sessions,
     transcriptFile: () => ({ path }),
+    refreshPiRuns: async () => { refreshPiRunsCalls++; },
     piRuns: async () => piRunsById,
     conversationRuns: async () => { conversationRunsCalls++; return { logExists: true, runs: claudeRuns }; },
     claudeTranscriptPath: () => path,
@@ -67,6 +73,7 @@ beforeEach(async () => {
   claudeRuns = [];
   piRunsById = [];
   conversationRunsCalls = 0;
+  refreshPiRunsCalls = 0;
   broadcasts = 0;
   writeBytes("one\n");
 });
@@ -131,6 +138,17 @@ test("a session that goes away clears its count and broadcasts the drop", async 
   await pollOnce();
   expect(subagentsRunningOf("s-pi")).toBe(0);
   expect(broadcasts).toBe(2);
+});
+
+test("the pi runs dir is scanned ONCE per poll, not once per pi session", async () => {
+  piRunsById = [run({ endedTs: null })];
+  wire([pi, pi2]);
+  await pollOnce();
+  expect(subagentsRunningOf("s-pi")).toBe(1);
+  expect(subagentsRunningOf("s-pi2")).toBe(1);
+  expect(refreshPiRunsCalls).toBe(1); // one scan served both pi sessions
+  await pollOnce();
+  expect(refreshPiRunsCalls).toBe(2); // one more scan on the next poll
 });
 
 test("a non-claude, non-pi harness reads no runs and counts 0", async () => {

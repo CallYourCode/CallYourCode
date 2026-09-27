@@ -41,7 +41,12 @@ type SubagentCountDeps = {
   /** pi keeps its subagents beside pi-subagents, keyed by its transcript path;
    *  this resolves that path from the live pane handle. */
   transcriptFile(muxHandle: string): { path: string } | null;
-  /** pi's background runs, read from their status.json files (readPiSubagentRuns). */
+  /** Rescan pi's shared runs dir into its cache, ONCE per poll for all pi
+   *  sessions (refreshPiSubagentCache). Absent in the seam test, whose piRuns
+   *  fake needs no dir. */
+  refreshPiRuns?(): Promise<void>;
+  /** pi's background runs for one session, read from the shared cache the poll
+   *  refreshed (piSubagentRunsCached). */
   piRuns(sessionPath: string): Promise<AgentRun[]>;
   /** every other harness: the runs live in the CLAUDE transcript, resolved by
    *  cwd + claude session id (the adapter's conversationRuns, the route's seam). */
@@ -142,6 +147,9 @@ function store(key: string, count: number, size?: number): boolean {
  *  waiting on the interval. */
 export async function pollOnce(): Promise<void> {
   if (!deps) return;
+  // The pi runs dir is scanned ONCE here, not once per pi session: every live
+  // pi pane then reads its rows out of the shared cache with no further I/O.
+  await deps.refreshPiRuns?.();
   const live = new Set<string>();
   const jobs: Array<Promise<boolean>> = [];
   for (const s of deps.sessions()) {
