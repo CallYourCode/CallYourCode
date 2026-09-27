@@ -24,7 +24,7 @@ import { programToken } from "../adapters/pi-launch.ts";
 import { broadcastSessions, sessionList } from "../sessions/sessions-frame.ts";
 import { titleOf } from "../sessions/title.ts";
 import { broadcast } from "../transport/wire.ts";
-import { readPiSubagentRuns } from "../readers/pi-subagent-runs.ts";
+import { piSubagentRunsFresh } from "../readers/pi-subagent-runs.ts";
 
 /* THE RESTART PRE-FLIGHT, factored out of the /restart route as a pure function
  * so the mode/sid/command decision is unit-testable without restartPane's
@@ -95,7 +95,7 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
     if (s.agent.id === "pi") {
       const located = ctx.adapter.transcriptFile(s.muxHandle);
       if (!located) return json({ error: "no session file" }, 404);
-      return json({ sessionAgentId: s.agentId, runs: await readPiSubagentRuns(located.path) });
+      return json({ sessionAgentId: s.agentId, runs: await piSubagentRunsFresh(located.path) });
     }
     /* The pinned-bar read moves behind the adapter (conversationRuns). The
      * runs live in the CLAUDE jsonl, so the id passed is claude's own or null

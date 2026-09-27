@@ -241,6 +241,25 @@ describe('surface version gates (#403a)', () => {
     hub.render(true);
     expect(painted()).toBe(before + 2);
   });
+  test('a running-subagent count change re-keys the list surface (the chip repaints live)', () => {
+    const {hub, list} = mk();
+    fake.sessions = [{id: 's1'}];
+    hub.render(true);
+    const painted = () => (list.sessionList.update as ReturnType<typeof vi.fn>).mock.calls.length;
+    const before = painted();
+    // subagents start: the fold differs, the list repaints and the chip appears.
+    fake.sessions = [{id: 's1', subagentsRunning: 3} as {id: string}];
+    hub.render(true);
+    expect(painted()).toBe(before + 1);
+    // count changes: repaints again.
+    fake.sessions = [{id: 's1', subagentsRunning: 5} as {id: string}];
+    hub.render(true);
+    expect(painted()).toBe(before + 2);
+    // back to none: repaints once more (the chip clears).
+    fake.sessions = [{id: 's1'}];
+    hub.render(true);
+    expect(painted()).toBe(before + 3);
+  });
 });
 describe('render-heat: contentVersion memo (one hash per session per pass)', () => {
   test('the active session is hashed once per render, not once for the list and again for the chat', () => {

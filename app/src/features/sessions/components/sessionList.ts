@@ -96,6 +96,8 @@ export function createSessionList(opts: {
   harnessChip?: (s: CycSession) => string | null;
 
   modelChip?: (s: CycSession) => string | null;
+
+  subagentsChip?: (s: CycSession) => string | null;
 }): SessionList {
   const el = h(
     'ul',
@@ -287,6 +289,7 @@ export function createSessionList(opts: {
         mergedTab: opts.mergedSubtitle?.(s) || undefined,
         harnessChip: opts.harnessChip?.(s) || undefined,
         modelChip: opts.modelChip?.(s) || undefined,
+        subagentsChip: opts.subagentsChip?.(s) || undefined,
         now
       };
       let row = liveRows.get(s.id);

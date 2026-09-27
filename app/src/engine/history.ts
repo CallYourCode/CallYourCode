@@ -98,6 +98,7 @@ export type StoredSession = Pick<
   | 'status'
   | 'thinking'
   | 'contextPct'
+  | 'subagentsRunning'
   | 'agentName'
   | 'agentId'
   | 'sessionAgentId'

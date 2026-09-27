@@ -1,0 +1,31 @@
+{
+  "t": "sessions",
+  "list": [
+    {
+      "id": "ws://engine|p1",
+      "name": "BZ Distributor",
+      "cwd": "/home/me/bz",
+      "unread": 0,
+      "alive": true,
+      "status": "working",
+      "thinking": true,
+      "agent": "Pi",
+      "agentId": "pi",
+      "model": "Fable 5",
+      "subagentsRunning": 5,
+      "order": 0
+    },
+    {
+      "id": "ws://engine|p2",
+      "name": "quiet chat",
+      "cwd": "/home/me/quiet",
+      "unread": 0,
+      "alive": true,
+      "status": "idle",
+      "agent": "Claude",
+      "agentId": "claude",
+      "model": "Opus 4.8",
+      "order": 1
+    }
+  ]
+}

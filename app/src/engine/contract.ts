@@ -94,6 +94,11 @@ export type EngineSession = {
 
   contextPct?: number | null;
 
+  /** How many subagents this chat's agent has running right now. Present only
+   *  while above 0 (the-absent-is-none rule); the list row draws an "N agents"
+   *  chip from it. The SAME count the agents bar shows. */
+  subagentsRunning?: number;
+
   status?: EngineAgentStatus;
 
   title?: EngineSessionTitle;

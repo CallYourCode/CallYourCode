@@ -18,6 +18,7 @@ import { unreadOf, readThroughOf } from "./readstate.ts";
 import { isControlAnswer } from "../chat/chatmsg.ts";
 import { askOf } from "../chat/asks.ts";
 import { contextPctOf, modelOf, claudeTitleOf } from "./context-cache.ts";
+import { subagentsRunningOf } from "./subagent-count.ts";
 import { sessions, getManualOrder, nameOverrideOf, settingsOf, photoOf,
   type Session } from "./session-state.ts";
 import { clients, send } from "../transport/wire.ts";
@@ -277,6 +278,15 @@ export function sessionList(ordered: readonly Session[] = orderedSessions()) {
        * name; now that you can drag rows, the app must never be handed the
        * provider's number and left to guess. */
       order: rank,
+      /* HOW MANY SUBAGENTS THIS CHAT'S AGENT HAS RUNNING RIGHT NOW
+       * (subagent-count.ts), so the list row can draw a small "N agents" chip
+       * and a busy chat never looks idle. It is the SAME count the open chat's
+       * agents bar shows (a run whose endedTs is null), read from the same
+       * runs, so the two can never disagree. Only sent when above 0: absent is
+       * "none running", the honest default an older app already renders as no
+       * chip, and a count dropping back to 0 removes the field, which changes
+       * the deduped payload and clears the chip. */
+      ...(subagentsRunningOf(s.id) > 0 ? { subagentsRunning: subagentsRunningOf(s.id) } : {}),
       };
     });
 }
