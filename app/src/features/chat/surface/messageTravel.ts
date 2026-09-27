@@ -42,6 +42,9 @@ export interface MessageTravelDeps {
   render(): void;
   openChat(id: string, after?: () => void): void;
   isChatViewOpen(): boolean;
+  // Drop the surface's "pinned to bottom" state as the jump leaves the bottom,
+  // so the resize observer does not re-pin and yank the target off-screen.
+  releaseBottomPin?(): void;
 }
 
 // A single animation-frame tick, for the jump settle loop below.
@@ -128,6 +131,12 @@ export function createMessageTravel(deps: MessageTravelDeps) {
     const m = wantId
       ? s.messages.find((x) => x.id === wantId)
       : s.messages.find((x) => x.ts === ts && x.role === role);
+    // The jump is an intentional move away from the bottom: drop the pin BEFORE
+    // the scroll below re-windows (which resizes the list and would otherwise
+    // trip the resize observer into re-pinning to the bottom, unmounting the
+    // target). A jump that ends up at the bottom is re-pinned by the scroll
+    // listener. Only once we have a target to travel to.
+    if (m) deps.releaseBottomPin?.();
     /* Bubbles are keyed by data-mid (messageList sets messageNode.dataset.mid);
      * the old data-cyc-message-key selector matched nothing, so every jump
      * (pill, audio chip, reply) toasted "not loaded" even with the message on

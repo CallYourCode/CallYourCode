@@ -221,12 +221,32 @@ type RenderState = {
   // True while a synchronous re-window is in flight, so the measurement
   // notifications that paint itself triggers do not re-enter it.
   painting: boolean;
+  // Set when a measurement notification was swallowed during a paint (a row
+  // measured away from its estimate). A standalone paint reads it after its
+  // measure loop to schedule a single async converge re-window.
+  measuredDirty: boolean;
   // Set for one paint to force a from-scratch window rebuild, bypassing the
   // incremental edge reconcile. The coverage net (below) sets it when an
   // incremental re-window left the viewport uncovered (a rare window collapse
   // under load); a full rebuild recomputes the window and recovers, so the
   // blank never reaches the compositor.
   forceFull: boolean;
+  // The item key at index 0 on the previous sync. When it changes the list grew
+  // (or trimmed) at the FRONT -- older history prepended -- so every index now
+  // maps to a different message. The virtualizer keys its measured sizes by key
+  // but rebuilds its offset cache only from `pendingMin` onward; a measurement
+  // left pending from the previous paint would keep stale offsets for the
+  // now-shifted rows, so the window lands on the wrong rows and meets an
+  // unmounted row (the row-shift/unmount-while-older-loads bug, and the failed
+  // jump to an old message). The virtualizer resets this itself only for
+  // anchorTo:"end"; this list anchors "start", so syncGeom forces the rebuild.
+  // A same-day prepend keeps the head DATE row at index 0 while shifting the
+  // messages below it, so the row count is tracked alongside the head key: any
+  // count change (prepend, append, trim) or head-key change (chat switch, front
+  // trim) rebuilds; a pure re-window (scroll, measurement settle) changes
+  // neither and keeps the fast incremental path.
+  lastHeadKey: string | number | null;
+  lastRowCount: number;
   // Wired by the render hub: after a scroll-driven re-window, re-run the DOM
   // sweeps (waveform hydration, sticky dates, play state) over the freshly
   // mounted rows so a row scrolled into view hydrates like a store paint.
@@ -448,11 +468,21 @@ function ensureVirt(inner: HTMLElement, st: RenderState): MsgVirtualizer {
 // runs per event. Each re-window is cheap now (the reconcile keeps the overlap
 // and only touches the edge rows), so running it per event no longer costs the
 // full-window rebuild that made the branch janky. The painting guard swallows
-// the measurement notifications the synchronous paint itself raises, so it
-// cannot re-enter.
+// the measurement notifications a paint (its own re-window, or a store paint's)
+// raises so it cannot re-enter; the swallowed notification is remembered
+// (measuredDirty) so the paint can converge it once, asynchronously.
 function scheduleRepaint(inner: HTMLElement, st: RenderState, sync = false): void {
+  // A notification raised while a paint is in flight: never re-enter (a nested
+  // synchronous re-window would run against a half-updated window and undo the
+  // caller's anchor hold -- the row-shift-while-older-loads bug when a store
+  // prepend paints mid-scroll). Record that a size changed so the paint's
+  // measure loop can schedule a single async converge, then bail.
+  if (st.painting) {
+    st.measuredDirty = true;
+    return;
+  }
   if (sync) {
-    if (st.painting || st.scheduled) return;
+    if (st.scheduled) return;
     st.painting = true;
     try {
       anchoredRewindow(inner, st);
@@ -463,7 +493,7 @@ function scheduleRepaint(inner: HTMLElement, st: RenderState, sync = false): voi
     }
     return;
   }
-  if (st.scheduled || st.painting) return;
+  if (st.scheduled) return;
   st.scheduled = true;
   raf(() => {
     st.scheduled = false;
@@ -567,6 +597,23 @@ function syncGeom(inner: HTMLElement, st: RenderState, box: HTMLElement): MsgVir
   const v = ensureVirt(inner, st);
   st.opts!.count = st.rows.length;
   v.setOptions(st.opts as never);
+  // A row-set change (a history prepend, an append, a trim, a chat switch) can
+  // shift indices at the front: force the virtualizer to rebuild its offset
+  // cache from index 0 (by key) so a measurement left pending from the previous
+  // paint cannot leave stale offsets for the shifted rows -- the wrong window
+  // that meets an unmounted row (the row-shift/unmount-while-older-loads bug and
+  // the failed jump to an old message). Bumping the size-cache version re-runs
+  // the memoised measurement build. A pure re-window (a scroll, a measurement
+  // settle) changes neither the count nor the head, so this is skipped and the
+  // fast incremental measurement path stands.
+  const headKey = st.rows.length ? st.rows[0].key : null;
+  if (headKey !== st.lastHeadKey || st.rows.length !== st.lastRowCount) {
+    const vi = v as unknown as {pendingMin: number | null; itemSizeCacheVersion: number};
+    vi.pendingMin = 0;
+    vi.itemSizeCacheVersion++;
+    st.lastHeadKey = headKey;
+    st.lastRowCount = st.rows.length;
+  }
   v._willUpdate();
   v.scrollRect = {width: box.clientWidth, height: box.clientHeight};
   v.scrollOffset = box.scrollTop;
@@ -596,9 +643,48 @@ function computeWindow(
   let r1 = vitems[vitems.length - 1].index;
   while (r0 > 0 && meas[r0 - 1] && meas[r0 - 1].end > topLimit) r0--;
   while (r1 < last && meas[r1 + 1] && meas[r1 + 1].start < botLimit) r1++;
+  // Guarantee the mounted band actually spans the viewport, by the rows' own
+  // measured extents. The band expansion above walks by the NEXT row's start,
+  // which leaves the viewport uncovered when the measurement offsets are
+  // momentarily non-contiguous -- exactly what a history prepend leaves behind
+  // for a frame: the item indices shift, the virtualizer's range lands short of
+  // the re-seated scrollTop, and the window stops before the fold. The reader
+  // then meets an unmounted row at the top that never recovered (the
+  // shift/unmount-while-older-loads bug), because recoverIfUncovered only
+  // re-runs this same computation. Extending until the row extents cover
+  // [scrollTop, scrollTop + clientHeight] closes that gap; on a contiguous
+  // window (the normal case) both loops are no-ops.
+  const viewTop = box.scrollTop;
+  const viewBottom = box.scrollTop + box.clientHeight;
+  while (r0 > 0 && meas[r0] && meas[r0].start > viewTop) r0--;
+  while (r1 < last && meas[r1] && meas[r1].end < viewBottom) r1++;
   const padTop = meas[r0] ? meas[r0].start : vitems[0].start;
   const padBottom = meas[r1] ? Math.max(0, total - meas[r1].end) : 0;
   return {r0, r1, padTop, padBottom};
+}
+
+// Recompute the DOM window at the list's CURRENT scroll offset, synchronously.
+// The render bracket (chatSurface.bracketMessageRender) preserves the reader's
+// position across a store paint by re-seating scrollTop AFTER the paint. But the
+// paint computed its window (and the top spacer) at the pre-re-seat scrollTop,
+// so for one frame the content sits at the new scrollTop against the old spacer
+// -- the rows shift by the re-seat delta, or the viewport meets an unmounted
+// row, until the next re-window lands: the shift/unmount-while-older-loads bug
+// on a prepend, which moves scrollTop by the added height. This runs the same
+// anchored re-window the async scroll observer would, but IN THIS FRAME, so the
+// spacer matches the re-seated offset. It runs the same anchored re-window the
+// async scroll observer would (anchoredRewindow), IN THIS FRAME: the window is
+// recomputed at the current scrollTop and the topmost visible row keeps its
+// on-screen position across the spacer change (the recompute would otherwise
+// shift every row by the top-spacer delta), and the coverage net mounts the
+// viewport if the paint's window fell short of it (the stuck-unmount case).
+// Under jsdom (no scroll box) anchoredRewindow is a plain re-window, so window
+// tests are unaffected.
+export function rewindowMessages(inner: HTMLElement): void {
+  const st = renderStates.get(inner);
+  if (!st) return;
+  anchoredRewindow(inner, st);
+  recoverIfUncovered(inner, st);
 }
 
 // Register the after-window-change sweep hook (see RenderState.onWindowChange).
@@ -881,7 +967,10 @@ function paintMessages(
       lastPaint: null,
       scheduled: false,
       painting: false,
+      measuredDirty: false,
       forceFull: false,
+      lastHeadKey: null,
+      lastRowCount: -1,
       onWindowChange: null,
       nodeCache: new Map()
     };
@@ -1137,9 +1226,37 @@ function paintMessages(
     // and the total scroll height converge from the estimates. measureElement
     // only notifies (and schedules a re-window) when a size actually changed, so
     // this settles rather than looping.
+    //
+    // Hold `painting` across the loop so a size change here cannot run a
+    // synchronous re-window nested inside this paint. A store prepend
+    // (bracketMessageRender) paints here while the reader is mid-scroll (the
+    // virtualizer still flags isScrolling), and without this a measure
+    // notification re-entered anchoredRewindow before the caller had re-seated
+    // its anchor, shifting the held row a few px (the row-shift-while-older-loads
+    // bug). `reentrant` is true when this paint is itself a scroll re-window
+    // (the sync fling path already set `painting`): that path keeps converging
+    // on its own scroll events, so it schedules nothing extra here. A standalone
+    // paint (a store prepend, a plain render) instead schedules ONE async
+    // re-window when a row measured away from its estimate, so offsets and the
+    // scroll height converge next frame with the anchor hold intact.
     if (windowed && st!.virt) {
-      for (const node of inner.querySelectorAll<HTMLElement>('[data-index]'))
-        st!.virt.measureElement(node);
+      const reentrant = st!.painting;
+      st!.painting = true;
+      st!.measuredDirty = false;
+      try {
+        for (const node of inner.querySelectorAll<HTMLElement>('[data-index]'))
+          st!.virt.measureElement(node);
+      } finally {
+        st!.painting = reentrant;
+      }
+      // Skip the converge while the virtualizer is actively scrolling: the next
+      // scroll event's re-window reads the fresh measurements and converges
+      // them, and the scroll-end tick catches a fling that stops right here, so
+      // scheduling one now would only add a redundant re-window to the fling
+      // (measured as extra long frames). A settled store paint has no such
+      // follow-up, so it schedules the one converge itself.
+      const scrolling = (st!.virt as unknown as {isScrolling?: boolean}).isScrolling === true;
+      if (!reentrant && st!.measuredDirty && !scrolling) scheduleRepaint(inner, st!);
     }
   }
 

@@ -8,7 +8,7 @@ import type {CycEngineSession} from '@/engine/store';
 import type {ReadMarker} from '@/engine/store/readState';
 import {sessionState, dataState} from '@/sessionState';
 import {h} from '@/components/domHelpers';
-import {clearMessages, attachStickyDates} from './messageList';
+import {clearMessages, attachStickyDates, rewindowMessages} from './messageList';
 import {scrollSurface} from '@/shared/dom';
 import {cyclog} from '@/shared/logging';
 import {clampNumber} from '@/shared/numbers';
@@ -502,6 +502,17 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     pinnedToBottom = distToEnd() <= PIN_PX;
     padTopSeen = messageListPadTop.offsetHeight;
   };
+  // A jump to a message (a reply tap, a pill, the audio chip) deliberately
+  // scrolls the view away from the bottom. Its scroll writes are machine-tagged,
+  // so the scroll listener never DROPS the pin for them (it may only confirm
+  // one). Left pinned, the resize observer re-pins to the bottom on every
+  // re-window the jump's settle triggers -- yanking the target back off-screen
+  // and unmounting it (jump-to-old failed). The traveller calls this to release
+  // the pin as it leaves the bottom; if the jump lands at the bottom anyway the
+  // scroll listener re-confirms it.
+  const releaseBottomPin = () => {
+    pinnedToBottom = false;
+  };
 
   const SCROLL_TRACE = new URLSearchParams(location.search).get('cycscroll') === '1';
   const silentScrollTo = (v: number) => {
@@ -533,24 +544,63 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     // whose top sits at or below the fold, captured immediately before the paint.
     const before = messageListScroll.scrollTop;
     const hBefore = messageListScroll.scrollHeight;
-    let anchor: HTMLElement | null = null;
+    // The anchor: the first message row at or below the fold, by data-mid (a
+    // prepend re-window can recreate its node, so it is re-found by mid, not
+    // trusted by reference) and its on-screen top BEFORE the paint (rect based).
+    const boxTop = messageListScroll.getBoundingClientRect().top;
+    let anchorMid: string | null = null;
     let anchorDelta = 0;
-    for (const row of messageListScroll.querySelectorAll<HTMLElement>('.cyc-message')) {
+    let anchorScreenTop = 0;
+    for (const row of messageListScroll.querySelectorAll<HTMLElement>('.cyc-message[data-mid]')) {
       if (row.offsetTop >= before) {
-        anchor = row;
+        anchorMid = row.dataset.mid ?? null;
         anchorDelta = row.offsetTop - before;
+        anchorScreenTop = row.getBoundingClientRect().top - boxTop;
         break;
       }
     }
     paint();
-    if (anchor?.isConnected) {
-      // The anchor survived: re-seat so it keeps the same offset from the top.
-      messageListScroll.scrollTop = anchor.offsetTop - anchorDelta;
+    const findAnchor = (): HTMLElement | null =>
+      anchorMid
+        ? messageListInner.querySelector<HTMLElement>(`.cyc-message[data-mid="${CSS.escape(anchorMid)}"]`)
+        : null;
+    const reseated = findAnchor();
+    if (reseated) {
+      // The anchor survived (possibly as a fresh node): re-seat so it keeps the
+      // same offset from the top.
+      messageListScroll.scrollTop = reseated.offsetTop - anchorDelta;
     } else {
       // The anchor is gone -- an upward-growing list shifted its history down by
       // the height added at the top, so carry that growth into the offset.
       const grew = messageListScroll.scrollHeight - hBefore;
       if (grew) messageListScroll.scrollTop = messageListScroll.scrollTop + grew;
+    }
+    // The re-seat above moved the view to hold the anchor, but the paint sized
+    // the virtual window (and the top spacer) at the PRE-re-seat offset, so for a
+    // frame the reader's rows sit against a stale spacer -- they shift by the
+    // re-seat delta, or the viewport meets an unmounted row that never recovers
+    // (the row-shift/unmount while older history loads, on a store prepend).
+    // Only when the re-seat actually moved the view.
+    if (Math.abs(messageListScroll.scrollTop - before) > 1) {
+      // Recompute the window at the re-seated offset so the coverage net mounts
+      // the viewport and the top spacer catches up.
+      rewindowMessages(messageListInner);
+      // The offsetTop re-seat and rewindowMessages each key off a possibly
+      // different topmost row, and a sticky date/pad above the fold can change
+      // height as older rows arrive, so the reader's anchor lands a few tens of
+      // px off its pre-paint screen top (the row-shift-while-older-loads
+      // residual). Pin it back to that exact top -- rect based, re-found by mid,
+      // a single deterministic correction so it cannot oscillate -- then
+      // re-window once more so the window covers the corrected offset (a moved
+      // scrollTop against a stale window meets an unmounted row).
+      const held = pinnedToBottom ? null : findAnchor();
+      if (held) {
+        const drift = held.getBoundingClientRect().top - boxTop - anchorScreenTop;
+        if (Math.abs(drift) > 0.5) {
+          messageListScroll.scrollTop += drift;
+          rewindowMessages(messageListInner);
+        }
+      }
     }
     const after = messageListScroll.scrollTop;
     markMachineTop(messageListScroll);
@@ -1156,6 +1206,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     isMachineTop,
     bracketMessageRender,
     scrollToBottom,
+    releaseBottomPin,
     setNewBelow,
     updateGoDown,
     hideUnreadBanner,
