@@ -94,6 +94,48 @@ describe('harness and model chips on a session row', () => {
   });
 });
 
+describe('running-subagents chip on a session row', () => {
+  test('shows the handed count and wears the same chip face', () => {
+    const row = chatRow(sess(), {now: NOW, subagentsChip: '5 agents'});
+    const chip = chipOf(row, 'cyc-list-row-subagents');
+    expect(chip?.textContent).toBe('5 agents');
+    // the shared chip face, like the harness/model chips
+    const host = chatRow(sess(), {now: NOW, mergedTab: 'homebox'}).querySelector<HTMLElement>(
+      '.cyc-list-row-tab'
+    )!;
+    for (const c of [...host.classList].filter((c) => c !== 'cyc-list-row-tab'))
+      expect(chip!.classList.contains(c), `subagents chip missing ${c}`).toBe(true);
+  });
+
+  test('no chip when the count is absent (hidden at 0)', () => {
+    const row = chatRow(sess(), {now: NOW, harnessChip: 'Claude'});
+    expect(chipOf(row, 'cyc-list-row-subagents')).toBeNull();
+  });
+
+  test('a sync repaints the count live and drops the chip when it clears', () => {
+    const row = chatRow(sess(), {now: NOW, subagentsChip: '5 agents'}) as SyncableRow;
+    row._cycSync!(sess(), {now: NOW, subagentsChip: '2 agents'});
+    expect(chipOf(row, 'cyc-list-row-subagents')?.textContent).toBe('2 agents');
+    row._cycSync!(sess(), {now: NOW});
+    expect(chipOf(row, 'cyc-list-row-subagents')).toBeNull();
+  });
+
+  test('it leads the row-two shelf so a busy chat reads as busy first', () => {
+    const row = chatRow(sess(), {
+      now: NOW,
+      subagentsChip: '5 agents',
+      harnessChip: 'Claude',
+      modelChip: 'Opus 4.8'
+    });
+    const shelf = row.querySelector<HTMLElement>('.cyc-list-row-chips')!;
+    expect([...shelf.children].map((c) => c.className.split(' ')[0])).toEqual([
+      'cyc-list-row-subagents',
+      'cyc-list-row-harness',
+      'cyc-list-row-model'
+    ]);
+  });
+});
+
 describe('chip placement (owner pick 2026-09-23): row two, after the time', () => {
   test('every chip sits in the row-two shelf right after the subtitle; the title holds only the name', () => {
     const row = chatRow(sess(), {

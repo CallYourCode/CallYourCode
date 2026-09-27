@@ -44,6 +44,11 @@ export type ChatRowOpts = {
    *  no chip. Long names truncate inside the chip's own max width. */
   modelChip?: string;
 
+  /** Running-subagent chip text ("5 agents"); absent = no chip. Shown only
+   *  while the agent has subagents running, so a busy chat never looks idle.
+   *  It is the same count the open chat's agents bar shows. */
+  subagentsChip?: string;
+
   now?: number;
 };
 
@@ -290,6 +295,14 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
       kids.push(peerTitle);
     }
     const chips: Node[] = [];
+    // The running-subagents chip leads the shelf so a busy chat reads as busy at
+    // a glance; the same muted chip face as its neighbours, only shown while the
+    // count is above 0.
+    if (o.subagentsChip) {
+      const chip = h('span', 'cyc-list-row-subagents ' + ROW_CHIP_UTILS);
+      chip.textContent = o.subagentsChip;
+      chips.push(chip);
+    }
     if (o.mergedTab) {
       const chip = h('span', 'cyc-list-row-tab ' + ROW_CHIP_UTILS);
       chip.textContent = o.mergedTab;
@@ -332,6 +345,8 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
       : '0|' + ss.name) +
     '|' +
     (o.mergedTab ?? '') +
+    '|' +
+    (o.subagentsChip ?? '') +
     '|' +
     (o.harnessChip ?? '') +
     '|' +

@@ -31,6 +31,12 @@ const sessions: FrameHandler = (ctx, frame) => {
       es.contextPct = Number(s.contextPct);
     }
 
+    // Running-subagent count: an engine sends it only while above 0, and the
+    // row shows a chip only then, so a non-positive or absent value is no chip.
+    if (Number.isFinite(s.subagentsRunning) && s.subagentsRunning > 0) {
+      es.subagentsRunning = Math.floor(Number(s.subagentsRunning));
+    }
+
     if (typeof s.status === 'string') es.status = s.status as EngineSession['status'];
 
     if (s.title && typeof s.title.text === 'string') {

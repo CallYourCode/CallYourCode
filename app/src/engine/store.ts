@@ -345,6 +345,7 @@ export function contentVersion(s: CycSession): string {
 
     s.avatarUrl ?? '',
     s.contextPct ?? -1,
+    s.subagentsRunning ?? 0,
     s.turnSince ?? 0,
     s.lastActivity ?? 0,
     s.order ?? -1,

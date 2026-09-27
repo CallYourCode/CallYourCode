@@ -71,6 +71,9 @@ import { initReadState, resetForTest as resetReadState } from "../sessions/reads
 import { initClips } from "../chat/clips.ts";
 import { initContextCache, claudeTitleOf,
   resetForTest as resetContextCache } from "../sessions/context-cache.ts";
+import { initSubagentCount,
+  resetForTest as resetSubagentCount } from "../sessions/subagent-count.ts";
+import { readPiSubagentRuns } from "../readers/pi-subagent-runs.ts";
 import { sessions, sessionByHandle, resolveSession, loadSessionState, sessionStateReady,
   agentMetas, blobOwner, restoredChats, chatStore, indexMsgBlobs, agentIdFor,
   chatRefFor, persistPatch, metaFor, scheduleAgentSave, scheduleHeardSave,
@@ -358,6 +361,7 @@ function resetAllModules(): void {
   resetTts();
   resetAsks();
   resetContextCache();
+  resetSubagentCount();
   resetReadState();
   resetReconcile();
   resetHookAnnounce();
@@ -645,6 +649,19 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
       claudeTranscriptPath: (c, csid) => adapter.transcriptPathFor(c, csid),
       claudeContextRead: (c, csid) => adapter.contextModelRead(c, csid),
       claudeTitleRead: (c, csid) => adapter.readTitle(c, csid),
+      broadcastSessions: () => broadcastSessions(),
+      clock,
+    }, o.contextPollMs);
+
+    /* 8b. Running-subagent count per session, on the SAME manual clock: reads
+     *     the same runs the agents bar does and reports a change through the
+     *     sessions frame. */
+    initSubagentCount({
+      sessions: () => sessions.values(),
+      transcriptFile: (h) => adapter.transcriptFile(h),
+      piRuns: (path) => readPiSubagentRuns(path),
+      conversationRuns: (c, sid) => adapter.conversationRuns(c, sid),
+      claudeTranscriptPath: (c, csid) => adapter.transcriptPathFor(c, csid),
       broadcastSessions: () => broadcastSessions(),
       clock,
     }, o.contextPollMs);

@@ -807,6 +807,15 @@ export function createListPane(deps: ListPaneDeps) {
 
     modelChip: (s) => (rowChipShown('model') ? (s.model ?? null) : null),
 
+    // The running-subagents chip: shown for EVERY row whose agent has
+    // subagents working (not just the open chat), so a busy chat never looks
+    // idle. Not behind a chip toggle: it is a live-activity signal, not a
+    // standing label. Hidden at 0 (absent count).
+    subagentsChip: (s) => {
+      const n = s.subagentsRunning ?? 0;
+      return n > 0 ? `${n} agent${n === 1 ? '' : 's'}` : null;
+    },
+
     onOpen: (id) =>
       sessionState.appConversationMode && dataState.mode === 'live'
         ? deps.rowAudioClick(id)

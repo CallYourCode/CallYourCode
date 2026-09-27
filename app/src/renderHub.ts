@@ -249,6 +249,7 @@ export function createRenderHub(deps: RenderHubDeps) {
       mergeTabs() ? 1 : 0, // the merged gate the HOST chip paints under
       (rowChipShown('harness') ? 2 : 0) + (rowChipShown('model') ? 1 : 0), // the settings toggles the harness/model chips paint under
       s.model ?? '', // model chip text (the harness chip folds via agentName above)
+      s.subagentsRunning ?? 0, // running-subagents chip ("N agents"), hidden at 0
       // Last-message facts the row paints; the growing BODY is deliberately
       // only folded as the bounded preview prefix at the end.
       last ? last.ts : 0, // timeOf clock

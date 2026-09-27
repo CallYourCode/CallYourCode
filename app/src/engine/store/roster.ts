@@ -24,6 +24,7 @@ export const ROSTER_FIELDS = [
   'status',
   'thinking',
   'contextPct',
+  'subagentsRunning',
   'agentName',
   'agentId',
   'sessionAgentId',

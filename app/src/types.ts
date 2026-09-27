@@ -163,6 +163,12 @@ export type CycSession = {
   lastActivity?: number;
 
   contextPct?: number;
+
+  /** How many subagents this chat's agent has running right now, from the
+   *  engine's roster broadcast. The list row draws a small "N agents" chip
+   *  while it is above 0; absent or 0 means none, and the chip is hidden. It is
+   *  the SAME count the open chat's agents bar shows. */
+  subagentsRunning?: number;
   order?: number;
 
   ask?: CycAsk | null;

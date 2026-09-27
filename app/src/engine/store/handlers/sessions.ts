@@ -103,6 +103,8 @@ export function wireSessions(conn: Conn, ctx: HandlerCtx): void {
       if (es.status !== undefined) s.status = es.status;
 
       s.contextPct = es.contextPct ?? undefined;
+      // absent (count dropped to 0) clears the chip, the same way contextPct does
+      s.subagentsRunning = es.subagentsRunning ?? undefined;
 
       s.avatarUrl = es.photo ?? undefined;
       if (es.title !== undefined) s.title = es.title;

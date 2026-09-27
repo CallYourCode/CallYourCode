@@ -50,6 +50,8 @@ import { makeUploads, uploadIdsOf } from "../chat/uploads.ts";
 import { initClips } from "../chat/clips.ts";
 import { initReadState } from "../sessions/readstate.ts";
 import { initContextCache, claudeTitleOf } from "../sessions/context-cache.ts";
+import { initSubagentCount } from "../sessions/subagent-count.ts";
+import { readPiSubagentRuns } from "../readers/pi-subagent-runs.ts";
 import { initChatlog, logSession, sweepRestoredQueued } from "../chat/chatlog.ts";
 import { bumpRowsGen } from "../chat/wirecache.ts";
 import { initTts, ttsWithVoice, sweepGrowingClips } from "../voice/tts.ts";
@@ -381,6 +383,19 @@ initContextCache({
   claudeTranscriptPath: (c, csid) => adapter.transcriptPathFor(c, csid),
   claudeContextRead: (c, csid) => adapter.contextModelRead(c, csid),
   claudeTitleRead: (c, csid) => adapter.readTitle(c, csid),
+  broadcastSessions: () => broadcastSessions(),
+});
+
+// Running-subagent count per session: subagent-count.ts. Reads the SAME runs
+// the /session-agents route and the open chat's agents bar do (pi from its
+// status.json files, every other harness from the claude transcript), counts
+// the running ones and reports a change through the sessions frame.
+initSubagentCount({
+  sessions: () => sessions.values(),
+  transcriptFile: (h) => adapter.transcriptFile(h),
+  piRuns: (path) => readPiSubagentRuns(path),
+  conversationRuns: (c, sid) => adapter.conversationRuns(c, sid),
+  claudeTranscriptPath: (c, csid) => adapter.transcriptPathFor(c, csid),
   broadcastSessions: () => broadcastSessions(),
 });
 
