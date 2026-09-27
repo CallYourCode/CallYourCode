@@ -40,6 +40,16 @@ export type ReplicatorDeps = {
   now?: () => number;
   schedule?: (fn: () => void, ms: number) => void;
   reachable?: () => boolean;
+  // The backfill halts entirely while this returns true (the page is hidden):
+  // no page is fetched and no timer is armed, so a backgrounded tab spends zero
+  // CPU and wire on history it cannot show. The registry flips it on
+  // visibilitychange and calls wake() to resume. Defaults to never paused.
+  paused?: () => boolean;
+  // The minimum gap between page fetches, read fresh on every step so the rate
+  // can differ by state: the OPEN chat backfills at the full DEFAULT_PAGES_PER_SEC,
+  // every other session at a slow background trickle (still filling the owner's
+  // whole offline history, just cheaply). Defaults to the full rate.
+  gapMs?: () => number;
 };
 
 // Default: two pages per second. A cold device with 79k rows (~800 pages) takes
@@ -62,6 +72,9 @@ export type Replicator = {
   // Begin/stop the background trickle.
   start: () => void;
   stop: () => void;
+  // Re-arm the pump after a pause lifted (the page became visible again). A
+  // no-op on a stopped replicator or when there is nothing left to fetch.
+  wake: () => void;
   running: () => boolean;
 };
 
@@ -126,7 +139,8 @@ export function createReplicator(sessionId: string, deps: ReplicatorDeps): Repli
   const now = deps.now ?? (() => Date.now());
   const schedule = deps.schedule ?? ((fn, ms) => void setTimeout(fn, ms));
   const reachable = deps.reachable ?? (() => true);
-  const minGapMs = 1000 / DEFAULT_PAGES_PER_SEC;
+  const paused = deps.paused ?? (() => false);
+  const gapMs = deps.gapMs ?? (() => 1000 / DEFAULT_PAGES_PER_SEC);
 
   const cursor = emptyCursor(100);
   let lastFetchAt = 0;
@@ -187,6 +201,7 @@ export function createReplicator(sessionId: string, deps: ReplicatorDeps): Repli
 
   const pump = async (): Promise<void> => {
     if (inFlight) return;
+    if (paused()) return;
     if (!reachable()) return;
     const page = nextPage(cursor);
     if (page === null) return;
@@ -204,12 +219,15 @@ export function createReplicator(sessionId: string, deps: ReplicatorDeps): Repli
   };
 
   function kick(): void {
-    if (stopped || timer) return;
+    if (stopped || timer || paused()) return;
     if (nextPage(cursor) === null) return;
-    const wait = Math.max(0, minGapMs - (now() - lastFetchAt));
+    const wait = Math.max(0, gapMs() - (now() - lastFetchAt));
     timer = true;
     schedule(() => {
       timer = false;
+      // The page may have gone hidden while we waited: stop here and leave the
+      // cursor where it is until wake() re-arms the pump on the next visible.
+      if (paused()) return;
       void pump().then(() => {
         if (!stopped && nextPage(cursor) !== null) kick();
       });
@@ -228,6 +246,9 @@ export function createReplicator(sessionId: string, deps: ReplicatorDeps): Repli
     },
     stop() {
       stopped = true;
+    },
+    wake() {
+      kick();
     },
     running() {
       return !stopped && !isComplete(cursor);

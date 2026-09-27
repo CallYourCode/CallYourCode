@@ -222,6 +222,95 @@ describe('demand hints jump the queue', () => {
   });
 });
 
+describe('the background backfill pauses while hidden and trickles for non-open chats', () => {
+  test('a paused (hidden) replicator arms no timer until it is woken', async () => {
+    let hidden = true;
+    const scheduled: Array<{fn: () => void; ms: number}> = [];
+    const fetches: number[] = [];
+    const rep = createReplicator(SID, {
+      fetchPage: async (n) => {
+        fetches.push(n);
+        return page(n, (n + 1) * 100);
+      },
+      upsert: async () => ({loSeq: -1, hiSeq: -1}),
+      persistCursor: () => {},
+      now: () => 0,
+      schedule: (fn, ms) => scheduled.push({fn, ms}),
+      paused: () => hidden
+    });
+    await rep.attachOk({sessionId: SID, pageSize: 100, tailPage: 3, total: 400, pages: []});
+    rep.start();
+    // Hidden: start armed nothing, so no page is pulled.
+    expect(scheduled).toHaveLength(0);
+    // Even a manual pump fetches nothing while paused.
+    await rep.pump();
+    expect(fetches).toHaveLength(0);
+
+    // The page becomes visible and the registry wakes it: now the backfill arms.
+    hidden = false;
+    rep.wake();
+    expect(scheduled).toHaveLength(1);
+    scheduled[0].fn(); // run the scheduled step
+    await Promise.resolve();
+    expect(fetches).toEqual([3]);
+  });
+
+  test('a timer that fires after the page went hidden pulls nothing and stops re-arming', async () => {
+    let hidden = false;
+    const scheduled: Array<() => void> = [];
+    const fetches: number[] = [];
+    const rep = createReplicator(SID, {
+      fetchPage: async (n) => {
+        fetches.push(n);
+        return page(n, (n + 1) * 100);
+      },
+      upsert: async () => ({loSeq: -1, hiSeq: -1}),
+      persistCursor: () => {},
+      now: () => 0,
+      schedule: (fn) => scheduled.push(fn),
+      paused: () => hidden
+    });
+    await rep.attachOk({sessionId: SID, pageSize: 100, tailPage: 3, total: 400, pages: []});
+    rep.start();
+    expect(scheduled).toHaveLength(1);
+    // The page hid while the timer was pending: the step fires but pulls nothing
+    // and does not re-arm.
+    hidden = true;
+    scheduled[0]();
+    await Promise.resolve();
+    expect(fetches).toHaveLength(0);
+    expect(scheduled).toHaveLength(1); // no new timer armed while hidden
+  });
+
+  test('gapMs sets the fetch cadence: the open chat runs fast, a background chat trickles', async () => {
+    const openGaps: number[] = [];
+    const openRep = createReplicator(SID, {
+      fetchPage: async (n) => page(n, (n + 1) * 100),
+      upsert: async () => ({loSeq: -1, hiSeq: -1}),
+      persistCursor: () => {},
+      now: () => 0,
+      schedule: (_fn, ms) => openGaps.push(ms),
+      gapMs: () => 500
+    });
+    await openRep.attachOk({sessionId: SID, pageSize: 100, tailPage: 3, total: 400, pages: []});
+    openRep.start();
+    expect(openGaps[0]).toBe(500);
+
+    const bgGaps: number[] = [];
+    const bgRep = createReplicator(SID, {
+      fetchPage: async (n) => page(n, (n + 1) * 100),
+      upsert: async () => ({loSeq: -1, hiSeq: -1}),
+      persistCursor: () => {},
+      now: () => 0,
+      schedule: (_fn, ms) => bgGaps.push(ms),
+      gapMs: () => 5000
+    });
+    await bgRep.attachOk({sessionId: SID, pageSize: 100, tailPage: 3, total: 400, pages: []});
+    bgRep.start();
+    expect(bgGaps[0]).toBe(5000);
+  });
+});
+
 describe('rowsFromPage', () => {
   test('splits a page into message and event rows on one axis', () => {
     const p: EnginePage = {

@@ -15,6 +15,7 @@ import {
   createReplicator,
   rowsFromPage,
   tailVersionOf,
+  DEFAULT_PAGES_PER_SEC,
   type AttachOkLite,
   type Replicator
 } from './replicator';
@@ -22,6 +23,34 @@ import {cursorSeq, resetCoverage, type CursorState} from './cursor';
 import type {StoreRow} from './core';
 
 const repls = new Map<string, Replicator>();
+
+// The OPEN chat backfills at the full rate; every other session fills its whole
+// offline history at a slow background trickle, so a dozen live sessions never
+// share the wire and CPU at the open chat's pace. A demand hint (scroll-back,
+// jump) still jumps the queue within a replicator; only the steady cadence of
+// the ordered backfill is throttled.
+const OPEN_GAP_MS = 1000 / DEFAULT_PAGES_PER_SEC; // 2 pages/sec for the open chat
+const TRICKLE_GAP_MS = 5000; // ~1 page / 5s for background chats
+
+// The whole background backfill pauses while the page is hidden: a backgrounded
+// tab shows nothing, so it should spend no CPU or wire pulling history. The
+// live tail (attach-ok deltas, live frames) still lands through the store door;
+// only the ordered backfill of older pages waits for the page to be visible.
+function pageHidden(): boolean {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+}
+
+function wakeAllReplicators(): void {
+  for (const r of repls.values()) r.wake();
+}
+
+// Resume every replicator the moment the page becomes visible again (guarded for
+// the non-browser test environment; tests drive wake()/pump() directly).
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') wakeAllReplicators();
+  });
+}
 
 function persist(sessionId: string, st: CursorState): void {
   const prev = rowStore.metaSnapshot(sessionId);
@@ -50,7 +79,9 @@ export function replicatorFor(sessionId: string, engineKey: string, paneId: stri
           .upsert(sessionId, rows, 'replicator')
           .then((res) => ({loSeq: res.loSeq, hiSeq: res.hiSeq})),
       persistCursor: (st) => persist(sessionId, st),
-      reachable: () => sync.engineReachable(engineKey)
+      reachable: () => sync.engineReachable(engineKey),
+      paused: () => pageHidden(),
+      gapMs: () => (rowStore.isOpen(sessionId) ? OPEN_GAP_MS : TRICKLE_GAP_MS)
     });
     repls.set(sessionId, r);
   }
