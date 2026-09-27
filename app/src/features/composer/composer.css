@@ -9,18 +9,46 @@
 
 
 
+/* The recording dot's danger ring. It blooms from a PSEUDO-ELEMENT animated on
+   transform + opacity only (compositor work, no per-frame repaint), never
+   box-shadow, and it animates ONLY while the composer is actually recording. The
+   recorder panel is hidden with opacity/visibility (not display:none) when idle,
+   so the old always-on box-shadow ring kept repainting every frame under that
+   hidden ancestor for nothing -- on the live build it was the sole animation
+   still running while hidden, a steady idle main-thread drain. Gating on
+   [data-cyc-recording] means an idle/hidden recorder animates nothing. */
+.cyc-rec-dot {
+  position: relative;
+}
+.cyc-rec-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background-color: color-mix(in srgb, var(--cyc-danger) 55%, transparent);
+  opacity: 0;
+  pointer-events: none;
+}
+.cyc-composer[data-cyc-recording] .cyc-rec-dot::after {
+  animation: cyc-rec-dot-ring 1.4s ease-in-out infinite;
+}
 @keyframes cyc-rec-dot-ring {
   0% {
-    transform: scale(0.86);
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--cyc-danger) 55%, transparent);
+    transform: scale(1);
+    opacity: 0.55;
   }
   70% {
-    transform: scale(1);
-    box-shadow: 0 0 0 7px color-mix(in srgb, var(--cyc-danger) 0%, transparent);
+    transform: scale(2.6);
+    opacity: 0;
   }
   100% {
-    transform: scale(0.86);
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--cyc-danger) 0%, transparent);
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cyc-composer[data-cyc-recording] .cyc-rec-dot::after {
+    animation: none;
   }
 }
 @keyframes cycRecPulse {

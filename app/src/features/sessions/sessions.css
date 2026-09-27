@@ -65,13 +65,17 @@
   padding-inline-end: 2.75rem;
 }
 
+/* The speaking-badge equalizer bars. They pulse via scaleY (transform-origin
+   bottom) rather than animating `height`, so each frame is compositor work, not
+   a layout of the list row. Visually identical: a full-height bar scaled to 30%
+   from the bottom is the same 30%-tall bar the height animation drew. */
 @keyframes cyc-eq-bounce {
   0%,
   100% {
-    height: 30%;
+    transform: scaleY(0.3);
   }
   50% {
-    height: 100%;
+    transform: scaleY(1);
   }
 }
 .cyc-host-tabs.cyc-reordering .cyc-seg {

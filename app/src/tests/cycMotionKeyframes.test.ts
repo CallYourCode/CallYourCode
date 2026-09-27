@@ -69,14 +69,18 @@ describe('CYC keyframes keep their start/end contract', () => {
     for (const name of NEW_NAMES) expect(Object.keys(kf), `${name} defined`).toContain(name);
   });
 
-  test('the recorder dot pulses a danger ring via transform + box-shadow, never opacity', async () => {
+  test('the recorder dot pulses a danger ring via transform + opacity (pseudo-element), never box-shadow', async () => {
+    // The ring is a compositor-only bloom on a pseudo-element: it scales up and
+    // fades out. box-shadow (a per-frame repaint) is gone, so an idle/hidden
+    // recorder animates nothing expensive.
     const kf = await keyframes();
     const ring = kf['cyc-rec-dot-ring'];
-    expect(ring['0%'].transform).toBe('scale(0.86)');
-    expect(ring['0%']['box-shadow']).toContain('color-mix');
-    expect(ring['70%']['box-shadow']).toContain('7px');
+    expect(ring['0%'].transform).toBe('scale(1)');
+    expect(ring['0%'].opacity).toBe('0.55');
+    expect(ring['70%'].transform).toBe('scale(2.6)');
+    expect(ring['70%'].opacity).toBe('0');
     for (const stop of Object.keys(ring))
-      expect(ring[stop].opacity, `${stop} opacity`).toBeUndefined();
+      expect(ring[stop]['box-shadow'], `${stop} box-shadow`).toBeUndefined();
   });
 
   test('the drop-target dragover pulse blooms an accent ring on the box-shadow spread', async () => {
