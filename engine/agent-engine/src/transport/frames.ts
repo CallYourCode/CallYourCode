@@ -18,7 +18,7 @@ import { onRegister, dispatchSessionFrame } from "../runtime/mcp.ts";
 import { addRtcCand, closeRtc } from "./rtc";
 import { onReq, onReqAbort, closeTunnelClient } from "./tunnel-glue.ts";
 import { onVoiceFp, onVoiceCtl } from "../voice/voicectl.ts";
-import { broadcastSessions } from "../sessions/sessions-frame.ts";
+import { broadcastSessions, sendFullSessions } from "../sessions/sessions-frame.ts";
 import type { Sock } from "./sock.ts";
 
 const NOTIFY_DEBUG = process.env.NOTIFY_DEBUG === "1";
@@ -261,6 +261,11 @@ export async function dispatchClientFrame(ws: Sock, m: any): Promise<void> {
    * event log every time. */
   if (m.t === "ping") { send(ws, { t: "pong", n: m.n }); return; }
   if (m.t === "heard") onHeard(m);
+  /* A matched app got a {t:"session"} for a row it does not hold (a full frame
+   * it somehow missed) and asks for the current roster. Answers this one
+   * socket with the full frame, exactly as hello does; an app too old to send
+   * this never does, and never needs to. */
+  else if (m.t === "sessions-resync") sendFullSessions(ws);
   else if (m.t === "attach") onAttach(ws, m);
   else if (m.t === "progress") onProgress(m);
   /* NOT AWAITED: a message held while its recording decodes must not stop this

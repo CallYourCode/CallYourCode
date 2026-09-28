@@ -39,7 +39,7 @@ afterEach(async () => {
   core = null;
 });
 
-const listOf = (client: FakeClient): any[] => (client.last("sessions")?.list as any[]) ?? [];
+const listOf = (client: FakeClient): any[] => client.roster().list;
 const rowOf = (client: FakeClient, id: string) => listOf(client).find((s) => s.id === id);
 
 /** Put a real message into a session's conversation, through the real delivery

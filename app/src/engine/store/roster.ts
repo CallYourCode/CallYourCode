@@ -45,8 +45,22 @@ export type RosterField = (typeof ROSTER_FIELDS)[number];
 // local re-persists (a rename, a mark-unread) so the row's syncedAt stays true.
 const rosterSyncedAt = new Map<string, number>();
 
+// The last-persisted content of each engine's roster: a fingerprint over EXACTLY
+// the persisted fields (every toStoredSession row + tabs + hostname), so a
+// sessions frame that changed no list-visible fact skips the whole-roster IDB
+// put (V2b). syncedAt/savedAt are excluded on purpose: they are per-frame
+// timestamps that would defeat the guard, and a stale syncedAt only ages the
+// cold-open freshness stamp, it never changes what the list paints.
+const rosterFingerprint = new Map<string, string>();
+
 export function noteRosterSynced(engineKey: string, at: number): void {
   rosterSyncedAt.set(engineKey, at);
+}
+
+// Test-only: drop the persisted-content fingerprints so each test starts with a
+// cold guard (module state outlives a test's sessions.clear()).
+export function __resetRosterFingerprintForTest(): void {
+  rosterFingerprint.clear();
 }
 
 export function toStoredSession(s: CycEngineSession): StoredSession {
@@ -80,11 +94,18 @@ export function persistRoster(engineKey: string): void {
     .filter((s) => s.engineKey === engineKey)
     .map(toStoredSession);
   const conn = connOf(engineKey);
+  const tabs = lastSettledTabs.get(engineKey) ?? [];
+  // Skip the put when nothing the row store persists actually changed: a
+  // status-only churn, a re-broadcast, or a runtime-only field (churnGrey) all
+  // leave this identical. A real change to any persisted field still writes.
+  const fp = JSON.stringify({sessions: rows, tabs, hostname: conn?.host ?? null});
+  if (rosterFingerprint.get(engineKey) === fp) return;
+  rosterFingerprint.set(engineKey, fp);
   history.writeRoster({
     engineKey,
     syncedAt: rosterSyncedAt.get(engineKey) ?? 0,
     ...(conn?.host ? {hostname: conn.host} : {}),
-    tabs: lastSettledTabs.get(engineKey) ?? [],
+    tabs,
     sessions: rows
   });
 }

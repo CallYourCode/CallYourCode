@@ -122,10 +122,11 @@ test("overrides round-trip the wire and survive a restart", async () => {
   expect(row().muted).toBeUndefined();
   /* HTTP IN, WIRE OUT: the write is confirmed by a broadcast, or his other
    * device shows the old value until something unrelated moves the list. */
-  const pushed = client.last("sessions");
+  // A settings write is a fields-only change: it broadcasts as one additive
+  // {t:"session"} row, folded into the roster view here.
+  const pushed = client.sessionRow(wireId(PANE));
   expect(pushed, "the settings write broadcast no sessions frame").toBeTruthy();
-  expect((pushed!.list as any[]).find((s) => s.id === wireId(PANE)).settings)
-    .toEqual({ muted: true, notify: false });
+  expect(pushed!.settings).toEqual({ muted: true, notify: false });
 
   /* THE RESTART. A fresh wiring over the SAME data dir, which is exactly what a
    * restart is: same disk, new memory. The override has to come back from

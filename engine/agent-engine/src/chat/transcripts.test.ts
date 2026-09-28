@@ -287,7 +287,7 @@ afterEach(async () => {
   core = null;
 });
 
-const listOf = (client: FakeClient): any[] => (client.last("sessions")?.list as any[]) ?? [];
+const listOf = (client: FakeClient): any[] => client.roster().list;
 
 test("a pi pane's model and context ride the sessions contract", async () => {
   /* The row's `model` comes off the pi session file as a DISPLAY name ("Grok 4.6"), the same

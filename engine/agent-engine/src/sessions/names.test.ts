@@ -117,9 +117,11 @@ test("a rename reaches every connected device, not just the one that asked", asy
 
   await rename(PANE, "seen from the other device");
 
-  const pushed = watcher.last("sessions");
+  // A rename is a fields-only change: it reaches the other device as one
+  // additive {t:"session"} row, folded into the roster view here.
+  const pushed = watcher.sessionRow(wireId(PANE));
   expect(pushed, "the device that did nothing was told nothing").toBeDefined();
-  expect((pushed!.list as any[]).find((s) => s.id === wireId(PANE)).name).toBe("seen from the other device");
+  expect(pushed!.name).toBe("seen from the other device");
 });
 
 test("the rename survives a restart, because it is written to the agent meta and restored on boot",

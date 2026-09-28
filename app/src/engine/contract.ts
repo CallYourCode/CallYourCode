@@ -334,6 +334,12 @@ export type EngineEvents = {
 
   sessions(list: EngineSession[], tabs: EngineTab[]): void;
 
+  /* ONE roster row changed its fields only (Lane D): the engine's additive
+   * {t:"session"} frame, applied through the very code the full `sessions`
+   * frame runs per row, so exactly that one list row re-keys. Never carries a
+   * set/order/tabs change (those still arrive as a full `sessions` frame). */
+  session(es: EngineSession): void;
+
   plugins(list: EnginePluginDecl[]): void;
 
   chat(m: EngineChatMessage): void;
@@ -387,6 +393,11 @@ export interface EngineClient {
   progress(sessionId: string, seq: number, explicit?: boolean): boolean;
   heard(sessionId: string, row: {mid?: string; msgId?: string; ts?: number}): boolean;
   detach(): void;
+
+  /* Ask the engine to re-serve the full roster to this socket. Sent when a
+   * {t:"session"} frame named a row the app does not hold, i.e. a full frame
+   * it somehow missed; the engine answers with a {t:"sessions"} frame. */
+  resyncSessions(): void;
 
   sendText(
     sessionId: string,

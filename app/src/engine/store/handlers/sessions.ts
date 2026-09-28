@@ -1,4 +1,5 @@
 import type {EngineSession, EngineTab} from '../../contract';
+import type {CycEngineSession} from '../types';
 import {effectiveMuted} from '../../settings';
 import {cyclog} from '@/shared/logging';
 import {
@@ -31,21 +32,21 @@ const endDeathGrace = (id: string) => {
   }
 };
 
-export function wireSessions(conn: Conn, ctx: HandlerCtx): void {
+/* Apply ONE wire row onto its live session, exactly the same way whether it
+ * arrived in the full {t:"sessions"} list or in an additive one-row
+ * {t:"session"} frame (Lane D). ONE place, so the two frames can never drift
+ * into applying a field two ways. `knownBefore` is the set of session ids the
+ * app held BEFORE this frame, so the death grace fires only on a seen
+ * alive -> dead transition. Returns the live session it touched. */
+function applySessionRow(
+  conn: Conn,
+  ctx: HandlerCtx,
+  es: EngineSession,
+  knownBefore: Set<string>
+): CycEngineSession {
   const client = conn.client;
-
-  client.on('sessions', (list: EngineSession[], declared: EngineTab[]) => {
-    conn.tabs = declared;
-
-    if (declared.length) lastSettledTabs.set(conn.key, declared);
-    // Which sessions the app already held BEFORE this frame: the death grace
-    // fires only on a seen alive -> dead transition. A session this frame
-    // introduces already dead (a cold list of the archive) gets no grace.
-    const knownBefore = new Set(sessions.keys());
-    const listed = new Set<string>();
-    for (const es of list) {
+  {
       const s = ctx.ensureSession(conn.key, es.id);
-      listed.add(s.id);
       s.name = es.name;
       s.cwd = es.cwd;
 
@@ -138,6 +139,25 @@ export function wireSessions(conn: Conn, ctx: HandlerCtx): void {
       if ((rotated || gained) && s.id === ctx.attachedId() && ctx.overlayOn(s.id)) {
         if (gained) client.setSessionTail(s.paneId, true);
       }
+      return s;
+  }
+}
+
+export function wireSessions(conn: Conn, ctx: HandlerCtx): void {
+  const client = conn.client;
+
+  client.on('sessions', (list: EngineSession[], declared: EngineTab[]) => {
+    conn.tabs = declared;
+
+    if (declared.length) lastSettledTabs.set(conn.key, declared);
+    // Which sessions the app already held BEFORE this frame: the death grace
+    // fires only on a seen alive -> dead transition. A session this frame
+    // introduces already dead (a cold list of the archive) gets no grace.
+    const knownBefore = new Set(sessions.keys());
+    const listed = new Set<string>();
+    for (const es of list) {
+      const s = applySessionRow(conn, ctx, es, knownBefore);
+      listed.add(s.id);
     }
 
     const settled = conn.state === 'connected' && conn.helloSettled;
@@ -186,6 +206,37 @@ export function wireSessions(conn: Conn, ctx: HandlerCtx): void {
     // Roster applied and persisted: the engine may settle now (step 1 of the
     // connected-edge order).
     sync.noteSessions(conn.key);
+  });
+
+  /* ONE roster row's fields changed (Lane D): apply exactly that row, persist,
+   * and re-key exactly that list row. No reclaim loop (the set did not move --
+   * a set/order/tabs change still arrives as a full `sessions` frame) and no
+   * sync.noteSessions (a mid-stream patch is not the full roster the connected
+   * edge waits for). */
+  client.on('session', (es: EngineSession) => {
+    // An unknown id means the app missed the full frame that introduced this
+    // row: do NOT guess a phantom into the list. Ask for the whole roster and
+    // let the next full frame reconcile it.
+    const held = [...sessions.values()].some(
+      (x) => x.engineKey === conn.key && x.paneId === es.id
+    );
+    if (!held) {
+      client.resyncSessions();
+      return;
+    }
+    // The set the app held before this frame (it holds the row, so the death
+    // grace still fires on a seen alive -> dead edge, exactly as in the full
+    // frame's loop).
+    const knownBefore = new Set(sessions.keys());
+    const s = applySessionRow(conn, ctx, es, knownBefore);
+
+    // The engine served this row: stamp freshness (excluded from the persist
+    // guard's fingerprint) and persist. persistRoster writes at most one IDB
+    // record and skips when no persisted field moved (V2b guard).
+    noteRosterSynced(conn.key, Date.now());
+    persistRoster(conn.key);
+    syncNotifAvatars([{id: s.id, name: s.name, avatarUrl: s.avatarUrl}]);
+    notify();
   });
 
   client.on('sessionIdChanged', (from: string, to: string) => {

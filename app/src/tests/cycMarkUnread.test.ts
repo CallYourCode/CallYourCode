@@ -13,6 +13,7 @@
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import {setSessionUnread, wireSessionOps} from '../engine/store/sessionOps';
 import {wireSessions} from '../engine/store/handlers/sessions';
+import {__resetRosterFingerprintForTest} from '../engine/store/roster';
 import {attach} from '../engine/store';
 import * as history from '../engine/history';
 import {
@@ -129,6 +130,7 @@ beforeEach(() => {
   engineStatus = 200;
   sessions.clear();
   markedUnread.clear();
+  __resetRosterFingerprintForTest();
   seen.clear();
   engineThinking.clear();
   conns.length = 0;

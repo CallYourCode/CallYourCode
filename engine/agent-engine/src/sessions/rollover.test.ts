@@ -104,7 +104,7 @@ async function attachedTexts(c: WireCore, id: string): Promise<string[]> {
 }
 
 /** Every row a client's newest sessions frame holds, by id. */
-const listOf = (client: FakeClient): any[] => (client.last("sessions")?.list as any[]) ?? [];
+const listOf = (client: FakeClient): any[] => client.roster().list;
 
 /** The system rows a chat holds (what the roll writes). */
 const systemTexts = (c: WireCore, id: string): string[] =>

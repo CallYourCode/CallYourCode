@@ -74,7 +74,7 @@ const rename = (r: ServedRoutes, id: string, name: string) =>
   r.post(`/session/${encodeURIComponent(id)}/rename`, { name }).then((x) => x.json() as Promise<any>);
 
 /** Every row a client's newest sessions frame holds. */
-const listOf = (client: FakeClient): any[] => (client.last("sessions")?.list as any[]) ?? [];
+const listOf = (client: FakeClient): any[] => client.roster().list;
 const rowOf = (client: FakeClient, id: string) => listOf(client).find((s) => s.id === id);
 
 /** Navigate away and back: a FRESH page attaches and reads the attach answer's

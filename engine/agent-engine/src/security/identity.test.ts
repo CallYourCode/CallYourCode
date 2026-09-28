@@ -57,7 +57,7 @@ afterEach(async () => {
   core = null;
 });
 
-const listOf = (client: FakeClient): any[] => (client.last("sessions")?.list as any[]) ?? [];
+const listOf = (client: FakeClient): any[] => client.roster().list;
 
 /** What the fake pane actually received, per pane: the only honest place to ask
  *  where the keystrokes went. */

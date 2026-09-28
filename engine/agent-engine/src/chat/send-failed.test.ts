@@ -80,7 +80,7 @@ test("a send to a dead pane is failed on its cid, not acked, and nothing is deli
   // No user row was written (the message landed nowhere) and no bubble echoed.
   expect(s.chat.filter((m) => m.role === "user"), "no user row for a failed send").toEqual([]);
   expect(page.of("chat"), "no bubble for a message that did not land").toEqual([]);
-  expect(other.frames.filter((f) => f.t !== "sessions"), "the failure is the sender's, not a broadcast").toEqual([]);
+  expect(other.frames.filter((f) => f.t !== "sessions" && f.t !== "session"), "the failure is the sender's, not a broadcast").toEqual([]);
   expect(c.logs.filter((l) => l.event === "utterance.dropped").map((l) => String(l.fields.why)))
     .toEqual([expect.stringContaining("the session is offline")]);
 });
