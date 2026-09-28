@@ -607,7 +607,9 @@ export async function upsert(
   if (!rows.length) return {loSeq: -1, hiSeq: -1, changed: false, touchesWindow: false};
   const m = await ensureIdx(sessionId);
   floorOpenWindow(sessionId, m);
-  const res = upsertMirror(m, rows);
+  // A write to the OPEN chat grows the window on a live tail arrival instead of
+  // sliding it (upsertMirror's window bound); every other session stays bounded.
+  const res = upsertMirror(m, rows, {openLive: openSid === sessionId});
   persistUpsert(sessionId, m, rows, res);
   logRefused(sessionId, res, tag);
   const paints = openSid === sessionId && res.touchesWindow && res.changed;
@@ -645,7 +647,9 @@ export function upsertSync(
   const m = mirrors.get(sessionId);
   if (!m || !idxLoaded.has(sessionId)) return null;
   floorOpenWindow(sessionId, m);
-  const res = upsertMirror(m, rows);
+  // A write to the OPEN chat grows the window on a live tail arrival instead of
+  // sliding it (upsertMirror's window bound); every other session stays bounded.
+  const res = upsertMirror(m, rows, {openLive: openSid === sessionId});
   persistUpsert(sessionId, m, rows, res);
   logRefused(sessionId, res, tag);
   if (openSid === sessionId && res.touchesWindow && res.changed) {

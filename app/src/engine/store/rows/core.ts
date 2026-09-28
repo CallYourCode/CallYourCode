@@ -147,6 +147,16 @@ export function anchorsOpenWindow(t: RowTuple): boolean {
   return t.kind === 'msg';
 }
 
+// The newest MESSAGE tuple the index holds (the window anchor tuple, newest by
+// ts), or null when the session holds no message yet. Scans from the tail, so
+// it stops at the first message below any session-event run stamped above it;
+// cheap because that run is a handful of rows. The window bound reads this to
+// tell a live tail message from a backfill (see upsertMirror's tailArrival).
+function newestAnchor(m: Mirror): RowTuple | null {
+  for (let i = m.idx.length - 1; i >= 0; i--) if (anchorsOpenWindow(m.idx[i])) return m.idx[i];
+  return null;
+}
+
 // A total order over rows/tuples: TS first (the engine's stamped clock, which
 // stampTs keeps strictly increasing per session), seq to break a colliding ts,
 // id last so the order is total and stable across upserts.
@@ -562,12 +572,35 @@ function rekeyMidlessTwins(m: Mirror, rows: StoreRow[]): string[] {
 // index and is left for the durable backing (the extend-window read brings its
 // payload in later). This is the store's whole dedupe: there is no seen-set,
 // because the id IS the identity.
-export function upsertMirror(m: Mirror, rows: StoreRow[]): UpsertResult {
+// The generous cap on how far the OPEN chat's window may GROW under a live tail
+// (see the WINDOW BOUND below). Ten times the open window: a reader can sit at
+// the bottom of a long chat for thousands of uninterrupted messages before the
+// window is trimmed once, and the memory a chat can hold stays bounded.
+export const GROW_CAP = 3000;
+
+// `openLive` is set by the caller only for a write to the CURRENTLY OPEN chat.
+// It relaxes the window bound so a live tail arrival grows the open window
+// instead of sliding it (see the WINDOW BOUND). Every other caller leaves it
+// unset and the window stays bounded to windowSize exactly as before.
+export function upsertMirror(
+  m: Mirror,
+  rows: StoreRow[],
+  opts: {openLive?: boolean} = {}
+): UpsertResult {
   let loSeq = Infinity;
   let hiSeq = -Infinity;
   let changed = false;
   let touchesWindow = false;
   const inserted: string[] = [];
+  // The newest MESSAGE the index held on entry, so the window bound can tell a
+  // live TAIL arrival (a newer message lands) from a backfill page (older rows
+  // land below it): only a tail arrival is allowed to GROW the open window. The
+  // newest MESSAGE, not the newest tuple, because a busy agent stamps session
+  // events ABOVE the newest chat message (the window anchors on messages alone,
+  // anchorsOpenWindow); a live reply lands below that event run, so the absolute
+  // idx tail would not advance and a genuine tail message would look like a
+  // backfill.
+  const entryMsgTail = newestAnchor(m);
   // Fold a mid row into any non-mid incumbent for the same message FIRST, so the
   // rest of the fold sees the incumbent already retired under the mid id and the
   // arriving row inserts once. This is the twin fix in the mid-arrives-last
@@ -680,15 +713,38 @@ export function upsertMirror(m: Mirror, rows: StoreRow[]): UpsertResult {
       if (row.seq > hiSeq) hiSeq = row.seq;
     }
   }
-  // THE WINDOW BOUND (defect 3): once the index would carry more than windowSize
-  // rows, the floor rides up to the newest-windowSize boundary, so the projected
+  // THE WINDOW BOUND (defect 3): once the index would carry more than the bound
+  // rows, the floor rides up to the newest-bound boundary, so the projected
   // window stays bounded and a below-boundary backfill page neither paints nor
   // grows the projection, no matter that the open began on an empty store with a
   // floor of 0. Suspended while the chat is scrolled up (extended): the user's
   // older reach is deliberate and a live/backfill write must not trim it.
+  //
+  // The bound is windowSize for a background chat (its projection stays capped at
+  // the open size, so a background write never grows it). For the CURRENTLY OPEN
+  // chat (openLive) the bound is the far larger GROW_CAP: a live tail arrival
+  // then leaves the floor put and the window GROWS by that one row, instead of
+  // sliding the whole projection up (evicting the oldest row and reindexing the
+  // front, which churned ~windowSize rows and forced two scrolls per message for
+  // a reader pinned at the bottom of a chat longer than windowSize). Because the
+  // floor rides only when the newest-bound boundary rises ABOVE it, the open
+  // window grows one row at a time until it reaches GROW_CAP, then a single trim
+  // rides the floor to the newest GROW_CAP; past the cap each further arrival
+  // trims one (the pre-fix bounded behaviour), which only bites after several
+  // thousand uninterrupted arrivals into one open chat. openWindow resets the
+  // floor and windowSize on the next open (or a resnap to the tail), so the
+  // grown window returns to the normal size the next time the chat is opened.
+  // Only a TAIL arrival grows the window: the newest MESSAGE now sits above the
+  // newest message on entry. A backfill page (older messages, below the newest)
+  // leaves it put, so it stays bound to windowSize and never inflates the open
+  // window (R6: a below-window backfill flood paints nothing and stays capped).
+  const newMsgTail = newestAnchor(m);
+  const tailArrival =
+    !entryMsgTail || (!!newMsgTail && cmpTuple(newMsgTail, entryMsgTail) > 0);
   let floor = oldFloor;
-  if (windowOpen && !m.extended && m.windowSize > 0 && m.idx.length > m.windowSize) {
-    const boundary = newestWindowFloor(m, m.windowSize);
+  const bound = opts.openLive && tailArrival ? GROW_CAP : m.windowSize;
+  if (windowOpen && !m.extended && bound > 0 && m.idx.length > bound) {
+    const boundary = newestWindowFloor(m, bound);
     if (aboveFloor(boundary, floor)) floor = boundary;
   }
   m.floor = floor;
