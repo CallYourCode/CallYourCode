@@ -237,20 +237,60 @@ export function inWindow(m: Mirror, t: RowTuple): boolean {
 // scrolled up (extendWindow deliberately lowered the floor): while extended the
 // bound is suspended so a live/backfill write never trims the older reach the
 // user asked for.
+//
+// PER-ARRIVAL WORK IS O(CHANGED ROWS), NOT O(INDEX). On a busy chat `idx` holds
+// 78k-125k tuples, so any per-upsert scan of the whole array is a main-thread
+// heat source dozens of times a second during a flood. Three caches keep the hot
+// path proportional to the ARRIVING rows instead:
+//   - `byId`: id -> its tuple in `idx`, so an incumbent lookup and a
+//     twin-already-held check are O(1) instead of a linear scan or a fresh
+//     Map(idx) built on every batch.
+//   - `axis`: true once the mirror holds a genuine engine-axis message row (a
+//     mid-keyed id on a committed seq). Engine-axis rows are never removed in
+//     normal flow, so this only ever flips false -> true; hasEngineAxis reads it
+//     without scanning.
+//   - `midless`: the count of NON-mid message tuples, so rekeyMidlessTwins can
+//     gate on a counter instead of scanning `idx` for a twin candidate on every
+//     batch (the common all-mid backfill gates out in O(1)).
+// The three are maintained by insertTuple/removeTuple and rebuilt by
+// reindexMirror whenever `idx` is replaced wholesale (a durable reload, a read
+// sanitise). They are a cache OF `idx`, never a second source of truth.
 export type Mirror = {
   idx: RowTuple[];
   loaded: Map<string, StoreRow>;
   floor: RowTuple | null;
   windowSize: number;
   extended: boolean;
+  byId: Map<string, RowTuple>;
+  axis: boolean;
+  midless: number;
 };
 
 export function emptyMirror(): Mirror {
-  return {idx: [], loaded: new Map(), floor: null, windowSize: 0, extended: false};
+  return {
+    idx: [],
+    loaded: new Map(),
+    floor: null,
+    windowSize: 0,
+    extended: false,
+    byId: new Map(),
+    axis: false,
+    midless: 0
+  };
 }
 
-function insertTuple(idx: RowTuple[], t: RowTuple): void {
+// A tuple that makes the mirror hold a genuine engine-axis row (drives `axis`).
+function isAxisTuple(t: RowTuple): boolean {
+  return t.kind === 'msg' && t.seq >= 0 && isMidKeyedId(t.id);
+}
+// A non-mid message tuple (drives `midless`, the twin-fold gate).
+function isMidlessMsgTuple(t: RowTuple): boolean {
+  return t.kind === 'msg' && !isMidKeyedId(t.id);
+}
+
+function insertTuple(m: Mirror, t: RowTuple): void {
   // binary search for the insertion point in the total order
+  const idx = m.idx;
   let lo = 0;
   let hi = idx.length;
   while (lo < hi) {
@@ -259,6 +299,39 @@ function insertTuple(idx: RowTuple[], t: RowTuple): void {
     else hi = mid;
   }
   idx.splice(lo, 0, t);
+  m.byId.set(t.id, t);
+  if (isAxisTuple(t)) m.axis = true;
+  if (isMidlessMsgTuple(t)) m.midless++;
+}
+
+// Drop a tuple by id, keeping the caches in step. The findIndex is O(index), but
+// removals never happen on the hot append/flood path (a live tail row is a fresh
+// insert): they are re-seats (a renumber, rare), twin folds (a legacy crossing),
+// and user-paced drops/rekeys. Returns the removed tuple (its seq lets the
+// durable layer mark the one changed chunk), or null when nothing was held.
+export function removeTuple(m: Mirror, id: string): RowTuple | null {
+  const t = m.byId.get(id);
+  if (!t) return null;
+  const at = m.idx.findIndex((x) => x.id === id);
+  if (at >= 0) m.idx.splice(at, 1);
+  m.byId.delete(id);
+  if (isMidlessMsgTuple(t)) m.midless--;
+  // `axis` is left set: an engine-axis row is never removed in normal flow, and
+  // leaving it true only keeps the door gating poison (always correct).
+  return t;
+}
+
+// Rebuild the caches from `idx`, after the array is replaced wholesale (a durable
+// reload, a read sanitise).
+export function reindexMirror(m: Mirror): void {
+  m.byId = new Map();
+  m.axis = false;
+  m.midless = 0;
+  for (const t of m.idx) {
+    m.byId.set(t.id, t);
+    if (isAxisTuple(t)) m.axis = true;
+    if (isMidlessMsgTuple(t)) m.midless++;
+  }
 }
 
 export type UpsertResult = {
@@ -285,6 +358,11 @@ export type UpsertResult = {
   // The caller logs each so a future writer names itself in the field, and never
   // persists it (it was never inserted).
   refused: string[];
+  // rows whose tuple moved in the ordered index because their seq changed (a
+  // renumber): {id, fromSeq, toSeq}. The durable layer marks BOTH the old and
+  // the new chunk dirty so a re-seat that crosses a chunk boundary never leaves
+  // a stale tuple behind under the old seq (a durable twin on reload).
+  reseated: Array<{id: string; fromSeq: number; toSeq: number}>;
 };
 
 // A mid-keyed durable id (rowIdOfMessage with a mid): `m:<mid>`. The provisional
@@ -321,8 +399,9 @@ export function isPoisonTuple(t: RowTuple, axisBound = Infinity): boolean {
 // poison row can only be a stale twin/wall, so the door refuses it and a read
 // sanitises it away.
 export function hasEngineAxis(m: Mirror): boolean {
-  for (const t of m.idx) if (t.kind === 'msg' && t.seq >= 0 && isMidKeyedId(t.id)) return true;
-  return false;
+  // Maintained incrementally (see Mirror.axis): once an engine-axis row is held
+  // the flag stays set, so this is O(1) on every write instead of a full scan.
+  return m.axis;
 }
 
 // The non-mid incumbent that is the SAME message as an arriving mid-bearing row,
@@ -475,7 +554,7 @@ function foldMidlessArrivals(
   for (const row of rows) {
     const a = row.msg;
     if (row.kind !== 'msg' || !a || a.mid) continue; // only a mid-LESS arrival folds this way
-    if (m.idx.some((t) => t.id === row.id)) continue; // an already-held id updates in place
+    if (m.byId.has(row.id)) continue; // an already-held id updates in place
     const intoId = findMidBearingTwin(m, row);
     if (!intoId) continue;
     const inc = m.loaded.get(intoId)?.msg;
@@ -509,10 +588,9 @@ function foldMidKeyedTwins(m: Mirror, rows: StoreRow[]): string[] {
     const a = row.msg;
     if (row.kind !== 'msg' || !a?.cid || !a.mid) continue;
     if (row.id !== `m:c:${a.cid}`) continue; // only a cid-keyed arrival (the new spelling)
-    if (m.idx.some((t) => t.id === row.id)) continue; // already held under the cid id
+    if (m.byId.has(row.id)) continue; // already held under the cid id
     const oldId = `m:${a.mid}`;
-    const at = m.idx.findIndex((t) => t.id === oldId);
-    if (at < 0) continue; // no mid-keyed incumbent for this send: nothing to fold
+    if (!m.byId.has(oldId)) continue; // no mid-keyed incumbent for this send: nothing to fold
     const inc = m.loaded.get(oldId);
     if (!inc?.msg) continue; // incumbent not loaded: leave it to the durable rekey
     mergeReserve(inc.msg, a);
@@ -520,7 +598,7 @@ function foldMidKeyedTwins(m: Mirror, rows: StoreRow[]): string[] {
       row.seq = inc.seq;
       a.seq = inc.seq;
     }
-    m.idx.splice(at, 1);
+    removeTuple(m, oldId);
     m.loaded.delete(oldId);
     rekeyedFrom.push(oldId);
   }
@@ -529,27 +607,20 @@ function foldMidKeyedTwins(m: Mirror, rows: StoreRow[]): string[] {
 
 function rekeyMidlessTwins(m: Mirror, rows: StoreRow[]): string[] {
   // Cheap gate: a twin can only exist when the session already holds a non-mid
-  // message row. In the common case (a backfill of rows that all carry mids)
-  // this scan finds none and returns at once, so the fold stays linear instead
-  // of scanning the whole index once per arriving row.
-  let hasMidless = false;
-  for (const t of m.idx) {
-    if (t.kind === 'msg' && !isMidKeyedId(t.id)) {
-      hasMidless = true;
-      break;
-    }
-  }
-  if (!hasMidless) return [];
+  // message row. The mirror keeps that count (m.midless) incrementally, so this
+  // gate is O(1) rather than a full index scan on every batch; the common case
+  // (a backfill of rows that all carry mids) has midless === 0 and returns at
+  // once, so the fold stays proportional to the arriving rows.
+  if (m.midless === 0) return [];
   const rekeyedFrom: string[] = [];
   for (const row of rows) {
     if (row.kind !== 'msg' || !row.msg?.mid) continue;
-    if (m.idx.some((t) => t.id === row.id)) continue;
+    if (m.byId.has(row.id)) continue;
     const twinId = findMidlessTwin(m, row);
     if (!twinId) continue;
     const inc = m.loaded.get(twinId);
     if (inc?.msg && row.msg) carryClientFields(inc.msg, row.msg);
-    const at = m.idx.findIndex((t) => t.id === twinId);
-    if (at >= 0) m.idx.splice(at, 1);
+    removeTuple(m, twinId);
     m.loaded.delete(twinId);
     rekeyedFrom.push(twinId);
   }
@@ -606,8 +677,10 @@ export function upsertMirror(m: Mirror, rows: StoreRow[]): UpsertResult {
       )
     : null;
   if (refuse) for (const id of refuse) refused.push(id);
-  const byId = new Map<string, RowTuple>();
-  for (const t of m.idx) byId.set(t.id, t);
+  // The mirror carries the id -> tuple map (m.byId), maintained by
+  // insertTuple/removeTuple, so an incumbent lookup is O(1) and there is no fresh
+  // Map(idx) built on every batch (the whole point: work stays O(arriving rows)).
+  const reseatedOut: Array<{id: string; fromSeq: number; toSeq: number}> = [];
   // A window is "open" once a floor has been set (openWindow). Before that there
   // is no visible window, so a pre-open backfill write touches nothing and paints
   // nothing; the open reads the tail fresh from the backing.
@@ -626,13 +699,12 @@ export function upsertMirror(m: Mirror, rows: StoreRow[]): UpsertResult {
     if (foldedAway.has(row.id)) continue; // folded into a mid incumbent: never inserted
     if (refuse?.has(row.id)) continue; // poison: refused at the door, never inserted
     let t: RowTuple = tupleOf(row);
-    const prev = byId.get(row.id);
+    const prev = m.byId.get(row.id);
     let isNew = false;
     let payloadChanged = false;
     let reseated = false;
     if (!prev) {
-      insertTuple(m.idx, t);
-      byId.set(row.id, t);
+      insertTuple(m, t);
       inserted.push(row.id);
       isNew = true;
       changed = true;
@@ -661,11 +733,12 @@ export function upsertMirror(m: Mirror, rows: StoreRow[]): UpsertResult {
         t = tupleOf(row);
       }
       if (prev.seq !== row.seq || prev.ts !== row.ts) {
-        // re-seat in the ordered index
-        const at = m.idx.findIndex((x) => x.id === row.id);
-        if (at >= 0) m.idx.splice(at, 1);
-        insertTuple(m.idx, t);
-        byId.set(row.id, t);
+        // re-seat in the ordered index; record the seq move so the durable layer
+        // rewrites both the old and the new chunk (no stale tuple left behind).
+        const fromSeq = prev.seq;
+        removeTuple(m, row.id);
+        insertTuple(m, t);
+        if (fromSeq !== row.seq) reseatedOut.push({id: row.id, fromSeq, toSeq: row.seq});
         reseated = true;
         changed = true;
       }
@@ -710,7 +783,12 @@ export function upsertMirror(m: Mirror, rows: StoreRow[]): UpsertResult {
   // or above the floor tuple and is kept: eviction removes only rows strictly
   // below the window in true time.
   if (windowOpen && floor && aboveFloor(floor, oldFloor)) {
-    for (const t of m.idx) if (t.seq >= 0 && cmpTuple(t, floor) < 0) m.loaded.delete(t.id);
+    // Only LOADED rows can be evicted, and there are at most windowSize of them,
+    // so iterate the loaded set (O(window)) rather than the whole index (O(N)).
+    for (const [id, row] of m.loaded) {
+      const tt = tupleOf(row);
+      if (tt.seq >= 0 && cmpTuple(tt, floor) < 0) m.loaded.delete(id);
+    }
   }
   return {
     loSeq: loSeq === Infinity ? -1 : loSeq,
@@ -720,7 +798,8 @@ export function upsertMirror(m: Mirror, rows: StoreRow[]): UpsertResult {
     inserted,
     rekeyedFrom,
     foldedInto: rev.folded,
-    refused
+    refused,
+    reseated: reseatedOut
   };
 }
 
