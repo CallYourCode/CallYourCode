@@ -1,4 +1,78 @@
 import {engineObjectUrl} from '../../engine/contract';
+import {cyclog} from '@/shared/logging';
+
+/** True on an iPhone/iPad/iPod, including an iPadOS that reports itself as a
+ *  MacIntel with a touch screen. WebKit ignores an `<a download>` on a blob:
+ *  URL in a home-screen (standalone) PWA, so the OS share sheet is the reliable
+ *  save path here. Mirrors the iOS test in engine/pushNotify.ts. */
+export function iosLike(): boolean {
+  const nav = navigator;
+  return (
+    /iPad|iPhone|iPod/.test(nav.userAgent) ||
+    (nav.platform === 'MacIntel' && nav.maxTouchPoints > 1)
+  );
+}
+
+type FileShareNav = Navigator & {
+  canShare?: (data?: {files?: File[]; title?: string}) => boolean;
+  share?: (data?: {files?: File[]; title?: string}) => Promise<void>;
+};
+
+function fileFor(name: string, blob: Blob): File {
+  return new File([blob], name, {type: blob.type || 'application/octet-stream'});
+}
+
+/** True when this browser can hand `blob` to the OS share sheet as a file
+ *  (navigator.canShare({files})). This is the save path that works from a
+ *  home-screen PWA on iOS, where it offers Save Video / Save to Files. */
+export function canShareFile(name: string, blob: Blob): boolean {
+  const nav = navigator as FileShareNav;
+  if (typeof nav.canShare !== 'function' || typeof nav.share !== 'function') return false;
+  try {
+    return nav.canShare({files: [fileFor(name, blob)]});
+  } catch {
+    return false;
+  }
+}
+
+/** How saving `blob` should reach the device: 'share' when the OS share sheet
+ *  takes files (an iOS PWA), else 'download' via an `<a download>` link. The
+ *  share sheet must be opened from a user gesture, so a caller that has awaited
+ *  a fetch settles this only once it has a fresh tap and the bytes in hand. */
+export function saveMethodFor(name: string, blob: Blob): 'share' | 'download' {
+  return canShareFile(name, blob) ? 'share' : 'download';
+}
+
+/** Save `blob` to the device from within a user gesture: the OS share sheet
+ *  when it accepts files (iOS), else an `<a download>` link (desktop needs no
+ *  gesture for that). Returns the method actually used; a share the user
+ *  dismisses still counts as handled, not a failure, so it does not silently
+ *  fall back to a download the user did not ask for. */
+export async function shareOrSaveBlob(name: string, blob: Blob): Promise<'share' | 'download'> {
+  if (canShareFile(name, blob)) {
+    const nav = navigator as FileShareNav;
+    try {
+      await nav.share!({files: [fileFor(name, blob)], title: name});
+      cyclog('download.saved', {name, via: 'share', bytes: blob.size});
+      return 'share';
+    } catch (err) {
+      if ((err as {name?: string})?.name === 'AbortError') {
+        cyclog('download.saved', {name, via: 'share-cancelled', bytes: blob.size});
+        return 'share';
+      }
+      cyclog('download.share.failed', {
+        name,
+        err,
+        why:
+          'the OS share sheet threw for a reason other than the user cancelling, so ' +
+          'the file is saved through a download link instead'
+      });
+    }
+  }
+  saveBlob(name, blob);
+  cyclog('download.saved', {name, via: 'download', bytes: blob.size});
+  return 'download';
+}
 
 function triggerDownload(name: string, url: string) {
   const link = document.createElement('a');
