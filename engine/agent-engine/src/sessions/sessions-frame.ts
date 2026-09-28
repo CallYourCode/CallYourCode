@@ -313,28 +313,101 @@ export function sessionsFrame(): Record<string, unknown> {
   return tabs.length ? { t: "sessions", list, tabs } : { t: "sessions", list };
 }
 
+/* THE ONE-ROW FRAME (Lane D). When ONLY existing rows' fields changed -- the
+ * roster is the same sessions in the same order under the same tabs -- the
+ * engine sends ONE additive {t:"session", ...row} per changed row instead of
+ * the whole ~42 KB list. The payload is the FULL row of that one session (the
+ * exact object sessionList built for it), never a partial field diff: a whole
+ * row cannot drift out of step with the list frame, and the app applies it
+ * through the same per-row code the full frame runs. A STRUCTURAL change (a
+ * session added or removed, the order dragged, the tabs redeclared) still ships
+ * the full {t:"sessions"} frame, because the app cannot re-key its list off a
+ * one-row patch. Hello/attach always send the full frame (sendHelloBurst). An
+ * engine this app has never met sends only {t:"sessions"}; an app too old for
+ * {t:"session"} ignores it and still reconciles off the full frames it gets on
+ * every structural change and every reconnect. */
+function sessionFrame(row: Record<string, unknown>): Record<string, unknown> {
+  return { t: "session", ...row };
+}
+
 // Deduped: the herdr side resnapshots on a poll and on chatty events
 // (pane.focused fires on every terminal focus switch), most of which change
 // nothing the clients can see. Only a payload that actually differs goes out.
 let lastSessionsPayload = "";
+// The per-row and shape fingerprints of the LAST thing broadcast, so a
+// fields-only change diffs to one {t:"session"} per changed row. Empty until
+// the first broadcast, which is always the full frame (there is nothing to diff
+// against yet). Kept in lockstep with lastSessionsPayload above: every socket
+// that received the last broadcast is described by these, and a fresh socket
+// got the full frame at hello, so a global fingerprint is honest for all of
+// them (the same lockstep the whole-frame dedupe already assumes).
+let lastRowFp = new Map<string, string>();
+let lastOrderFp = "";
+let lastTabsFp = "";
 export function broadcastSessions() {
   const frame = sessionsFrame();
   const payload = JSON.stringify(frame);
   if (payload === lastSessionsPayload) return;
   lastSessionsPayload = payload;
+
+  const list = (frame.list as Record<string, unknown>[]);
+  const tabsFp = JSON.stringify(frame.tabs ?? null);
+  const orderFp = list.map((r) => String(r.id)).join("\n");
+
+  // Recompute every row's fingerprint; note which ones actually changed.
+  const rowFp = new Map<string, string>();
+  const changed: Record<string, unknown>[] = [];
+  for (const row of list) {
+    const id = String(row.id);
+    const fp = JSON.stringify(row);
+    rowFp.set(id, fp);
+    if (lastRowFp.get(id) !== fp) changed.push(row);
+  }
+
+  // STRUCTURAL (or the first broadcast): the set, the order or the tabs moved,
+  // so no one-row patch can carry it -- ship the whole frame.
+  const structural =
+    lastRowFp.size === 0 ||
+    orderFp !== lastOrderFp ||
+    tabsFp !== lastTabsFp ||
+    rowFp.size !== lastRowFp.size;
+
   // dedupe is on the INNER frame; each socket then seals its own copy in send()
-  for (const c of clients) send(c, frame);
+  if (structural) {
+    for (const c of clients) send(c, frame);
+  } else {
+    for (const row of changed) {
+      const one = sessionFrame(row);
+      for (const c of clients) send(c, one);
+    }
+  }
+
+  lastRowFp = rowFp;
+  lastOrderFp = orderFp;
+  lastTabsFp = tabsFp;
 }
 
-/** TEST ONLY: forget the deps AND the dedupe fingerprint, so a second
- *  in-process wiring's first sessions frame really goes out. Without the
- *  second half the dedupe is the bug: two wirings over the same fake panes
- *  produce byte-identical payloads, so the fresh clients of the second one
- *  would be told nothing at all and the frame would look lost. No-op in
- *  production, which never re-wires. */
+/** The full sessions frame to ONE socket, used by the hello burst and by the
+ *  resync a matched app asks for when a {t:"session"} names a row it does not
+ *  hold (a frame it somehow missed). It does not touch the broadcast
+ *  fingerprints: it re-serves the CURRENT state, which those fingerprints
+ *  already describe, so the next diff is still honest. */
+export function sendFullSessions(ws: Sock): void {
+  send(ws, sessionsFrame());
+}
+
+/** TEST ONLY: forget the deps AND the dedupe/diff fingerprints, so a second
+ *  in-process wiring's first sessions frame really goes out. Without this the
+ *  dedupe is the bug: two wirings over the same fake panes produce
+ *  byte-identical payloads, so the fresh clients of the second one would be
+ *  told nothing at all and the frame would look lost. No-op in production,
+ *  which never re-wires. */
 export function resetForTest(): void {
   cfg = null;
   lastSessionsPayload = "";
+  lastRowFp = new Map();
+  lastOrderFp = "";
+  lastTabsFp = "";
 }
 
 /* The opening burst a fresh client gets: what this engine can do, its voice
@@ -354,5 +427,5 @@ export function sendHelloBurst(ws: Sock) {
       C().voiceReady?.() ?? { stt: healthy, tts: healthy }));
   }
   send(ws, { t: "host", user: C().engineUser, host: C().engineHost });
-  send(ws, sessionsFrame());
+  sendFullSessions(ws);
 }

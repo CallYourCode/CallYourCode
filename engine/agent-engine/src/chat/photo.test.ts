@@ -223,8 +223,15 @@ test("replacing a photo reaches a device that did not upload it", async () => {
    * showing a picture he replaced. */
   await setPhoto(PNG2, "image/png");
 
-  const seen = watcher.of("sessions")
-    .map((f) => (f.list as Array<Record<string, any>>).find((s) => s.id === wireId(PANE))?.photo ?? null)
+  // A photo replace is a fields-only change: it arrives as one additive
+  // {t:"session"} row (the row IS the frame), not a whole new list.
+  const photoIn = (f: Record<string, any>) =>
+    f.t === "session"
+      ? (f.photo ?? null)
+      : ((f.list as Array<Record<string, any>>).find((s) => s.id === wireId(PANE))?.photo ?? null);
+  const seen = watcher.frames
+    .filter((f) => f.t === "sessions" || f.t === "session")
+    .map(photoIn)
     .filter((p): p is string => typeof p === "string");
 
   expect(seen.length,
@@ -255,8 +262,12 @@ test("clearing a photo is broadcast too, so a device stops showing a face he rem
   expect(res.status).toBe(200);
   expect(((await res.json()) as { photo: unknown }).photo).toBe(null);
 
-  const rows = watcher.of("sessions")
-    .map((f) => (f.list as Array<Record<string, any>>).find((s) => s.id === wireId(PANE)));
+  const rows = watcher.frames
+    .filter((f) => f.t === "sessions" || f.t === "session")
+    .map((f) =>
+      f.t === "session" ? f : (f.list as Array<Record<string, any>>).find((s) => s.id === wireId(PANE))
+    )
+    .filter((r): r is Record<string, any> => !!r);
   expect(rows.length, "clearing a photo told nobody").toBeGreaterThanOrEqual(1);
   expect(rows[rows.length - 1]!.photo).toBe(null);
   expect(wirePhoto(), "the wire still names a photo after it was cleared").toBe(null);

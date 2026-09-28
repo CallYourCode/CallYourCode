@@ -145,6 +145,14 @@ export type FakeClient = {
   of(t: string): Record<string, any>[];
   /** the newest frame of a type, or undefined */
   last(t: string): Record<string, any> | undefined;
+  /* The current roster as this device sees it, folding the additive one-row
+   * {t:"session"} frames (Lane D) on top of the newest full {t:"sessions"}
+   * frame. Use this instead of last("sessions").list wherever a fields-only
+   * change is expected: that change now arrives as one {t:"session"} row, not
+   * a whole new list. */
+  roster(): {list: Record<string, any>[]; tabs: Record<string, any>[]};
+  /** the current state of one session row (by wire id), folding one-row frames */
+  sessionRow(id: string): Record<string, any> | undefined;
   /** forget everything so far: "what happened AFTER this point" */
   clear(): void;
   /** the socket says it is (or is not) looking at the chat */
@@ -199,6 +207,27 @@ export function fakeClient(o: { now?: () => number; attach?: string | null; visi
     frames,
     of: (t) => frames.filter((f) => f.t === t),
     last: (t) => [...frames].reverse().find((f) => f.t === t),
+    roster() {
+      // Base is the newest full frame; everything after it (full frames reset
+      // the base, one-row frames overlay) folds forward in wire order.
+      let list: Record<string, any>[] = [];
+      let tabs: Record<string, any>[] = [];
+      for (const f of frames) {
+        if (f.t === "sessions") {
+          list = [...(f.list as any[])];
+          tabs = [...((f.tabs as any[]) ?? [])];
+        } else if (f.t === "session") {
+          const {t: _t, ...row} = f;
+          const i = list.findIndex((r) => r.id === row.id);
+          if (i >= 0) list[i] = row;
+          else list.push(row);
+        }
+      }
+      return {list, tabs};
+    },
+    sessionRow(id) {
+      return this.roster().list.find((r) => r.id === id);
+    },
     clear: () => { frames.length = 0; },
     setVisible(on, at) {
       sock.data.visible = on;

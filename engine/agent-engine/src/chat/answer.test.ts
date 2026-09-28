@@ -197,6 +197,10 @@ async function blockedUnknown(prepare: (c: WireCore) => void): Promise<{
 function row(cl: { frames: Frame[] }): Frame | undefined {
   for (let i = cl.frames.length - 1; i >= 0; i--) {
     const f = cl.frames[i]!;
+    // The additive one-row frame (Lane D) IS the row: a fields-only change (an
+    // ask arriving, a status edge) now arrives as {t:"session"}, not a whole
+    // new list, so it is the newest view when it is the newest frame.
+    if (f.t === "session" && f.id === wireId(PANE)) return f;
     if (f.t === "sessions") {
       const r = (f.list ?? []).find((s: any) => s.id === wireId(PANE));
       if (r) return r;

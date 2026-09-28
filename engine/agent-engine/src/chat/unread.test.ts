@@ -320,9 +320,10 @@ test("his other device is told, without asking", async () => {
   markUnread(session());
   broadcastSessions();
   /* Nothing was sent from that socket between those two lines. The count on it
-   * changed because the marker is one fact, held in one place. */
-  expect(tablet.of("sessions")).toHaveLength(1);
-  expect(tablet.last("sessions")!.list.find((s: any) => s.id === wireId(PANE)).unread).toBe(1);
+   * changed because the marker is one fact, held in one place. A mark-unread is
+   * a fields-only change, so it arrives as one additive {t:"session"} row. */
+  expect(tablet.of("session")).toHaveLength(1);
+  expect(tablet.sessionRow(wireId(PANE))!.unread).toBe(1);
 });
 
 test("it survives a restart, because it is the same marker in the same file", async () => {
@@ -536,7 +537,7 @@ test("the unread route: filing a chat he has read moves the count and reaches th
     // a second device, watching the list and attached to nothing
     const other = core.client();
     core.hello(other);
-    const before = other.of("sessions").length;
+    const before = other.of("session").length;
 
     const r = await post(wireId(PANE), { read: false });
     expect(r.body.ok, "a read chat with two answers in it could not be marked unread").toBe(true);
@@ -544,11 +545,11 @@ test("the unread route: filing a chat he has read moves the count and reaches th
     expect(typeof r.body.heardTs, "the route answers with the marker it just moved").toBe("number");
     expect(row().unread, "the sessions projection disagrees with what the route answered").toBe(1);
 
-    const sent = other.of("sessions").slice(before);
+    const sent = other.of("session").slice(before);
     expect(sent.length,
       "the mark moved and no sessions frame reached the second device: the badge is on one " +
       "phone only").toBeGreaterThan(0);
-    const seen = (sent.at(-1)!.list as any[]).find((s) => s.id === wireId(PANE));
+    const seen = other.sessionRow(wireId(PANE))!;
     expect(seen.unread, "the broadcast carried a different count than the route answered").toBe(1);
 
     /* AND MARKING IT READ AGAIN MOVES IT BACK, through the same one route: `read`

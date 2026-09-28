@@ -126,6 +126,7 @@ export class WsEngineClient implements EngineClient {
     host: [],
     voiceHealth: [],
     sessions: [],
+    session: [],
     plugins: [],
     chat: [],
     attachOk: [],
@@ -317,6 +318,13 @@ export class WsEngineClient implements EngineClient {
     if (this.attachedId === undefined) return;
     this.attachedId = undefined;
     this.sendNow({t: 'attach', id: ''});
+  }
+
+  // Ask the engine to re-serve the whole roster to this socket (the app got a
+  // {t:"session"} for a row it does not hold). An engine too old for it drops
+  // the unknown frame; the app then still heals on the next full frame.
+  public resyncSessions() {
+    this.send({t: 'sessions-resync'});
   }
 
   private canDo = new Set<string>();

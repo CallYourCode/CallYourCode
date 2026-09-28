@@ -1,9 +1,13 @@
 import type {EngineAskChoice, EngineSession, EngineTab} from '../contract';
-import type {FrameHandler} from './types';
+import type {FrameContext, FrameHandler} from './types';
 
-const sessions: FrameHandler = (ctx, frame) => {
-  const raw: any[] = Array.isArray(frame.list) ? frame.list : [];
-  const list: EngineSession[] = raw.map((s) => {
+/* Parse ONE wire session row into an EngineSession. Shared by the full
+ * {t:"sessions"} frame (mapped over `list`) and the additive one-row
+ * {t:"session"} frame (Lane D), so the two can never read the same field two
+ * ways. The row shape is identical in both frames -- the one-row frame is the
+ * exact object the engine built for that session in its list -- so one parser
+ * is the whole point. */
+function parseSession(s: any, ctx: FrameContext): EngineSession {
     const es: EngineSession = {
       id: String(s.id),
       name: String(s.name ?? s.id),
@@ -109,7 +113,11 @@ const sessions: FrameHandler = (ctx, frame) => {
 
     if (s.askUnknown === true || (es.status === 'blocked' && !es.ask)) es.askUnknown = true;
     return es;
-  });
+}
+
+const sessions: FrameHandler = (ctx, frame) => {
+  const raw: any[] = Array.isArray(frame.list) ? frame.list : [];
+  const list: EngineSession[] = raw.map((s) => parseSession(s, ctx));
 
   const rawTabs: any[] = Array.isArray(frame.tabs) ? frame.tabs : [];
   const tabs: EngineTab[] = [];
@@ -125,6 +133,14 @@ const sessions: FrameHandler = (ctx, frame) => {
     });
   }
   ctx.emit('sessions', list, tabs);
+};
+
+/* The additive one-row frame (Lane D): {t:"session", ...row}. The frame IS the
+ * row (plus its own `t`), so it parses through the same per-row parser and is
+ * applied through the same per-row apply the full frame runs. */
+const session: FrameHandler = (ctx, frame) => {
+  if (frame.id === undefined || frame.id === null) return;
+  ctx.emit('session', parseSession(frame, ctx));
 };
 
 const sessionIdChanged: FrameHandler = (ctx, frame) => {
@@ -163,6 +179,7 @@ const answerResult: FrameHandler = (ctx, frame) => {
 
 export const sessionFrameHandlers: [string, FrameHandler][] = [
   ['sessions', sessions],
+  ['session', session],
   ['session-id-changed', sessionIdChanged],
   ['compact-result', compactResult],
   ['answer-result', answerResult]
