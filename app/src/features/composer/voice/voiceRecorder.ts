@@ -129,6 +129,17 @@ export function createRecorder(opts: RecorderOptions = {}): Recorder {
   strip.append(...slots);
 
   const samples: number[] = [];
+  // Last height written to each bar, so a paint that does not change a bar skips
+  // the DOM write (and the style recalc it would force). During a live take the
+  // strip scrolls and most bars move, but this keeps quiet stretches and the
+  // empty leading slots cheap, which matters when the main thread is loaded.
+  const painted: string[] = new Array(SLOT_COUNT).fill('');
+
+  const setHeight = (i: number, h: string) => {
+    if (painted[i] === h) return;
+    painted[i] = h;
+    slots[i].style.height = h;
+  };
 
   const paintStrip = () => {
     const reference = gainReference(samples);
@@ -139,12 +150,12 @@ export function createRecorder(opts: RecorderOptions = {}): Recorder {
       const bar = slots[i];
       const s = i - offset;
       if (s < 0) {
-        bar.style.height = '0%';
+        setHeight(i, '0%');
         bar.classList.remove('is-ahead');
         continue;
       }
       const level = LEVEL_MIN + (1 - LEVEL_MIN) * clamp01(samples[s] / reference);
-      bar.style.height = `${Math.round(level * 100)}%`;
+      setHeight(i, `${Math.round(level * 100)}%`);
       bar.classList.toggle('is-ahead', view.progress != null && i >= played);
     }
   };
