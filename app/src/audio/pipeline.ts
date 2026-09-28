@@ -596,13 +596,22 @@ class Pipeline {
       });
       return;
     }
+    // A take that has been released (arbitrating) has stopped producing audio
+    // and is only waiting for its own stream.finish() to answer; it no longer
+    // holds the live-stream slot, so a take that starts right after gets its own
+    // stream at once instead of falling back to batch and showing no live words.
+    // The engine keys every stream by a fresh id and opens a separate upstream
+    // per id (agent-engine voice-proxy, voice-engine /stt-stream), so the two
+    // briefly-overlapping streams stay apart: the earlier take's final lands on
+    // the earlier take, the new take's partials on the new take. Only a take
+    // that is still recording blocks a second live stream.
     for (const other of this.inFlight.values()) {
-      if (other !== cap && other.streamOpen) {
+      if (other !== cap && other.streamOpen && !other.arbitrating) {
         cyclog('capture.stream.busy', {
           cid: cap.cid,
           capture: cap.id,
           heldBy: other.cid,
-          why: 'the one live stt stream belongs to an earlier take; batch only'
+          why: 'an earlier take is still recording on the live stt stream; batch only'
         });
         return;
       }
