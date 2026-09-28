@@ -179,3 +179,68 @@ describe('one arriving message draws one row (windowed)', () => {
     expect(after.some((b) => beforeIds.has(b.dataset.mid))).toBe(true);
   });
 });
+
+// The store's open window is the newest page (a fixed row cap), so a message
+// arriving at the tail EVICTS the oldest row at the FRONT: every kept row's
+// index shifts down by one. Before the front-trim shift the reuse walk matched
+// the mounted frames by their now-stale POSITION, mismatched at the head, and
+// rebuilt the whole window from scratch -- re-attaching (remounting) every
+// visible bubble on every arrival (measured 68-93 rows redrawn per message, the
+// bottom-of-chat jitter). These pin that a front eviction re-attaches only the
+// edge rows the window genuinely slid over, never the whole window.
+describe('a front eviction does not remount the mounted window', () => {
+  test('drop-front + append-tail while scrolled in history reuses the kept rows', () => {
+    const s = denseChat();
+    const {scroll, inner} = mount();
+    scroll.scrollTop = 20_000;
+    paint(inner, s);
+    const before = bubbles(inner);
+    const beforeById = new Map(before.map((b) => [b.dataset.mid, b] as const));
+
+    const take = watch(inner);
+    // The store dropped its oldest row and appended the arrival at the tail.
+    const arrival = msg(s.messages[s.messages.length - 1].ts + 60_000, 'claude');
+    s.messages = [...s.messages.slice(1), arrival];
+    paint(inner, s);
+    const {added} = take();
+
+    // The window slid by at most the one row the height change carried; the whole
+    // window is NOT re-attached (that was 40+ before the fix).
+    expect(added.length).toBeLessThanOrEqual(2);
+    // Every mid mounted both before and after is the SAME element (not remounted).
+    const after = bubbles(inner);
+    for (const b of after) {
+      const prev = beforeById.get(b.dataset.mid);
+      if (prev) expect(prev).toBe(b);
+    }
+    // The rendered rows are a clean slice of the store: no duplicate or lost mid.
+    const mids = after.map((b) => b.dataset.mid);
+    expect(new Set(mids).size).toBe(mids.length);
+  });
+
+  test('a session-event row arriving at the tail with a front eviction reuses the window', () => {
+    const s = denseChat();
+    s.events = [];
+    const {scroll, inner} = mount();
+    scroll.scrollTop = 20_000;
+    paint(inner, s);
+    const before = bubbles(inner);
+    const beforeById = new Map(before.map((b) => [b.dataset.mid, b] as const));
+
+    const take = watch(inner);
+    // A session pill arrives at the tail; the store evicts its oldest message.
+    s.events = [
+      {uuid: 'ev1', kind: 'reply', text: 'agent update', ts: s.messages[s.messages.length - 1].ts + 60_000} as CycSessionEvent
+    ];
+    s.messages = s.messages.slice(1);
+    paint(inner, s);
+    const {added} = take();
+
+    expect(added.length).toBeLessThanOrEqual(2);
+    const after = bubbles(inner);
+    for (const b of after) {
+      const prev = beforeById.get(b.dataset.mid);
+      if (prev) expect(prev).toBe(b);
+    }
+  });
+});
