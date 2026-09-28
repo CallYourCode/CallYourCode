@@ -6,11 +6,13 @@ import type {Tx} from '../engine/store/rows/rowStore';
 
 // FIX 2: the whole seq index (one record per session, up to ~125k tuples) was
 // rewritten to IndexedDB on EVERY upsert/drop, dozens of times a second during a
-// backfill. It is now coalesced: a mutation marks the index dirty and a single
-// ~3s trailing flush writes it, plus eager flushes at the points a stale durable
-// index would be observable (close, openWindow) or lost (visibilitychange
-// hidden, pagehide). This proves the write count collapses and that the eager
-// flush points keep the durable index recoverable.
+// backfill. It is now coalesced AND chunked: a mutation marks the changed chunk
+// dirty and a single ~3s trailing flush writes only the chunks that changed, plus
+// eager flushes at the points a stale durable index would be observable (close,
+// openWindow) or lost (visibilitychange hidden, pagehide). Each burst here lands
+// in one seq chunk, so it still collapses to one durable index write; this proves
+// the write count collapses and that the eager flush points keep the durable
+// index recoverable. (cycRowIdxChunked proves a write touches only its chunk.)
 
 const SID = 'eng|p1';
 const mrow = (over: Partial<CycEngineMessage>): StoreRow =>
@@ -34,7 +36,10 @@ function countingTx(): {db: Map<string, {key: string}>; idxWrites: () => number;
       getAll: () => ({result: [...db.values()]}) as unknown as IDBRequest,
       getAllKeys: () => ({result: [...db.keys()]}) as unknown as IDBRequest,
       put: (v: {key: string}) => {
-        if (v.key.endsWith('|idx')) idxWrites++;
+        // Chunked index records are keyed `<sid>|idx|<chunk>`; the legacy monolith
+        // was `<sid>|idx`. Count either as an index write (payloads are `|r|`,
+        // meta is `|meta`, so neither matches).
+        if (v.key.includes('|idx')) idxWrites++;
         db.set(v.key, v);
         return {result: v.key} as unknown as IDBRequest;
       },

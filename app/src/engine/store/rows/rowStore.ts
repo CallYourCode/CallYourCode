@@ -29,6 +29,8 @@ import {
   newestWindowIds,
   olderWindowIds,
   project,
+  reindexMirror,
+  removeTuple,
   rowIdOfMessage,
   upsertMirror,
   WINDOW_FLOOR_ALL,
@@ -150,49 +152,69 @@ function fireWrite(run: (store: IDBObjectStore) => IDBRequest): void {
   backing('readwrite', run).catch(() => {});
 }
 
-// COALESCED SEQ-INDEX WRITES. The seq index is one record per session holding
-// every row's tuple (78k-125k of them on a busy chat). Rewriting the whole
-// record on EVERY upsert/drop serialized that array dozens of times a second
-// during a backfill (36 rewrites / 2.3s of main thread per 20s on the rig), for
-// no gain: the WARM MIRROR (m.idx, in memory) is the authoritative copy every
+// COALESCED, CHUNKED SEQ-INDEX WRITES. The seq index used to be ONE record per
+// session holding every row's tuple (78k-125k of them on a busy chat). Rewriting
+// that whole record -- even coalesced onto a ~3s trailing flush -- still
+// structured-clones the entire array into IndexedDB on the main thread, a
+// 120-700ms stall every few seconds while rows arrive (the measured heat/paint
+// gap). The WARM MIRROR (m.idx, in memory) is the authoritative copy every
 // reader projects from; the durable record only ever matters when a COLD session
 // is loaded from scratch (ensureIdx's durable read runs only when the session is
-// not idxLoaded), and a dirty session is ALWAYS warm (marking dirty happens only
-// after m.idx was mutated, which means ensureIdx already ran and set idxLoaded).
+// not idxLoaded), and a dirty session is ALWAYS warm.
 //
-// So a mutation marks the session's index dirty and a single ~3s trailing timer
+// So the durable index is now stored in CHUNKS keyed by seq band --
+// `<sid>|idx|<chunk>`, chunk = floor(seq / IDX_CHUNK_SPAN), with seq < 0 in a
+// dedicated chunk -- and a write touches ONLY the chunk(s) whose tuples changed.
+// A live tail rides the newest chunk, so a flush clones a few hundred tuples
+// instead of 125k; a backfill rewrites just the older chunk it landed in. A
+// mutation records which chunk(s) it dirtied and a single ~3s trailing timer
 // flushes every dirty session at once. It also flushes eagerly at the moments a
 // stale durable index would be observable or lost: before EVICTING a warm mirror
-// (close, so the next cold open reads the mirror we are dropping), before a
-// reader reloads from the durable backing (openWindow, rekey), and when the page
-// is backgrounded or unloaded (visibilitychange hidden, pagehide) so a clean
-// close never loses the newest tuples.
+// (close), before a reader reloads from the durable backing (openWindow, rekey),
+// and when the page is backgrounded or unloaded (visibilitychange hidden,
+// pagehide) so a clean close never loses the newest tuples.
+//
+// MIGRATION from the old monolithic `<sid>|idx` record: a cold read that finds no
+// chunk records but does find the old record loads it, marks EVERY chunk dirty,
+// and flags the session so the next flush writes the chunked records and deletes
+// the old monolith. It is crash-safe (the old record is not deleted until the
+// chunks are being written, and a cold read prefers chunks over the old record;
+// a lost flush just re-reads the old record and re-migrates) and idempotent.
 //
 // HOW A LOST INDEX WRITE HEALS. The row PAYLOADS stay immediate (fireWrite), so
 // a crash between a coalesced-dirty mutation and its flush can leave the durable
-// index BEHIND its durable rows -- never ahead. A cold open then reads an index
-// that is a strict SUBSET of the rows on disk and simply under-projects (some
-// recent rows are not yet in the window); it never points at a row that is not
-// there, and it never wins over the real axis. The very next attach re-serves
-// those rows and the replicator re-upserts them (idempotent by mid), which
-// re-adds the missing tuples and re-marks the index dirty, so the window heals
-// to the full tail. A purge/wipe path CANCELS a pending write (it is deleting
-// the record) so a deferred flush can never resurrect a just-deleted index.
-const idxDirty = new Set<string>();
-let idxFlushTimer: ReturnType<typeof setTimeout> | null = null;
+// index BEHIND its durable rows -- never ahead. A cold open then reads chunks
+// that are a strict SUBSET of the rows on disk and simply under-projects; it
+// never points at a row that is not there, and it never wins over the real axis.
+// The very next attach re-serves those rows and the replicator re-upserts them
+// (idempotent by mid), which re-adds the missing tuples and re-marks the chunk
+// dirty, so the window heals to the full tail. A purge/wipe path CANCELS the
+// pending write (it is deleting the records) so a deferred flush can never
+// resurrect a just-deleted index.
 const IDX_FLUSH_MS = 3000;
-
-function writeIdxNow(sessionId: string): void {
-  idxDirty.delete(sessionId);
-  const m = mirrors.get(sessionId);
-  if (!m) return;
-  fireWrite((s) => s.put({key: idxKey(sessionId), sessionId, tuples: m.idx} satisfies IdxRecord));
+// Seq units per durable chunk. A live tail write rewrites a single chunk of at
+// most this many tuples (a small structured clone) instead of the whole index.
+const IDX_CHUNK_SPAN = 2000;
+// The chunk a seq belongs to. seq < 0 (a pending/unseqed row) sits in its own
+// chunk so it never shares a record with committed rows.
+function chunkOf(seq: number): number {
+  return seq < 0 ? -1 : Math.floor(seq / IDX_CHUNK_SPAN);
 }
+function chunkKey(sid: string, chunk: number): string {
+  return `${sid}|idx|${chunk}`;
+}
+const idxChunkPrefix = (sid: string) => `${sid}|idx|`;
 
-// Mark a session's durable seq index stale and arm the trailing flush (at most
-// one timer for all dirty sessions).
-function markIdxDirty(sessionId: string): void {
-  idxDirty.add(sessionId);
+// Per-session dirty state: the specific chunks a mutation changed, whether the
+// whole index must be rewritten (a rare fold/rekey/sanitise that can move rows
+// across chunks), and whether the old monolithic record must be deleted (a
+// session loaded by the migration path).
+const idxDirtyChunks = new Map<string, Set<number>>();
+const idxFullDirty = new Set<string>();
+const idxMigrateOld = new Set<string>();
+let idxFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function armIdxFlush(): void {
   if (idxFlushTimer !== null) return;
   idxFlushTimer = setTimeout(() => {
     idxFlushTimer = null;
@@ -202,11 +224,105 @@ function markIdxDirty(sessionId: string): void {
   if (typeof t.unref === 'function') t.unref();
 }
 
+function dirtyChunkSet(sessionId: string): Set<number> {
+  let s = idxDirtyChunks.get(sessionId);
+  if (!s) idxDirtyChunks.set(sessionId, (s = new Set<number>()));
+  return s;
+}
+
+// Mark ONE chunk of a session's durable index stale and arm the trailing flush.
+function markChunkDirty(sessionId: string, chunk: number): void {
+  dirtyChunkSet(sessionId).add(chunk);
+  armIdxFlush();
+}
+
+// Mark the WHOLE session's index for a full rewrite (every chunk rebuilt from the
+// warm mirror, stale chunk records pruned). Used by the paths that can move rows
+// across chunks in ways the per-chunk marking cannot cheaply track: the twin
+// folds/rekeys, the read sanitise, and the monolith migration.
+function markAllChunksDirty(sessionId: string): void {
+  idxFullDirty.add(sessionId);
+  armIdxFlush();
+}
+
+function isIdxDirty(sessionId: string): boolean {
+  return (
+    idxFullDirty.has(sessionId) ||
+    idxMigrateOld.has(sessionId) ||
+    (idxDirtyChunks.get(sessionId)?.size ?? 0) > 0
+  );
+}
+
+// Group the mirror's tuples by chunk in ONE pass, keeping only the chunks asked
+// for (or all chunks when `want` is null, for a full rewrite). The scan is plain
+// iteration (no structured clone), so it is cheap relative to the durable put it
+// feeds; the expensive clone is confined to the chunks that actually changed.
+function bucketChunks(m: Mirror, want: Set<number> | null): Map<number, RowTuple[]> {
+  const byChunk = new Map<number, RowTuple[]>();
+  if (want) for (const c of want) byChunk.set(c, []);
+  for (const t of m.idx) {
+    const c = chunkOf(t.seq);
+    if (want && !want.has(c)) continue;
+    let arr = byChunk.get(c);
+    if (!arr) byChunk.set(c, (arr = []));
+    arr.push(t);
+  }
+  return byChunk;
+}
+
+// Delete durable chunk records for a session that no longer appear in `keep`
+// (a full rewrite dropped them). Fire-and-forget, like every index write.
+function pruneStaleChunks(sessionId: string, keep: Set<number>): void {
+  const prefix = idxChunkPrefix(sessionId);
+  backing<IDBValidKey[]>('readonly', (s) => s.getAllKeys() as IDBRequest)
+    .then((keys) => {
+      if (!Array.isArray(keys)) return;
+      for (const k of keys) {
+        if (typeof k !== 'string' || !k.startsWith(prefix)) continue;
+        const chunk = Number(k.slice(prefix.length));
+        if (!keep.has(chunk)) fireWrite((s) => s.delete(k));
+      }
+    })
+    .catch(() => {});
+}
+
+function writeIdxNow(sessionId: string): void {
+  const full = idxFullDirty.has(sessionId);
+  const chunks = idxDirtyChunks.get(sessionId);
+  const migrate = idxMigrateOld.has(sessionId);
+  idxFullDirty.delete(sessionId);
+  idxDirtyChunks.delete(sessionId);
+  idxMigrateOld.delete(sessionId);
+  const m = mirrors.get(sessionId);
+  if (!m) return;
+  if (full) {
+    const byChunk = bucketChunks(m, null);
+    for (const [chunk, tuples] of byChunk) {
+      fireWrite((s) => s.put({key: chunkKey(sessionId, chunk), sessionId, chunk, tuples}));
+    }
+    pruneStaleChunks(sessionId, new Set(byChunk.keys()));
+    if (migrate) fireWrite((s) => s.delete(idxKey(sessionId)));
+    return;
+  }
+  if (chunks && chunks.size) {
+    const byChunk = bucketChunks(m, chunks);
+    for (const [chunk, tuples] of byChunk) {
+      if (tuples.length) {
+        fireWrite((s) => s.put({key: chunkKey(sessionId, chunk), sessionId, chunk, tuples}));
+      } else {
+        // Every row in this chunk was removed: drop the now-empty record.
+        fireWrite((s) => s.delete(chunkKey(sessionId, chunk)));
+      }
+    }
+  }
+  if (migrate) fireWrite((s) => s.delete(idxKey(sessionId)));
+}
+
 // Flush ONE session's pending index write now, before a reader reloads its
 // mirror from the durable backing or before its warm mirror is evicted. A no-op
 // when the session is not dirty.
 function flushIdx(sessionId: string): void {
-  if (!idxDirty.has(sessionId)) return;
+  if (!isIdxDirty(sessionId)) return;
   writeIdxNow(sessionId);
 }
 
@@ -217,14 +333,21 @@ function flushAllIdx(): void {
     clearTimeout(idxFlushTimer);
     idxFlushTimer = null;
   }
-  for (const sid of [...idxDirty]) writeIdxNow(sid);
+  const dirty = new Set<string>([
+    ...idxFullDirty,
+    ...idxMigrateOld,
+    ...idxDirtyChunks.keys()
+  ]);
+  for (const sid of dirty) writeIdxNow(sid);
 }
 
 // Drop a session's pending index write WITHOUT writing it: the caller is about
 // to delete the durable index (purge) or wipe the whole store, so a deferred
-// write firing afterwards would resurrect the very record being deleted.
+// write firing afterwards would resurrect the very records being deleted.
 function cancelIdxFlush(sessionId: string): void {
-  idxDirty.delete(sessionId);
+  idxDirtyChunks.delete(sessionId);
+  idxFullDirty.delete(sessionId);
+  idxMigrateOld.delete(sessionId);
 }
 
 // Flush the whole coalesced set when the page is backgrounded or torn down, so a
@@ -246,7 +369,9 @@ export function __setBackingForTest(tx: Tx | null): void {
   mirrors.clear();
   metaCache.clear();
   idxLoaded.clear();
-  idxDirty.clear();
+  idxDirtyChunks.clear();
+  idxFullDirty.clear();
+  idxMigrateOld.clear();
   if (idxFlushTimer !== null) {
     clearTimeout(idxFlushTimer);
     idxFlushTimer = null;
@@ -284,7 +409,12 @@ const rowKey = (sid: string, id: string) => `${sid}|r|${id}`;
 const idxKey = (sid: string) => `${sid}|idx`;
 const metaKey = (sid: string) => `${sid}|meta`;
 
+// The legacy monolithic index record (one per session). Kept for the read/
+// migration path and the one-time durable rekey; new writes are chunked.
 type IdxRecord = {key: string; sessionId: string; tuples: RowTuple[]};
+// One chunk of a session's seq index: the tuples whose seq falls in this chunk's
+// band. `chunk` distinguishes it from a payload/meta/legacy record on a getAll.
+type IdxChunkRecord = {key: string; sessionId: string; chunk: number; tuples: RowTuple[]};
 type RowRecord = StoreRow & {key: string};
 
 // Warm mirrors, one per session the store is actively holding (the open chat and
@@ -353,8 +483,41 @@ async function ensureIdx(sessionId: string): Promise<Mirror> {
     m = emptyMirror();
     mirrors.set(sessionId, m);
   }
-  const rec = await backing<IdxRecord>('readonly', (s) => s.get(idxKey(sessionId)) as IDBRequest);
-  if (rec && Array.isArray(rec.tuples)) m.idx = rec.tuples;
+  // Read the session's chunk records. On real IndexedDB a key range keeps the
+  // read to this session's index chunks; the in-memory test backings ignore the
+  // range and return every record, so the result is filtered to this session's
+  // chunk records either way (a payload/meta/legacy record carries no `chunk`).
+  const range =
+    typeof IDBKeyRange !== 'undefined'
+      ? IDBKeyRange.bound(idxChunkPrefix(sessionId), idxChunkPrefix(sessionId) + '\uffff')
+      : undefined;
+  const recs = await backing<IdxChunkRecord[]>(
+    'readonly',
+    (s) => (range ? s.getAll(range) : s.getAll()) as IDBRequest
+  );
+  const chunks = Array.isArray(recs)
+    ? recs.filter((r) => r && r.sessionId === sessionId && typeof r.chunk === 'number')
+    : [];
+  if (chunks.length) {
+    const tuples: RowTuple[] = [];
+    for (const c of chunks) if (Array.isArray(c.tuples)) tuples.push(...c.tuples);
+    // Chunks are banded by seq, not ts, so put the reassembled index back in the
+    // total order every reader assumes (cmpTuple).
+    tuples.sort(cmpTuple);
+    m.idx = tuples;
+  } else {
+    // No chunks: fall back to the legacy monolithic record and migrate it. It was
+    // stored already sorted, so no re-sort is needed; marking every chunk dirty
+    // (plus the migrate flag) makes the next flush write the chunked records and
+    // delete the old one.
+    const old = await backing<IdxRecord>('readonly', (s) => s.get(idxKey(sessionId)) as IDBRequest);
+    if (old && Array.isArray(old.tuples)) {
+      m.idx = old.tuples;
+      idxMigrateOld.add(sessionId);
+      markAllChunksDirty(sessionId);
+    }
+  }
+  reindexMirror(m);
   idxLoaded.add(sessionId);
   sanitizeOnRead(sessionId, m);
   return m;
@@ -380,8 +543,11 @@ function sanitizeOnRead(sessionId: string, m: Mirror): void {
   const dropped = m.idx.length - clean.length;
   for (const t of m.idx) if (isPoisonTuple(t)) m.loaded.delete(t.id);
   m.idx = clean;
+  reindexMirror(m);
   cyclog('rowstore.axis.sanitized', {session: sessionId, dropped});
-  markIdxDirty(sessionId);
+  // Poison can sit in any chunk (the seqless wall lands in the seq < 0 chunk),
+  // so rewrite the whole clean index and prune the record it emptied.
+  markAllChunksDirty(sessionId);
 }
 
 async function loadPayloads(sessionId: string, m: Mirror, ids: string[]): Promise<void> {
@@ -549,11 +715,10 @@ export function staleRowReason(sessionId: string, axisBound = Infinity): string 
 export function dropRow(sessionId: string, id: string): void {
   const m = mirrors.get(sessionId);
   if (m) {
-    const at = m.idx.findIndex((t) => t.id === id);
     const had = m.loaded.has(id);
-    if (at >= 0) m.idx.splice(at, 1);
+    const removed = removeTuple(m, id);
     m.loaded.delete(id);
-    markIdxDirty(sessionId);
+    if (removed) markChunkDirty(sessionId, chunkOf(removed.seq));
     if (openSid === sessionId && had) fireChange(sessionId, -1, -1);
   }
   fireWrite((s) => s.delete(rowKey(sessionId, id)));
@@ -582,7 +747,18 @@ function persistUpsert(sessionId: string, m: Mirror, rows: StoreRow[], res: Upse
     const inc = m.loaded.get(into);
     if (inc) fireWrite((s) => s.put({...inc, key: rowKey(sessionId, into)}));
   }
-  markIdxDirty(sessionId);
+  // Mark only the chunks this batch changed. A twin fold/rekey can move rows
+  // across chunks in ways per-chunk marking cannot cheaply track, so those (rare)
+  // batches trigger a full rewrite; the common insert/reseat batch marks just the
+  // chunk(s) it touched, keeping the durable write proportional to the change.
+  if (res.rekeyedFrom.length) {
+    markAllChunksDirty(sessionId);
+    return;
+  }
+  const skip = new Set<string>(res.refused);
+  for (const f of res.foldedInto) skip.add(f.from);
+  for (const row of rows) if (!skip.has(row.id)) markChunkDirty(sessionId, chunkOf(row.seq));
+  for (const r of res.reseated) markChunkDirty(sessionId, chunkOf(r.fromSeq));
 }
 
 // One cyclog line per row the door refused (isPoisonTuple, once the session
@@ -682,9 +858,9 @@ export function rekey(sessionId: string, oldId: string, next: StoreRow): void {
   const m = mirrors.get(sessionId);
   if (m) {
     // drop the provisional row from index and loaded set
-    const at = m.idx.findIndex((t) => t.id === oldId);
-    if (at >= 0) m.idx.splice(at, 1);
+    const removed = removeTuple(m, oldId);
     m.loaded.delete(oldId);
+    if (removed) markChunkDirty(sessionId, chunkOf(removed.seq));
   }
   fireWrite((s) => s.delete(rowKey(sessionId, oldId)));
   if (isWarm(sessionId)) upsertSync(sessionId, [next]);
@@ -779,15 +955,21 @@ export async function purge(sessionId: string): Promise<boolean> {
     : [];
   // Cancel any pending coalesced index write for this session BEFORE the delete:
   // a deferred flush firing after the purge would resurrect the stale index the
-  // heal is dropping (the resurrect loop the field hit). The idx and meta keys
-  // are ALSO deleted unconditionally below (even if getAllKeys did not list them
-  // yet), so a flush whose fire-and-forget write was already in flight when the
-  // purge ran -- created before the purge's delete, so it commits first -- is
-  // still removed by the delete that follows it.
+  // heal is dropping (the resurrect loop the field hit). The idx (legacy monolith)
+  // and meta keys are ALSO deleted unconditionally below, and so is EVERY chunk
+  // key the warm mirror spans: the index is chunked under dynamic keys now, so a
+  // getAllKeys read (which races an in-flight fire-and-forget chunk write and can
+  // miss it) is no longer enough on its own. A flush whose chunk write was
+  // already in flight when the purge ran targets a chunk the warm mirror still
+  // holds, so deleting the mirror's chunk keys unconditionally -- the purge's
+  // delete is created after that write, so it commits first -- removes it, exactly
+  // the way the fixed monolith key was covered before.
   cancelIdxFlush(sessionId);
+  const m = mirrors.get(sessionId);
   const del = new Set<string>(mine);
   del.add(idxKey(sessionId));
   del.add(metaKey(sessionId));
+  if (m) for (const t of m.idx) del.add(chunkKey(sessionId, chunkOf(t.seq)));
   const toDelete = [...del];
   if (toDelete.length) {
     try {
@@ -854,8 +1036,13 @@ export async function rekeyDurableRowsToOneId(): Promise<{sessions: number; reke
   const idxBySession = new Map<string, IdxRecord>();
   for (const rec of all) {
     if (!rec || typeof rec.sessionId !== 'string') continue;
-    if (Array.isArray(rec.tuples)) idxBySession.set(rec.sessionId, rec as IdxRecord);
-    else if (rec.kind === 'msg' && rec.msg && typeof rec.id === 'string') {
+    // The one-time rekey runs at boot, before any open migrates a session's index
+    // to chunks, so it only ever meets the legacy monolithic record. Guard anyway:
+    // a chunk record (it carries a numeric `chunk`) is never treated as the
+    // monolith, so a future re-run over a chunked store cannot collapse it.
+    if (Array.isArray(rec.tuples) && typeof (rec as {chunk?: unknown}).chunk !== 'number') {
+      idxBySession.set(rec.sessionId, rec as IdxRecord);
+    } else if (rec.kind === 'msg' && rec.msg && typeof rec.id === 'string') {
       let list = rowsBySession.get(rec.sessionId);
       if (!list) rowsBySession.set(rec.sessionId, (list = []));
       list.push(rec as RowRecord);

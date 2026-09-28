@@ -1808,14 +1808,17 @@ describe('the stale-axis resurrect LOOP (real wiring): a second page must not wr
     await vi.advanceTimersByTimeAsync(3100); // flush + commit the poison durably
 
     // A second tab loaded this poisoned idx and holds it warm: capture the exact
-    // durable records it would fire-and-forget write back on its next upsert.
-    const idxRec = SID + '|idx';
-    const pageBIdx = JSON.parse(JSON.stringify(db.get(idxRec)));
+    // durable records it would fire-and-forget write back on its next upsert. The
+    // index is now stored in seq-banded chunks (`<sid>|idx|<chunk>`), so capture
+    // every chunk record the poison occupies, not a single monolith.
+    const pageBIdx = [...db.entries()]
+      .filter(([k]) => k.startsWith(SID + '|idx|'))
+      .map(([k, v]) => [k, JSON.parse(JSON.stringify(v))] as const);
     const pageBRows = [...db.entries()]
       .filter(([k]) => k.startsWith(SID + '|r|'))
       .map(([k, v]) => [k, JSON.parse(JSON.stringify(v))] as const);
     const writeBackFromPageB = () => {
-      db.set(idxRec, JSON.parse(JSON.stringify(pageBIdx)));
+      for (const [k, v] of pageBIdx) db.set(k, JSON.parse(JSON.stringify(v)));
       for (const [k, v] of pageBRows) db.set(k, JSON.parse(JSON.stringify(v)));
     };
 
