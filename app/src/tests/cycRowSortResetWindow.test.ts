@@ -45,7 +45,6 @@ describe('reset-bearing window: a live append never drops a newer-by-ts row', ()
     rowStore.__setBackingForTest(memTx().tx);
   });
   afterEach(() => {
-    rowStore.setOpen(null);
     rowStore.__setBackingForTest(null);
   });
 
@@ -79,35 +78,19 @@ describe('reset-bearing window: a live append never drops a newer-by-ts row', ()
     // Run A tail the window also holds), even though it carries the lowest seqs.
     for (let k = 0; k < 30; k++) expect(before).toContain('B3-' + k);
 
-    // ONE live message at the true tail (newest ts, next reset-band seq). On the
-    // seq-floor code this rode the floor up and evicted the low-seq band. While
-    // the chat is OPEN the window now GROWS by the arrival instead of sliding, so
-    // nothing is evicted and no newer-by-ts row can be dropped.
+    // ONE live message at the true tail (newest ts, next reset-band seq). This is
+    // what rides the floor up and, on the seq-floor code, evicts the low-seq band.
     const live = msg(s, T0 + 6 * DAY + 999_000, 'LIVE');
     all.push(live);
     await rowStore.upsert(SID, [messageRow(SID, live)] as never);
 
     const after = projTexts();
-    // The open window GREW by one: it is now the newest 301 by ts, front kept.
-    expect(after).toHaveLength(WINDOW + 1);
-    expect(after).toEqual(expectedNewest(all, WINDOW + 1));
+    // The projection did not shrink and is STILL exactly the newest 300 by ts.
+    expect(after).toHaveLength(WINDOW);
+    expect(after).toEqual(expectedNewest(all, WINDOW));
     // The live row is at the tail; no day-3 band row vanished.
     expect(after[after.length - 1]).toBe('LIVE');
     for (let k = 0; k < 30; k++) expect(after).toContain('B3-' + k);
-
-    // Eviction, when it DOES run (a background chat, or the grow cap), still cuts
-    // by ts, never by seq: leave SID in the background and append once more, and
-    // the floor rides to the exact newest 300 by ts. The low-seq post-reset band
-    // survives; only the oldest-by-ts rows leave, no hole.
-    rowStore.setOpen('ws://other.test:1/ws|p9');
-    const live2 = msg(s + 1, T0 + 6 * DAY + 999_500, 'LIVE2');
-    all.push(live2);
-    await rowStore.upsert(SID, [messageRow(SID, live2)] as never);
-    const bg = projTexts();
-    expect(bg).toHaveLength(WINDOW);
-    expect(bg).toEqual(expectedNewest(all, WINDOW));
-    expect(bg[bg.length - 1]).toBe('LIVE2');
-    for (let k = 0; k < 30; k++) expect(bg).toContain('B3-' + k);
   });
 
   // The frequent-reset (BZ-Builder) shape: 20 bands of 40 rows, seq resets to 0
@@ -130,27 +113,15 @@ describe('reset-bearing window: a live append never drops a newer-by-ts row', ()
     expect(before).toHaveLength(WINDOW);
 
     // A live append at the true tail (a fresh band-19 row, reused low-ish seq).
-    // While the chat is OPEN the window GROWS by the arrival, keeping every
-    // newer-by-ts row: it is now the exact newest 301 by ts, no hole.
     const live = msg(40, T0 + 19 * DAY + 99 * 60_000, 'LIVE');
     all.push(live);
     await rowStore.upsert(SID, [messageRow(SID, live)] as never);
 
     const after = projTexts();
-    expect(after).toHaveLength(WINDOW + 1);
-    expect(after).toEqual(expectedNewest(all, WINDOW + 1));
+    // The window is STILL the exact newest 300 by ts: no band was half-evicted by
+    // a seq floor riding up over the ts-ordered index.
+    expect(after).toHaveLength(WINDOW);
+    expect(after).toEqual(expectedNewest(all, WINDOW));
     expect(after[after.length - 1]).toBe('LIVE');
-
-    // Background eviction still cuts by ts, never by seq: with SID in the
-    // background the floor rides to the exact newest 300 by ts, no band
-    // half-evicted by a seq floor riding up over the ts-ordered index.
-    rowStore.setOpen('ws://other.test:1/ws|p9');
-    const live2 = msg(41, T0 + 19 * DAY + 100 * 60_000, 'LIVE2');
-    all.push(live2);
-    await rowStore.upsert(SID, [messageRow(SID, live2)] as never);
-    const bg = projTexts();
-    expect(bg).toHaveLength(WINDOW);
-    expect(bg).toEqual(expectedNewest(all, WINDOW));
-    expect(bg[bg.length - 1]).toBe('LIVE2');
   });
 });
