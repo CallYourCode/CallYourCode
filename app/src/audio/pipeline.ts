@@ -1025,12 +1025,27 @@ class Pipeline {
     void released.blobPromise
       .then((b) => {
         if (b && b.size > MIN_BLOB_SIZE) {
+          // How much live-stream audio actually reached the engine vs. what the
+          // 30s queue bound had to drop, so the owner's own recordings show the
+          // real live-stt delivery rate (fix-stt-drop). Absent when streaming was
+          // off for this take (no stream).
+          const stt = cap.stream as unknown as {
+            sentChunks?: number;
+            sentSamples?: number;
+            droppedChunks?: number;
+            droppedSamples?: number;
+          } | null;
+          const sttS = (n: number | undefined) => Math.round(((n ?? 0) / 16000) * 10) / 10;
           cyclog('capture.clip', {
             cid: cap.cid,
             capture: id,
             bytes: b.size,
             durationS,
-            maxPaintGapMs: Math.round(cap.maxPaintGapMs)
+            maxPaintGapMs: Math.round(cap.maxPaintGapMs),
+            sttSent: stt?.sentChunks ?? 0,
+            sttSentS: sttS(stt?.sentSamples),
+            sttDropped: stt?.droppedChunks ?? 0,
+            sttDroppedS: sttS(stt?.droppedSamples)
           });
           this.emit('clip', b, forCapture ?? undefined, durationS, id);
         } else {

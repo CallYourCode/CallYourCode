@@ -137,19 +137,70 @@ describe('DcSttStream', () => {
     await expect(final).rejects.toThrow('no final within timeout');
     expect(s.failed).toBe(true);
   });
-  test('backpressure: while the pipe drains, chunks are DROPPED, never queued', async () => {
+  test('backpressure: while the pipe drains, audio is QUEUED in order, never dropped', async () => {
     const f = fakeDeps();
     const s = new DcSttStream(f.deps, {});
-    s.push(pcm());
-    s.push(pcm());
-    s.push(pcm());
-    expect(s.dropped).toBe(2);
+    // The first push goes out at once and parks the pipe on its drain.
+    s.push(pcm(0.1));
+    // These arrive while the pipe is draining: they queue, they do not drop.
+    s.push(pcm(0.2, 0.3, 0.4));
+    s.push(pcm(0.5, 0.6));
+    expect(s.droppedChunks).toBe(0);
     expect(f.sent.filter((x) => x.t === 'stt-b').length).toBe(1);
+    // The drain resolves: the queued audio is coalesced into ONE frame, in order.
     await f.drainDone();
-    s.push(pcm());
-    expect(s.dropped).toBe(2);
-    expect(f.sent.filter((x) => x.t === 'stt-b').length).toBe(2);
+    const bFrames = f.sent.filter((x) => x.t === 'stt-b');
+    expect(bFrames.length).toBe(2);
+    expect(decodeChunk(bFrames[0])).toEqual(pcm(0.1));
+    expect(decodeChunk(bFrames[1])).toEqual(pcm(0.2, 0.3, 0.4, 0.5, 0.6));
+    // Every sample pushed reached the wire; nothing was dropped.
+    expect(s.sentSamples).toBe(6);
+    expect(s.droppedSamples).toBe(0);
     void s.finish().catch(() => {});
+  });
+  test('the queue flushes on every drain, and pushes after a drain send at once', async () => {
+    const f = fakeDeps();
+    const s = new DcSttStream(f.deps, {});
+    s.push(pcm(1)); // sent, parks the drain
+    s.push(pcm(2)); // queued behind the parked drain
+    expect(f.sent.filter((x) => x.t === 'stt-b').length).toBe(1);
+    await f.drainDone(); // flushes [2], parks again
+    expect(f.sent.filter((x) => x.t === 'stt-b').length).toBe(2);
+    await f.drainDone(); // nothing queued: no new frame
+    expect(f.sent.filter((x) => x.t === 'stt-b').length).toBe(2);
+    s.push(pcm(3)); // pipe is drained now: goes out at once
+    expect(f.sent.filter((x) => x.t === 'stt-b').length).toBe(3);
+    void s.finish().catch(() => {});
+  });
+  test('the queue is bounded to 30s: past that the OLDEST is dropped, newest kept', async () => {
+    const f = fakeDeps();
+    const s = new DcSttStream(f.deps, {});
+    const SEC = 16000; // one second of 16kHz f32
+    s.push(new Float32Array(SEC)); // sent, parks the drain
+    // Queue 32 seconds behind the parked drain; the bound is 30s.
+    for (let i = 0; i < 32; i++) s.push(new Float32Array(SEC));
+    // Two oldest seconds dropped to hold the queue at 30s; counters reflect it.
+    expect(s.droppedChunks).toBe(2);
+    expect(s.droppedSamples).toBe(2 * SEC);
+    await f.drainDone();
+    // What reached the wire: the first second (sent live) + the newest 30 queued.
+    expect(s.sentChunks).toBe(31);
+    expect(s.sentSamples).toBe(31 * SEC);
+    const bFrames = f.sent.filter((x) => x.t === 'stt-b');
+    expect(decodeChunk(bFrames[1]).length).toBe(30 * SEC);
+    void s.finish().catch(() => {});
+  });
+  test('finish flushes the queued tail before stt-close, so the final decodes all audio', async () => {
+    const f = fakeDeps();
+    const s = new DcSttStream(f.deps, {});
+    s.push(pcm(1)); // sent, parks the drain
+    s.push(pcm(2, 3)); // queued
+    void s.finish().catch(() => {});
+    const lastTwo = f.sent.slice(-2);
+    expect(lastTwo[0].t).toBe('stt-b');
+    expect(decodeChunk(lastTwo[0])).toEqual(pcm(2, 3));
+    expect(lastTwo[1]).toEqual({t: 'stt-close', id: s.id});
+    expect(s.droppedSamples).toBe(0);
   });
   test('a seal that is not ready fails the open instead of exploding', async () => {
     const f = fakeDeps();
