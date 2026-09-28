@@ -89,6 +89,10 @@ type Capture = {
   arbitrating: boolean;
 
   settled: boolean;
+
+  // The longest gap between waveform paints seen during this take (ms). It is
+  // logged on capture.clip so a slow phone's frozen strip is visible in the log.
+  maxPaintGapMs: number;
 };
 
 type ReleasedCapture = {
@@ -128,6 +132,13 @@ class Pipeline {
   private chunker: Pcm16kChunker | null = null;
   private preRoll: Float32Array[] = [];
   private preRollSamples = 0;
+
+  // The latest loudness from the worklet's level meter (dB), and whether the
+  // worklet is feeding it. The waveform paints from this value, so the strip's
+  // loudness comes off the audio thread rather than a main-thread read.
+  private workletLevelDb = -120;
+  private workletLevelActive = false;
+  private lastPaintAt = 0;
 
   private active: Capture | null = null;
   private inFlight = new Map<number, Capture>();
@@ -491,7 +502,12 @@ class Pipeline {
         channelCountMode: 'explicit'
       });
       node.port.onmessage = (e) => {
-        if (e.data instanceof Float32Array) this.chunker?.push(e.data);
+        if (typeof e.data === 'number') {
+          this.workletLevelDb = 20 * Math.log10(e.data + 1e-10);
+          this.workletLevelActive = true;
+        } else if (e.data instanceof Float32Array) {
+          this.chunker?.push(e.data);
+        }
       };
       source.connect(node);
       this.tapNode = node;
@@ -529,6 +545,23 @@ class Pipeline {
     this.chunker = null;
     this.preRoll = [];
     this.preRollSamples = 0;
+    this.workletLevelActive = false;
+  }
+
+  // Paint one waveform level. The value comes from the worklet's meter (the
+  // audio thread), never from a per-frame main-thread read or the network, so
+  // the strip shows the current loudness even when the main thread is busy.
+  // The gap since the last paint is folded onto the take so a frozen strip
+  // shows up on capture.clip.
+  private emitLevel(fallbackDb: number): void {
+    const now = performance.now();
+    const cap = this.active;
+    if (cap && this.lastPaintAt) {
+      const gap = now - this.lastPaintAt;
+      if (gap > cap.maxPaintGapMs) cap.maxPaintGapMs = gap;
+    }
+    this.lastPaintAt = now;
+    this.emit('level', this.workletLevelActive ? this.workletLevelDb : fallbackDb);
   }
 
   private onPcmChunk(chunk: Float32Array): void {
@@ -785,7 +818,7 @@ class Pipeline {
   private tick(): void {
     if (!this.analyser) return;
     const db = this.rmsDb();
-    this.emit('level', db);
+    this.emitLevel(db);
 
     const cap = this.active;
     if (cap) {
@@ -839,6 +872,7 @@ class Pipeline {
       streamOpen: false,
       arbitrating: false,
       settled: false,
+      maxPaintGapMs: 0,
 
       fromPress: false
     };
@@ -846,6 +880,7 @@ class Pipeline {
     speaker.setBusy(true, `capture:${cap.id}`);
 
     this.active = cap;
+    this.lastPaintAt = 0;
     this.inFlight.set(cap.id, cap);
     this.cids.set(cap.id, cap.cid);
     if (this.cids.size > 32) {
@@ -981,7 +1016,13 @@ class Pipeline {
     void released.blobPromise
       .then((b) => {
         if (b && b.size > MIN_BLOB_SIZE) {
-          cyclog('capture.clip', {cid: cap.cid, capture: id, bytes: b.size, durationS});
+          cyclog('capture.clip', {
+            cid: cap.cid,
+            capture: id,
+            bytes: b.size,
+            durationS,
+            maxPaintGapMs: Math.round(cap.maxPaintGapMs)
+          });
           this.emit('clip', b, forCapture ?? undefined, durationS, id);
         } else {
           cyclog('capture.clip.none', {

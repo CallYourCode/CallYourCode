@@ -63,10 +63,23 @@ class CycPcmTap extends AudioWorkletProcessor {
     super();
     this.buf = new Float32Array(2048);
     this.n = 0;
+    // Level meter: an RMS over ~20ms windows, posted straight from the audio
+    // thread. The waveform paints from this so its loudness stays fresh even
+    // when the main thread is busy (streaming, encoding); it never waits on a
+    // main-thread poll.
+    this.sumSq = 0;
+    this.lvlN = 0;
   }
   process(inputs) {
     const ch = inputs[0] && inputs[0][0];
     if(ch) {
+      for (let k = 0; k < ch.length; k++) this.sumSq += ch[k] * ch[k];
+      this.lvlN += ch.length;
+      if (this.lvlN >= 1024) {
+        this.port.postMessage(Math.sqrt(this.sumSq / this.lvlN));
+        this.sumSq = 0;
+        this.lvlN = 0;
+      }
       let i = 0;
       while(i < ch.length) {
         const take = Math.min(ch.length - i, this.buf.length - this.n);
