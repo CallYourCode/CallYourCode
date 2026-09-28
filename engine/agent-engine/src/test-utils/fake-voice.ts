@@ -82,6 +82,9 @@ export type FakeVoiceOpts = {
   ttsChunks?: string[];
   /** the status ERRORING answers with */
   errorStatus?: number;
+  /** answer the first N POST /stt with 503 ("voice engine busy") before serving
+   *  normally, the way a full batch engine does (#551). Retunable mid-test. */
+  sttBusy?: number;
   /** a frame pushed at every stream socket the moment it opens, or null.
    *  It proves the upstream -> proxy -> browser direction without the browser
    *  having said anything first. */
@@ -139,6 +142,10 @@ export type FakeVoice = {
   ttsBytes: Uint8Array;
   ttsChunks: string[];
   errorStatus: number;
+  /** remaining POST /stt to answer 503 before serving normally */
+  sttBusy: number;
+  /** how many POST /stt have been 503'd as busy so far */
+  readonly sttBusyServed: number;
 
   // ---- driving the ws from the fake's side -------------------------------
   /** push an unprompted frame at every open stream socket */
@@ -176,6 +183,8 @@ export function fakeVoice(o: FakeVoiceOpts = {}): FakeVoice {
     ttsBytes: o.ttsBytes ?? new Uint8Array([0xff, 0xfb, 0x90, 0x64]),
     ttsChunks: o.ttsChunks ?? ["FAKE", "-TTS"],
     errorStatus: o.errorStatus ?? 500,
+    sttBusy: o.sttBusy ?? 0,
+    sttBusyServed: 0,
     greet: o.greet === undefined ? JSON.stringify({ t: "ready", from: "fake" }) : o.greet,
     echo: o.echo ?? true,
     refuseStreams: false,
@@ -253,6 +262,17 @@ export function fakeVoice(o: FakeVoiceOpts = {}): FakeVoice {
       }
 
       if (url.pathname === "/stt" && req.method === "POST") {
+        /* A FULL BATCH ENGINE answers 503 the moment its slots are taken (#551).
+         * Drain the body first (a 503 that left it unread would stall the client
+         * on backpressure), then refuse, so a test can prove the caller waits
+         * its turn and retries rather than shipping the placeholder. */
+        if (st.sttBusy > 0) {
+          if (req.body) await req.arrayBuffer().catch(() => new ArrayBuffer(0));
+          st.sttBusy--;
+          st.sttBusyServed++;
+          return new Response(JSON.stringify({ error: "voice engine busy: 3 decoding, 1 queued" }),
+            { status: 503, headers: { "content-type": "application/json" } });
+        }
         /* READ INCREMENTALLY. The proxy is supposed to stream the clip through
          * rather than buffer it, and the only way to see the difference is to
          * watch the first bytes land here while the client is still sending.
@@ -381,6 +401,9 @@ export function fakeVoice(o: FakeVoiceOpts = {}): FakeVoice {
     set ttsChunks(v: string[]) { st.ttsChunks = v; },
     get errorStatus() { return st.errorStatus; },
     set errorStatus(v: number) { st.errorStatus = v; },
+    get sttBusy() { return st.sttBusy; },
+    set sttBusy(v: number) { st.sttBusy = v; },
+    get sttBusyServed() { return st.sttBusyServed; },
 
     push(frame) {
       for (const s of [...sockets]) { try { s.send(frame); } catch { /* gone */ } }
@@ -403,6 +426,7 @@ export function fakeVoice(o: FakeVoiceOpts = {}): FakeVoice {
       st.sttBytesSoFar = 0;
       st.ttsStarted = false;
       st.ttsDone = false;
+      st.sttBusyServed = 0;
     },
     stop() {
       for (const s of [...sockets]) { try { s.close(); } catch { /* gone */ } }

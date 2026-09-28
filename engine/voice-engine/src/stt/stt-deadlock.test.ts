@@ -69,17 +69,23 @@ async function startEngine(whisperUrl: string, env: Record<string, string>): Pro
 }
 
 /** A tiny real WAV (a 0.5 s tone): a decodable clip that is not silence. */
-function clip(): Uint8Array {
+function clip(hz = 200): Uint8Array {
   const n = 8000;
   const s = new Int16Array(n);
-  for (let i = 0; i < n; i++) s[i] = Math.round(2000 * Math.sin((2 * Math.PI * 200 * i) / 16000));
+  for (let i = 0; i < n; i++) s[i] = Math.round(2000 * Math.sin((2 * Math.PI * hz * i) / 16000));
   return writeWav(s);
 }
 const CLIP = clip();
+// A DISTINCT clip: the engine now joins two IDENTICAL concurrent decodes into
+// one (stt/inflight.ts, #stt-busy), so a test that wants two requests to CONTEND
+// for the one slot must send two different clips -- otherwise the second joins
+// the first and both win, which is the dedup working, not the bound failing.
+const CLIP2 = clip(260);
 
-async function postStt(port: number, timeoutMs = 30_000): Promise<{ status: number; body: any }> {
+async function postStt(port: number, timeoutMs = 30_000, body: Uint8Array = CLIP):
+  Promise<{ status: number; body: any }> {
   const res = await fetch(`http://127.0.0.1:${port}/stt`, {
-    method: "POST", headers: { "Content-Type": "audio/wav" }, body: CLIP as unknown as ArrayBuffer,
+    method: "POST", headers: { "Content-Type": "audio/wav" }, body: body as unknown as ArrayBuffer,
     signal: AbortSignal.timeout(timeoutMs),
   });
   return { status: res.status, body: await res.json().catch(() => null) };
@@ -124,7 +130,9 @@ test("a full engine fails extra requests with 503, not an unbounded queue", asyn
   stub = startStub(ctl);
   engine = await startEngine(stub.url, { VOICE_BATCH_MAX: "1", VOICE_BATCH_QUEUE_WAIT_MS: "300" });
 
-  const [a, b] = await Promise.all([postStt(engine.port, 10_000), postStt(engine.port, 10_000)]);
+  // Two DISTINCT clips, so they contend for the slot rather than dedup-joining.
+  const [a, b] = await Promise.all([
+    postStt(engine.port, 10_000, CLIP), postStt(engine.port, 10_000, CLIP2)]);
   const statuses = [a.status, b.status].sort();
   expect(statuses).toEqual([200, 503]); // one served, one refused loudly
   const busy = a.status === 503 ? a : b;
