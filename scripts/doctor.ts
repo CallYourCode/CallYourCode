@@ -187,15 +187,18 @@ export async function runDoctor(env: EngineEnv, io: DoctorIO): Promise<DoctorRes
 
   for (const l of legs) out.push(l.line);
 
-  // --- 4. PI BRIDGE: the oneMByDefault setting must have code behind it ------
+  // --- 4. PI BRIDGE: the oneMByDefault setting must have code behind it, and
+  //        the installed bridge must carry the auto-compaction loop fix --------
   const bridge = await bridgeLine(io)
-  if (bridge) {
+  const autocompact = await bridgeAutocompactLine(io)
+  if (bridge || autocompact) {
     out.push("");
     out.push("PI BRIDGE");
-    out.push(bridge.line);
+    if (bridge) out.push(bridge.line);
+    if (autocompact) out.push(autocompact.line);
   }
 
-  const failed = legs.some((l) => !l.ok) || diffs.length > 0 || bridge?.ok === false;
+  const failed = legs.some((l) => !l.ok) || diffs.length > 0 || bridge?.ok === false || autocompact?.ok === false;
   return { text: out.join("\n"), code: failed ? 1 : 0 };
 }
 
@@ -215,6 +218,22 @@ export async function bridgeLine(io: DoctorIO): Promise<{ line: string; ok: bool
     return { line: "  FAIL oneMByDefault is set but the installed bridge lacks it (reinstalled?): run `cyc install`", ok: false };
   }
   return { line: `  PASS oneMByDefault ${wanted ? "on" : "off"}, bridge ${has ? "supports it" : "unpatched"}`, ok: true };
+}
+
+/* A pi reinstall/update can replace the bridge with one that lacks the
+ * auto-compaction loop fix (bridge-autocompact.patch); auto-compaction then
+ * loops on tool-using bridge agents, burning quota without progress. This is a
+ * bug fix, not opt-in, so a bridge without it always FAILs. Null when there is
+ * no bridge to judge. */
+export async function bridgeAutocompactLine(io: DoctorIO): Promise<{ line: string; ok: boolean } | null> {
+  const agent = `${io.home}/.pi/agent`;
+  const index = await io.readFile(`${agent}/npm/node_modules/pi-claude-bridge/src/index.ts`);
+  if (index === null) return null;
+  const has = /\babortForCompaction\b/.test(index);
+  if (!has) {
+    return { line: "  FAIL auto-compaction loop fix missing from the installed bridge (reinstalled?): run `cyc install`", ok: false };
+  }
+  return { line: "  PASS auto-compaction loop fix present", ok: true };
 }
 
 function probePost(): RequestInit {

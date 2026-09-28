@@ -1,0 +1,212 @@
+diff --git a/src/index.ts b/src/index.ts
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -239,6 +239,16 @@
+ 
+ let sharedSession: SessionState | null = null;
+ 
++// Set by session_before_compact when an automatic compaction (threshold/overflow,
++// not manual /compact) ended a live CC query. pi rewrites its history and then
++// delivers the tool result that query had in flight; the provider sees no active
++// query and would take the orphaned-result path and end the turn, which stalls an
++// autonomous agent forever. This flag makes that one delivery rebuild from the
++// compacted history and continue the task instead. Cleared the moment it is
++// consumed (and on session lifecycle events), so a genuine user abort still ends
++// the turn.
++let compactionContinuationPending = false;
++
+ // Convert pi messages to Anthropic API format for session import.
+ // Lossy: only text, thinking and toolCall blocks survive, and thinking only when
+ // Claude Code itself minted the signature. An assistant message whose blocks all
+@@ -1547,24 +1557,44 @@
+ 	}
+ 
+ 	// --- Orphaned tool result (e.g. user aborted a tool call) ---
+-	// The query is gone but pi still delivered the result. Nothing to do — just
+-	// emit end_turn so pi waits for the next real user message.
++	// The query is gone but pi still delivered the result.
+ 	const lastMsg = context.messages[context.messages.length - 1];
++	// A compaction continuation reaches the fresh-query path below with a trailing
++	// tool result and no user prompt; these track that so the empty-prompt guard
++	// stays quiet and the pre-compaction CC session file is cleaned up after the
++	// rebuild rotates it away.
++	let compactionContinuation = false;
++	let staleCompactionSessionId: string | undefined;
+ 	if (lastMsg?.role === "toolResult") {
+-		debug(`provider: orphaned tool result after abort, emitting end_turn`);
+-		if (sharedSession && activeQueryContexts.size === 0) sharedSession.cursor = context.messages.length;
+-		// No query owns this result, so there is no context to reset: resetTurnState
+-		// on the top-level ctx() would replace a live parent's turnOutput mid-stream,
+-		// stranding the blocks it had already emitted. A throwaway context just
+-		// supplies the empty message this turn ends with.
+-		const c = new QueryContext();
+-		c.resetTurnState(model);
+-		queueMicrotask(() => {
+-			stream.push({ type: "done", reason: "stop", message: c.turnOutput });
+-			markStreamComplete(stream);
+-			stream.end();
+-		});
+-		return stream;
++		if (compactionContinuationPending) {
++			// An automatic compaction ended the in-flight CC query; pi has since
++			// rewritten its history and delivered the tool result that was in flight.
++			// Ending the turn here would strand an autonomous agent (no queued next
++			// message to auto-continue). Instead fall through to the fresh-query path:
++			// syncSharedSession rebuilds the CC session from pi's compacted history
++			// (which already carries this turn's tool_use and this tool result), and a
++			// continuation query resumes the task on a small context, so the threshold
++			// stops re-tripping. The abort marked sharedSession needsRebuild+forceRotate.
++			compactionContinuationPending = false;
++			compactionContinuation = true;
++			staleCompactionSessionId = sharedSession?.sessionId;
++			debug(`provider: post-compaction tool result, rebuilding into a continuation query (was end_turn)`);
++		} else {
++			debug(`provider: orphaned tool result after abort, emitting end_turn`);
++			if (sharedSession && activeQueryContexts.size === 0) sharedSession.cursor = context.messages.length;
++			// No query owns this result, so there is no context to reset: resetTurnState
++			// on the top-level ctx() would replace a live parent's turnOutput mid-stream,
++			// stranding the blocks it had already emitted. A throwaway context just
++			// supplies the empty message this turn ends with.
++			const c = new QueryContext();
++			c.resetTurnState(model);
++			queueMicrotask(() => {
++				stream.push({ type: "done", reason: "stop", message: c.turnOutput });
++				markStreamComplete(stream);
++				stream.end();
++			});
++			return stream;
++		}
+ 	}
+ 
+ 	// --- Fresh query ---
+@@ -1611,13 +1641,26 @@
+ 	const cliModel = claudeCodeModelId(model, longContextSettings);
+ 	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel);
+ 	const { sessionId: resumeSessionId } = syncResult;
++	// The compaction abort rotated the CC session (forceRotate), so the rebuild above
++	// took a fresh id and left the pre-compaction file behind. The subprocess that
++	// owned it was interrupted back at session_before_compact and the compaction
++	// summary has since run its own query, so that process is long gone; deleting the
++	// file now keeps a long-lived agent from accumulating one dead CC session per
++	// auto-compaction.
++	if (compactionContinuation && staleCompactionSessionId && staleCompactionSessionId !== resumeSessionId) {
++		deleteSession(staleCompactionSessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
++		debug(`provider: deleted rotated-away CC session ${staleCompactionSessionId.slice(0, 8)} after compaction rebuild`);
++	}
+ 	const promptBlocks = extractUserPromptBlocks(context.messages);
+ 	let promptText = extractUserPrompt(context.messages) ?? "";
+ 
+ 	// Guard: empty prompt means the last context message isn't a user message.
+ 	// This should never happen with per-query state — dump diagnostics if it does.
++	// A compaction continuation is the one expected empty-prompt case (the trailing
++	// message is the delivered tool result, not a user turn), so it skips the dump
++	// and just uses the continuation prompt below.
+ 	if (!promptText && !promptBlocks) {
+-		diagDump("empty_prompt", {
++		if (!compactionContinuation) diagDump("empty_prompt", {
+ 			contextLength: context.messages.length,
+ 			lastMsgRole: lastMsg?.role,
+ 			isReentrant,
+@@ -1732,6 +1775,14 @@
+ 		drainForAbort(abortCtx, promptStream);
+ 		requestAbort();
+ 	};
++	// Auto-compaction (unlike manual /compact) does not abort the agent, so pi keeps
++	// feeding tool results and steers into this long-lived CC query after it has
++	// compacted its own history, and CC then re-serves the full pre-compaction context
++	// every turn and pi compacts again, forever (issue: auto-compact loop). Expose
++	// this query's abort so the compaction handler can end it, exactly as a pi-driven
++	// abort would; the delivered-after tool result is then rebuilt into a fresh
++	// continuation query (see the orphaned-result path).
++	queryCtx.abortForCompaction = onAbort;
+ 	if (options?.signal) {
+ 		if (options.signal.aborted) onAbort();
+ 		else options.signal.addEventListener("abort", onAbort, { once: true });
+@@ -1744,7 +1795,15 @@
+ 
+ 			// --- Abort detection in normal completion path ---
+ 			if (wasAborted || options?.signal?.aborted) {
+-				if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
++				if (sharedSession) {
++					sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
++				} else if (capturedSessionId) {
++					// A clean-start query aborted before it had a tracked session (e.g. an
++					// auto-compaction on the very first turn). Record the session CC created
++					// so the next turn rebuilds from history and the compaction continuation
++					// deletes this file, instead of orphaning it for the life of the agent.
++					sharedSession = { sessionId: capturedSessionId, cursor: context.messages.length, cwd, needsRebuild: true, forceRotate: true };
++				}
+ 				debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
+ 				if (queryCtx.turnOutput) {
+ 					queryCtx.turnOutput.stopReason = "aborted";
+@@ -1821,6 +1880,9 @@
+ 				queryCtx.activeQuery = null;
+ 				activeQueryContexts.delete(queryCtx);
+ 			}
++			// Only drop our own abort hook; a reentrant query reusing this context
++			// installs its own, which must survive our teardown.
++			if (queryCtx.abortForCompaction === onAbort) queryCtx.abortForCompaction = null;
+ 			sdkQuery.close();
+ 		});
+ 
+@@ -2057,6 +2119,8 @@
+ 	const clearSession = (event: string) => {
+ 		debug(`${event}: clearing session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
+ 		sharedSession = null;
++		// A pending continuation belongs to the session that is going away.
++		compactionContinuationPending = false;
+ 
+ 		// Clear the global streamSimple if this instance registered it.
+ 		// This allows /reload to work — the old instance clears the flag so
+@@ -2136,8 +2200,35 @@
+ 		clearSession("session_shutdown");
+ 	});
+ 
++	// End any in-flight CC query the same way a pi-driven abort does. Auto-compaction
++	// (threshold/overflow) rewrites pi's history but never aborts the agent, so a
++	// long-lived bridge query (one CC query serves a whole tool loop) keeps being fed
++	// tool results and steers and re-serves the full pre-compaction context, which
++	// re-trips the threshold and compacts again without end. Tearing the query down
++	// makes pi's next turn a fresh query; the tool result pi then delivers is rebuilt
++	// into a continuation query by the orphaned-result path (compactionContinuationPending),
++	// so the task keeps going on the compacted history instead of stalling. Manual
++	// /compact already aborts via AgentSession.compact(), so there is nothing live to
++	// end there. Returns how many queries were ended.
++	const abortInFlightForCompaction = (label: string): number => {
++		const live = [...activeQueryContexts].filter(
++			(c) => c.activeQuery !== null && typeof c.abortForCompaction === "function",
++		);
++		for (const c of live) {
++			debug(`${label}: aborting in-flight CC query to force rebuild from compacted context`);
++			c.abortForCompaction!();
++		}
++		return live.length;
++	};
++
+ 	pi.on("session_before_compact", async (event, ctx) => {
+ 		if (ctx.model?.baseUrl !== "claude-bridge") return undefined;
++		// Only automatic compaction (threshold/overflow) loops. When it ends a live
++		// query, arm the continuation so the tool result pi delivers next rebuilds and
++		// continues instead of ending the turn.
++		if (event.reason !== "manual" && abortInFlightForCompaction(`session_before_compact:${event.reason}`) > 0) {
++			compactionContinuationPending = true;
++		}
+ 		debug(
+ 			`session_before_compact: takeover reason=${event.reason} willRetry=${event.willRetry} ` +
+ 			`isSplitTurn=${event.preparation.isSplitTurn} messages=${event.preparation.messagesToSummarize.length} ` +
+diff --git a/src/query-state.ts b/src/query-state.ts
+--- a/src/query-state.ts
++++ b/src/query-state.ts
+@@ -18,6 +18,12 @@
+ export class QueryContext {
+ 	// Query-scoped (fully isolated per query)
+ 	activeQuery: unknown | null = null;
++	/** Tears this query down the same way a pi-driven abort does (sets the
++	 *  aborted flag, drains parked handlers, interrupts + closes the CC query).
++	 *  Held so an auto-compaction can end the in-flight query and force the next
++	 *  turn to rebuild from the compacted history; see the session_before_compact
++	 *  handler in index.ts. Null when no query is live on this context. */
++	abortForCompaction: (() => void) | null = null;
+ 	currentPiStream: AssistantMessageEventStream | null = null;
+ 	latestCursor = 0;
+ 	pendingToolCalls = new Map<string, PendingToolCall>();
