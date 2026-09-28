@@ -502,6 +502,12 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   // same amount so what they are reading stays put. No timers on this path.
   const PIN_PX = 4;
   let pinnedToBottom = false;
+  // Set for one frame when the render bracket itself performs the bottom pin on
+  // an appended row, so the post-render rAF pin (storeBindings) and the
+  // onListResize re-pin skip their own scrollToBottom -- one arriving message
+  // then costs exactly one scroll, not the two measured. Cleared on a macrotask,
+  // after this frame's rAF and resize callbacks have run.
+  let bracketPinGuard = false;
   let padTopSeen = 0;
   let pointerHeld = false;
   const notePinAfterWrite = () => {
@@ -548,6 +554,22 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       paint();
       return;
     }
+    // Pinned reader + an appended row: perform the ONE bottom pin here, in the
+    // render frame, and skip the anchor-hold path (that path is for a reader in
+    // history). The post-render rAF pin (storeBindings) and the onListResize
+    // re-pin then find the guard set and skip their own scrollToBottom, so one
+    // arriving message costs exactly one scroll instead of the two measured. The
+    // row measured itself during the paint (commitWindow's measure loop), so
+    // scrollHeight is exact and the pin lands at the true end.
+    if (pinnedToBottom) {
+      paint();
+      silentScrollTo(messageListScroll.scrollHeight);
+      bracketPinGuard = true;
+      setTimeout(() => {
+        bracketPinGuard = false;
+      }, 0);
+      return;
+    }
     // Pin the on-screen position across the render: anchor to the first message
     // whose top sits at or below the fold, captured immediately before the paint.
     const before = messageListScroll.scrollTop;
@@ -556,6 +578,12 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     // prepend re-window can recreate its node, so it is re-found by mid, not
     // trusted by reference) and its on-screen top BEFORE the paint (rect based).
     const boxTop = messageListScroll.getBoundingClientRect().top;
+    // The topmost mounted message row and its on-screen top, to tell a PREPEND
+    // (older history above the fold shifts it down) apart from a TAIL append (a
+    // message below the fold leaves it exactly where it is) in the fallback below.
+    const firstRow = messageListScroll.querySelector<HTMLElement>('.cyc-message[data-mid]');
+    const firstRowMid = firstRow?.dataset.mid ?? null;
+    const firstRowScreenTop = firstRow ? firstRow.getBoundingClientRect().top - boxTop : 0;
     let anchorMid: string | null = null;
     let anchorDelta = 0;
     let anchorScreenTop = 0;
@@ -604,6 +632,24 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       // The anchor survived (possibly as a fresh node): re-seat so it keeps the
       // same offset from the top.
       messageListScroll.scrollTop = reseated.offsetTop - anchorDelta;
+    } else if (firstRowMid) {
+      // No fold anchor survived. Decide top-growth vs bottom-growth from the
+      // topmost mounted row's SCREEN position: older history prepended shifts it
+      // DOWN (hold it -- the rect delta equals the height carried before), a
+      // tail append leaves it PUT (delta ~0, no move), so a message arriving
+      // while the reader sits in history never shoves the view down a row. When
+      // that row is gone (a trim, a chat switch), fall back to carrying the
+      // scrollHeight growth as before.
+      const fa = messageListInner.querySelector<HTMLElement>(
+        `.cyc-message[data-mid="${CSS.escape(firstRowMid)}"]`
+      );
+      if (fa) {
+        const delta = fa.getBoundingClientRect().top - boxTop - firstRowScreenTop;
+        if (Math.abs(delta) > 0.5) messageListScroll.scrollTop += delta;
+      } else {
+        const grew = messageListScroll.scrollHeight - hBefore;
+        if (grew) messageListScroll.scrollTop = messageListScroll.scrollTop + grew;
+      }
     } else {
       // The anchor is gone -- an upward-growing list shifted its history down by
       // the height added at the top, so carry that growth into the offset.
@@ -658,6 +704,9 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   };
 
   const scrollToBottom = () => {
+    // The render bracket already pinned this frame: a second write here would
+    // fire a redundant scroll event and re-window.
+    if (bracketPinGuard) return;
     silentScrollTo(messageListScroll.scrollHeight, 'toBottom');
   };
 
