@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  unitEnvFromCat, showEnvironment, diffLines, bunVersionNote, runDoctor, bridgeLine,
+  unitEnvFromCat, showEnvironment, diffLines, bunVersionNote, runDoctor, bridgeLine, bridgeAutocompactLine,
   type DoctorIO,
 } from "./doctor.ts";
 
@@ -169,4 +169,14 @@ test("pi bridge: the setting without the patched code FAILs; patched or unset pa
   expect((await bridgeLine(files("settings.oneMByDefault &&", on)))!.ok).toBe(true);
   expect((await bridgeLine(files("const x = 1", null)))!.ok).toBe(true);
   expect(await bridgeLine(files(null, on))).toBeNull();
+});
+
+test("pi bridge: index.ts without the autocompact-loop fix FAILs; with it passes; no bridge, no line", async () => {
+  const IDX = "/home/tester/.pi/agent/npm/node_modules/pi-claude-bridge/src/index.ts";
+  const files = (index: string | null) => io("", {
+    readFile: async (p) => (p === IDX ? index : null),
+  });
+  expect((await bridgeAutocompactLine(files("const x = 1")))!.ok).toBe(false);
+  expect((await bridgeAutocompactLine(files("queryCtx.abortForCompaction = onAbort")))!.ok).toBe(true);
+  expect(await bridgeAutocompactLine(files(null))).toBeNull();
 });

@@ -164,12 +164,28 @@ export function mergePiSettings(
  * patch to the installed bridge, so a reinstall does not quietly drop it. */
 export const PI_BRIDGE_PATCH = path.join("engine", "harness", "pi", "bridge-one-m.patch")
 
+/* pi-claude-bridge auto-compaction loop fix. Auto-compaction (threshold/overflow)
+ * rewrites pi's history but never aborts the agent, so the bridge's long-lived CC
+ * query keeps being fed tool results and re-serves the full pre-compaction context,
+ * re-tripping the threshold forever (observed: 25 back-to-back compactions, cacheRead
+ * pinned at ~800K). The loop is stock v0.8.0 behaviour, present with or without
+ * bridge-one-m.patch. The patch ends the in-flight query on auto-compaction the way a
+ * pi-driven abort does, then re-delivers the pending tool result into a query rebuilt
+ * from the compacted history so an autonomous agent keeps going instead of stalling,
+ * and deletes the rotated-away CC session file each rebuild leaves. Shipped as a
+ * second patch applied after bridge-one-m.patch; both re-apply on reinstall. */
+export const PI_BRIDGE_AUTOCOMPACT_PATCH = path.join("engine", "harness", "pi", "bridge-autocompact.patch")
+
 export function bridgeDirOf(agentDir: string): string {
   return path.join(agentDir, "npm", "node_modules", "pi-claude-bridge")
 }
 
 export function bridgeHasOneM(modelsTs: string): boolean {
   return /\boneMByDefault\b/.test(modelsTs)
+}
+
+export function bridgeHasAutocompactFix(indexTs: string): boolean {
+  return /\babortForCompaction\b/.test(indexTs)
 }
 
 /* claude-bridge.json: turn oneMByDefault on for a Max plan only. An unentitled
@@ -194,34 +210,63 @@ export function mergeBridgeConfig(text: string): { text: string; changed: boolea
   return { text: JSON.stringify(data, null, 2) + "\n", changed: true, note: "set provider.oneMByDefault (Max plan)" }
 }
 
-/* Apply the shipped patch to the installed bridge when its code lacks the
- * setting. Dry-run first: a bridge that moved on (or already merged it in
- * another shape) is reported, never half-patched. */
-function ensureBridgeOneM(bridgeDir: string, repo: string, dry: boolean): void {
-  const modelsTs = path.join(bridgeDir, "src", "models.ts")
-  const text = fs.readFileSync(modelsTs, "utf-8")
-  if (bridgeHasOneM(text)) {
-    console.log("  skip  pi-claude-bridge: already supports oneMByDefault")
+/* Apply a shipped patch to the installed bridge when its code lacks the change.
+ * Dry-run first: a bridge that moved on (or already merged it in another shape)
+ * is reported, never half-patched. Generic so several patches stack in order --
+ * see the ensureBridge* wrappers below. `label` is echoed verbatim, so the
+ * install log line for a given patch is stable for tests and `cyc doctor`. */
+function ensureBridgePatch(
+  bridgeDir: string,
+  repo: string,
+  dry: boolean,
+  spec: { label: string; patch: string; detectFile: string; detect: (text: string) => boolean; skipNote: string },
+): void {
+  const detectPath = path.join(bridgeDir, "src", spec.detectFile)
+  const text = fs.readFileSync(detectPath, "utf-8")
+  if (spec.detect(text)) {
+    console.log(`  skip  pi-claude-bridge: ${spec.skipNote}`)
     return
   }
-  const patchFile = path.join(repo, PI_BRIDGE_PATCH)
+  const patchFile = path.join(repo, spec.patch)
   const run = (extra: string[]) =>
     Bun.spawnSync(["patch", "-p1", "--forward", "--batch", "--no-backup-if-mismatch", ...extra, "-i", patchFile], {
       cwd: bridgeDir, stdout: "pipe", stderr: "pipe",
     })
   const check = run(["--dry-run"])
   if (check.exitCode !== 0) {
-    console.log("  WARN  pi-claude-bridge: oneMByDefault patch does not apply to this version; unmeasured models stay at 200K")
+    console.log(`  WARN  pi-claude-bridge: ${spec.label} patch does not apply to this version`)
     return
   }
   if (dry) {
-    console.log(`  would patch ${bridgeDir} (oneMByDefault)`)
+    console.log(`  would patch ${bridgeDir} (${spec.label})`)
     return
   }
   const res = run([])
   console.log(res.exitCode === 0
-    ? "  ok    pi-claude-bridge: applied the oneMByDefault patch"
-    : "  WARN  pi-claude-bridge: oneMByDefault patch failed; unmeasured models stay at 200K")
+    ? `  ok    pi-claude-bridge: applied the ${spec.label} patch`
+    : `  WARN  pi-claude-bridge: ${spec.label} patch failed`)
+}
+
+function ensureBridgeOneM(bridgeDir: string, repo: string, dry: boolean): void {
+  ensureBridgePatch(bridgeDir, repo, dry, {
+    label: "oneMByDefault",
+    patch: PI_BRIDGE_PATCH,
+    detectFile: "models.ts",
+    detect: bridgeHasOneM,
+    skipNote: "already supports oneMByDefault",
+  })
+}
+
+/* Auto-compaction loop fix. Applied after oneMByDefault; its index.ts hunks sit
+ * away from the oneMByDefault hunk, so order is safe either way. */
+function ensureBridgeAutocompact(bridgeDir: string, repo: string, dry: boolean): void {
+  ensureBridgePatch(bridgeDir, repo, dry, {
+    label: "autocompact-loop",
+    patch: PI_BRIDGE_AUTOCOMPACT_PATCH,
+    detectFile: "index.ts",
+    detect: bridgeHasAutocompactFix,
+    skipNote: "already has the autocompact-loop fix",
+  })
 }
 
 /* config.toml: append [mcp_servers.callyourcode]. Shape captured from a real
@@ -653,6 +698,7 @@ export function installPi(opts: { home: string; repo: string; dry: boolean }): v
   const bridgeDir = bridgeDirOf(agentDir)
   if (fs.existsSync(path.join(bridgeDir, "src", "models.ts"))) {
     ensureBridgeOneM(bridgeDir, repo, dry)
+    if (fs.existsSync(path.join(bridgeDir, "src", "index.ts"))) ensureBridgeAutocompact(bridgeDir, repo, dry)
     const cfgFile = path.join(agentDir, "claude-bridge.json")
     const cfgText = fs.existsSync(cfgFile) ? fs.readFileSync(cfgFile, "utf-8") : ""
     const cfg = mergeBridgeConfig(cfgText) // invalid JSON crashes loud

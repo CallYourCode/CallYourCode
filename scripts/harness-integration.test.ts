@@ -25,7 +25,9 @@ import {
   mergePiSettings,
   mergeBridgeConfig,
   bridgeHasOneM,
+  bridgeHasAutocompactFix,
   PI_BRIDGE_PATCH,
+  PI_BRIDGE_AUTOCOMPACT_PATCH,
   MCP_LAUNCHER,
 } from "./harness-integration.ts"
 import { CallYourCode } from "../engine/harness/opencode/callyourcode.ts"
@@ -1133,16 +1135,24 @@ test("bridge config: Max plan gets oneMByDefault; others and explicit values are
   expect(() => mergeBridgeConfig(JSON.stringify({ provider: [] }))).toThrow()
 })
 
-/* A bridge the patch applies to: each file is the pre-image of its hunks,
- * which is all `patch` matches against. */
+/* A bridge both shipped patches apply to: each file is the pre-image of its
+ * hunks, which is all `patch` matches against. A file touched by more than one
+ * patch (index.ts) gets each patch's pre-image blocks concatenated -- the hunks
+ * sit in distinct regions, so `patch` finds each by context. */
 function seedBridge(agentDir: string): string {
   const dir = join(agentDir, "npm", "node_modules", "pi-claude-bridge")
-  const patch = readFileSync(join(REPO, PI_BRIDGE_PATCH), "utf-8")
-  for (const part of patch.split(/^diff --git /m).slice(1)) {
-    const file = part.match(/^\+\+\+ b\/(\S+)/m)![1]
-    const pre = part.split("\n").filter((l) => /^[ -]/.test(l) && !l.startsWith("---")).map((l) => l.slice(1))
+  const byFile = new Map<string, string[]>()
+  for (const patchRel of [PI_BRIDGE_PATCH, PI_BRIDGE_AUTOCOMPACT_PATCH]) {
+    const patch = readFileSync(join(REPO, patchRel), "utf-8")
+    for (const part of patch.split(/^diff --git /m).slice(1)) {
+      const file = part.match(/^\+\+\+ b\/(\S+)/m)![1]
+      const pre = part.split("\n").filter((l) => /^[ -]/.test(l) && !l.startsWith("---")).map((l) => l.slice(1))
+      byFile.set(file, [...(byFile.get(file) ?? []), ...pre])
+    }
+  }
+  for (const [file, lines] of byFile) {
     mkdirSync(join(dir, file, ".."), { recursive: true })
-    writeFileSync(join(dir, file), pre.join("\n") + "\n")
+    writeFileSync(join(dir, file), lines.join("\n") + "\n")
   }
   return dir
 }
@@ -1153,13 +1163,17 @@ test("cli pi: patches an unpatched bridge once, sets oneMByDefault for Max, then
   const bridge = seedBridge(agentDir)
   writeFileSync(join(agentDir, "claude-bridge.json"), JSON.stringify({ provider: { plan: "max" } }))
   expect(bridgeHasOneM(readFileSync(join(bridge, "src", "models.ts"), "utf-8"))).toBe(false)
+  expect(bridgeHasAutocompactFix(readFileSync(join(bridge, "src", "index.ts"), "utf-8"))).toBe(false)
   const first = await runInstaller(home, [], "pi")
   expect(first.code).toBe(0)
   expect(first.out).toContain("applied the oneMByDefault patch")
+  expect(first.out).toContain("applied the autocompact-loop patch")
   expect(bridgeHasOneM(readFileSync(join(bridge, "src", "models.ts"), "utf-8"))).toBe(true)
+  expect(bridgeHasAutocompactFix(readFileSync(join(bridge, "src", "index.ts"), "utf-8"))).toBe(true)
   expect(JSON.parse(readFileSync(join(agentDir, "claude-bridge.json"), "utf-8")).provider.oneMByDefault).toBe(true)
   const second = await runInstaller(home, [], "pi")
   expect(second.out).toContain("already supports oneMByDefault")
+  expect(second.out).toContain("already has the autocompact-loop fix")
   expect(second.out).toContain("provider.oneMByDefault already true")
 })
 
