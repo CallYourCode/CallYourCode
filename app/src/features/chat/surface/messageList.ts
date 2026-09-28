@@ -802,6 +802,42 @@ function reseatForFrontShift(
   return shift;
 }
 
+// A pure front EVICTION: the store's open window is the newest page (a fixed row
+// cap), so a new row arriving at the tail drops the oldest row at the FRONT and
+// every kept row's item index shifts DOWN by k. Nothing moved or changed -- the
+// dropped row and the arrival both sit far outside the viewport -- but the reuse
+// walk below matches the previous frames against the new item slice BY POSITION,
+// and a front shift makes every position mismatch at index 0, dropping the whole
+// window into a from-scratch rebuild that detaches and re-attaches every visible
+// row (the arrival jitter: one row in, the whole list redrawn). Re-find the
+// first mounted MESSAGE row in the reindexed item list to learn k, so the walk
+// can reuse the kept frames at their shifted offset (reuse by id) instead. Read
+// only: the scroll seat is held elsewhere (the render bracket for a reader in
+// history, the bottom pin for a pinned reader), never here, and the selection
+// path takes reseatForFrontShift instead. Returns a NEGATIVE shift for a front
+// trim, or 0 when the front did not move -- a pure tail append, a scroll, a
+// same-index paint, or a front PREPEND (older history, a positive shift), which
+// keeps its existing re-seat path untouched.
+function frontTrimShift(
+  st: RenderState,
+  items: RowItem[],
+  prevFrames: ItemFrame[],
+  prevFromItem: number,
+  sameChat: boolean
+): number {
+  if (!sameChat || !prevFrames.length || !st.virt) return 0;
+  let ap = 0;
+  while (ap < prevFrames.length && !(prevFrames[ap] && frameMessageId(prevFrames[ap]))) ap++;
+  const anchor = prevFrames[ap];
+  if (!anchor || !anchor.node.isConnected) return 0;
+  const id = frameMessageId(anchor)!;
+  const anchorOldItem = prevFromItem + ap;
+  const newPos = findMessageItemIndex(items, id, anchorOldItem);
+  if (newPos < 0) return 0;
+  const shift = newPos - anchorOldItem;
+  return shift < 0 ? shift : 0;
+}
+
 function computeWindow(
   inner: HTMLElement,
   st: RenderState
@@ -1255,9 +1291,16 @@ function paintMessages(
   // learn the item shift, so the reconcile treats the mounted rows as unchanged
   // (kept in place) instead of rebuilding them and dropping the selection. When
   // nothing is selected the prepend takes the pre-existing render-bracket path.
+  // A selection holds its rows across a prepend or a trim by re-seating the
+  // scroll (reseatForFrontShift). With no selection a front EVICTION (the store
+  // dropped its oldest row when this arrival landed) still shifts every kept
+  // row's index down; learn that shift (read only, no re-seat) so the reuse walk
+  // matches the kept frames by identity instead of by their now-stale position
+  // and does not remount the whole window. A front prepend (positive shift) is
+  // left to its existing bracket/selection path.
   const frontShift = holdForSelection
     ? reseatForFrontShift(inner, st, items, rowOfItem, prevFrames, prevFromItem, sameChat)
-    : 0;
+    : frontTrimShift(st, items, prevFrames, prevFromItem, sameChat);
   const reusePrevFrom = prevFromItem + frontShift;
   const win = computeWindow(inner, st);
   const windowed = !!win;
