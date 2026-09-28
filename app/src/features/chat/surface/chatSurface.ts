@@ -548,6 +548,16 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       paint();
       return;
     }
+    // A pinned reader takes the SAME on-screen-anchor hold as a reader in
+    // history: hold the topmost mounted row's seat across the paint, then let the
+    // post-layout pin (the storeBindings rAF and the onListResize re-pin) settle
+    // the view at the true bottom, once, exactly as the live build does. An
+    // earlier revision pinned to the bottom HERE, synchronously, off the
+    // paint-time scrollHeight; on a sliding window that height is a from-estimate
+    // rebuild, so the pin overshot and the later measured-height settle fired a
+    // SECOND re-pin -- two scrolls per message, worse than live's one (D1).
+    // Deferring the pin to after layout lands it once at the settled height.
+    //
     // Pin the on-screen position across the render: anchor to the first message
     // whose top sits at or below the fold, captured immediately before the paint.
     const before = messageListScroll.scrollTop;
@@ -556,6 +566,12 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     // prepend re-window can recreate its node, so it is re-found by mid, not
     // trusted by reference) and its on-screen top BEFORE the paint (rect based).
     const boxTop = messageListScroll.getBoundingClientRect().top;
+    // The topmost mounted message row and its on-screen top, to tell a PREPEND
+    // (older history above the fold shifts it down) apart from a TAIL append (a
+    // message below the fold leaves it exactly where it is) in the fallback below.
+    const firstRow = messageListScroll.querySelector<HTMLElement>('.cyc-message[data-mid]');
+    const firstRowMid = firstRow?.dataset.mid ?? null;
+    const firstRowScreenTop = firstRow ? firstRow.getBoundingClientRect().top - boxTop : 0;
     let anchorMid: string | null = null;
     let anchorDelta = 0;
     let anchorScreenTop = 0;
@@ -604,6 +620,24 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       // The anchor survived (possibly as a fresh node): re-seat so it keeps the
       // same offset from the top.
       messageListScroll.scrollTop = reseated.offsetTop - anchorDelta;
+    } else if (firstRowMid) {
+      // No fold anchor survived. Decide top-growth vs bottom-growth from the
+      // topmost mounted row's SCREEN position: older history prepended shifts it
+      // DOWN (hold it -- the rect delta equals the height carried before), a
+      // tail append leaves it PUT (delta ~0, no move), so a message arriving
+      // while the reader sits in history never shoves the view down a row. When
+      // that row is gone (a trim, a chat switch), fall back to carrying the
+      // scrollHeight growth as before.
+      const fa = messageListInner.querySelector<HTMLElement>(
+        `.cyc-message[data-mid="${CSS.escape(firstRowMid)}"]`
+      );
+      if (fa) {
+        const delta = fa.getBoundingClientRect().top - boxTop - firstRowScreenTop;
+        if (Math.abs(delta) > 0.5) messageListScroll.scrollTop += delta;
+      } else {
+        const grew = messageListScroll.scrollHeight - hBefore;
+        if (grew) messageListScroll.scrollTop = messageListScroll.scrollTop + grew;
+      }
     } else {
       // The anchor is gone -- an upward-growing list shifted its history down by
       // the height added at the top, so carry that growth into the offset.

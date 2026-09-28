@@ -247,6 +247,14 @@ type RenderState = {
   // neither and keeps the fast incremental path.
   lastHeadKey: string | number | null;
   lastRowCount: number;
+  // The item key at index 1 on the previous sync. With the head key it proves the
+  // FRONT of the list is stable across a count change: a new-day prepend changes
+  // index 0, a same-day prepend inserts older rows right after the head date row
+  // and changes index 1 (R10, R11), a front trim changes index 0. When both keys
+  // are unchanged the change is at the tail or middle, which reindexes no front
+  // row, so syncGeom skips the from-index-0 offset-cache rebuild (prepend safety);
+  // a prepend or a front trim still rebuilds.
+  lastSecondKey: string | number | null;
   // The scroll offset this list last committed a window at, plus a flag set only
   // for the duration of a LIVE scroll re-window (the sync fling path). Together
   // they gate the selection hold: a paint holds the current window (touching no
@@ -646,22 +654,45 @@ function syncGeom(inner: HTMLElement, st: RenderState, box: HTMLElement): MsgVir
   const v = ensureVirt(inner, st);
   st.opts!.count = st.rows.length;
   v.setOptions(st.opts as never);
-  // A row-set change (a history prepend, an append, a trim, a chat switch) can
-  // shift indices at the front: force the virtualizer to rebuild its offset
-  // cache from index 0 (by key) so a measurement left pending from the previous
-  // paint cannot leave stale offsets for the shifted rows -- the wrong window
-  // that meets an unmounted row (the row-shift/unmount-while-older-loads bug and
-  // the failed jump to an old message). Bumping the size-cache version re-runs
-  // the memoised measurement build. A pure re-window (a scroll, a measurement
-  // settle) changes neither the count nor the head, so this is skipped and the
-  // fast incremental measurement path stands.
+  // A row-set change (a history prepend, a trim, a chat switch) can shift indices
+  // at the front: force the virtualizer to rebuild its offset cache from index 0
+  // (by key) so a measurement left pending from the previous paint cannot leave
+  // stale offsets for the shifted rows -- the wrong window that meets an unmounted
+  // row (the row-shift/unmount-while-older-loads bug and the failed jump to an old
+  // message). Bumping the size-cache version re-runs the memoised measurement
+  // build. A pure re-window (a scroll, a measurement settle) changes neither the
+  // count nor the head, so this is skipped and the fast incremental measurement
+  // path stands.
+  //
+  // The from-0 rebuild is only NEEDED when the FRONT reindexes -- older history
+  // prepended at index 0 shifts every row below it, and a measurement left
+  // pending would then apply to the wrong row. A change that leaves the FRONT in
+  // place (a message appended at the tail, a tail session-event run refolding,
+  // an edit) reindexes only rows at/after the change point; those are
+  // re-measured on this same paint (they are what the reader at the tail is
+  // looking at), while the rows above keep both their index and their measured
+  // offset. Rebuilding the whole offset cache from index 0 for such a change is
+  // pure cost -- it discards every measured height and re-derives the window from
+  // estimates, churning the mounted rows (the measured 47 drawn / 16 removed on
+  // an arriving message).
+  //
+  // "Front stable" is proven by the first TWO row keys: a new-day prepend changes
+  // the head date row (key 0); a same-day prepend inserts older messages right
+  // after the head date row, changing key 1 (R10, R11); a front trim changes key
+  // 0. A tail/middle change leaves both, so it keeps the fast incremental path.
   const headKey = st.rows.length ? st.rows[0].key : null;
+  const secondKey = st.rows.length > 1 ? st.rows[1].key : null;
+  const frontStable =
+    st.lastRowCount > 0 && headKey === st.lastHeadKey && secondKey === st.lastSecondKey;
   if (headKey !== st.lastHeadKey || st.rows.length !== st.lastRowCount) {
-    const vi = v as unknown as {pendingMin: number | null; itemSizeCacheVersion: number};
-    vi.pendingMin = 0;
-    vi.itemSizeCacheVersion++;
+    if (!frontStable) {
+      const vi = v as unknown as {pendingMin: number | null; itemSizeCacheVersion: number};
+      vi.pendingMin = 0;
+      vi.itemSizeCacheVersion++;
+    }
     st.lastHeadKey = headKey;
     st.lastRowCount = st.rows.length;
+    st.lastSecondKey = secondKey;
   }
   v._willUpdate();
   v.scrollRect = {width: box.clientWidth, height: box.clientHeight};
@@ -1173,6 +1204,7 @@ function paintMessages(
       forceFull: false,
       lastHeadKey: null,
       lastRowCount: -1,
+      lastSecondKey: null,
       lastScrollTop: -1,
       syncScroll: false,
       onWindowChange: null,
