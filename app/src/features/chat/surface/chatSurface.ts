@@ -502,12 +502,6 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   // same amount so what they are reading stays put. No timers on this path.
   const PIN_PX = 4;
   let pinnedToBottom = false;
-  // Set for one frame when the render bracket itself performs the bottom pin on
-  // an appended row, so the post-render rAF pin (storeBindings) and the
-  // onListResize re-pin skip their own scrollToBottom -- one arriving message
-  // then costs exactly one scroll, not the two measured. Cleared on a macrotask,
-  // after this frame's rAF and resize callbacks have run.
-  let bracketPinGuard = false;
   let padTopSeen = 0;
   let pointerHeld = false;
   const notePinAfterWrite = () => {
@@ -554,22 +548,16 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       paint();
       return;
     }
-    // Pinned reader + an appended row: perform the ONE bottom pin here, in the
-    // render frame, and skip the anchor-hold path (that path is for a reader in
-    // history). The post-render rAF pin (storeBindings) and the onListResize
-    // re-pin then find the guard set and skip their own scrollToBottom, so one
-    // arriving message costs exactly one scroll instead of the two measured. The
-    // row measured itself during the paint (commitWindow's measure loop), so
-    // scrollHeight is exact and the pin lands at the true end.
-    if (pinnedToBottom) {
-      paint();
-      silentScrollTo(messageListScroll.scrollHeight);
-      bracketPinGuard = true;
-      setTimeout(() => {
-        bracketPinGuard = false;
-      }, 0);
-      return;
-    }
+    // A pinned reader takes the SAME on-screen-anchor hold as a reader in
+    // history: hold the topmost mounted row's seat across the paint, then let the
+    // post-layout pin (the storeBindings rAF and the onListResize re-pin) settle
+    // the view at the true bottom, once, exactly as the live build does. An
+    // earlier revision pinned to the bottom HERE, synchronously, off the
+    // paint-time scrollHeight; on a sliding window that height is a from-estimate
+    // rebuild, so the pin overshot and the later measured-height settle fired a
+    // SECOND re-pin -- two scrolls per message, worse than live's one (D1).
+    // Deferring the pin to after layout lands it once at the settled height.
+    //
     // Pin the on-screen position across the render: anchor to the first message
     // whose top sits at or below the fold, captured immediately before the paint.
     const before = messageListScroll.scrollTop;
@@ -704,9 +692,6 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   };
 
   const scrollToBottom = () => {
-    // The render bracket already pinned this frame: a second write here would
-    // fire a redundant scroll event and re-window.
-    if (bracketPinGuard) return;
     silentScrollTo(messageListScroll.scrollHeight, 'toBottom');
   };
 
