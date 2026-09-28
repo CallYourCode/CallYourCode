@@ -553,18 +553,80 @@ describe('render-heat: coarse list-row version (fix #2)', () => {
     expect(listPaints(list)).toBe(settled);
   });
 
-  test('a contentVersion-only bump (events or token churn) no longer repaints the list', () => {
+  test('a contentVersion-only bump with no transcript-visible change repaints neither surface (V4 idle quiet)', () => {
     const {hub, list, cs} = mk();
     openList([row({title: {text: 'Claude', detail: null}, messages: [msg()]})]);
     hub.render(true);
     const lp = listPaints(list);
     const cp = chatPaints(cs);
-    // A TUI event or agent-run token tick bumps contentVersion with no
-    // row-visible change: the chat surface repaints, the list stays quiet.
+    // A status/thinking/context tick, an agent-run token tick, or a TUI event
+    // with the overlay off bumps contentVersion but changes nothing the row or
+    // the transcript paints: neither surface repaints. Before the V4 fix the
+    // chat surface repainted here (the bracket re-seated scrollTop every tick),
+    // which is the idle creep the phone logged.
     fake.version = 'v2';
     hub.render(true);
     expect(listPaints(list)).toBe(lp);
+    expect(chatPaints(cs)).toBe(cp);
+  });
+
+  test('a TUI event appended with the overlay OFF does not repaint the chat; with it ON it does', () => {
+    const {hub, cs} = mk();
+    const events = [{uuid: 'e1', ts: 1500, kind: 'tool', text: 'ls'}];
+    fake.overlayOn = false;
+    fake.sessions = [{id: 's1'}];
+    fake.active = {id: 's1', messages: [msg()], events};
+    sessionState.activeId = 's1';
+    hub.render(true);
+    const cp = chatPaints(cs);
+    // Overlay off: the transcript never draws events. An appended event (and the
+    // contentVersion bump it drives) must not repaint or re-seat the transcript.
+    events.push({uuid: 'e2', ts: 2500, kind: 'reply', text: 'done'});
+    fake.version = 'v2';
+    hub.render(true);
+    expect(chatPaints(cs)).toBe(cp);
+    // Overlay on: the transcript draws events, so an appended one repaints it.
+    fake.overlayOn = true;
+    hub.render(true);
+    const on = chatPaints(cs);
+    events.push({uuid: 'e3', ts: 3500, kind: 'reply', text: 'more'});
+    fake.version = 'v3';
+    hub.render(true);
+    expect(chatPaints(cs)).toBe(on + 1);
+  });
+
+  test('a status tick updates the header without repainting the transcript', () => {
+    const {hub, tp, cs} = mk();
+    const base = row({title: {text: 'Claude', detail: null}, status: 'idle', messages: [msg()]});
+    openList([base]);
+    hub.render(true);
+    const cp = chatPaints(cs);
+    const headerUpdate = tp.header.update as ReturnType<typeof vi.fn>;
+    const hu = headerUpdate.mock.calls.length;
+    // The open chat's own agent flaps status while it works. The header must
+    // reflect it (thinking dots, activity dot), but the transcript paints
+    // nothing: 0 scroll writes, 0 rows touched.
+    base.status = 'working';
+    fake.version = 'v2';
+    hub.render(true);
+    expect(headerUpdate.mock.calls.length).toBe(hu + 1);
+    expect(chatPaints(cs)).toBe(cp);
+  });
+
+  test('a streaming growing tail keeps repainting the chat (the gate does not freeze streaming)', () => {
+    const {hub, cs} = mk();
+    const tail = msg({id: 2, ts: 2000, text: 'he', growing: true});
+    openList([row({title: {text: 'Claude', detail: null}, messages: [msg(), tail]})]);
+    hub.render(true);
+    const cp = chatPaints(cs);
+    tail.text = 'hello there, a streamed chunk';
+    fake.version = 'v2';
+    hub.render(true);
     expect(chatPaints(cs)).toBe(cp + 1);
+    tail.text = 'hello there, a streamed chunk, and yet more';
+    fake.version = 'v3';
+    hub.render(true);
+    expect(chatPaints(cs)).toBe(cp + 2);
   });
 
   test('a row reorder DOES repaint the list (order-sensitive surface join)', () => {

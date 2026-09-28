@@ -476,32 +476,100 @@ export function createRenderHub(deps: RenderHubDeps) {
     ].join('\x1f');
   }
   let lastScanKey: string | null = null;
+  // The last transcript paint key: what renderMessages actually drew. The
+  // transcript bracket (the sole writer of the message scroller's scrollTop)
+  // runs only when this changes, so a fields-only sessions tick, an agent-run
+  // token tick, or a TUI event appended with the overlay OFF -- none of which
+  // the transcript paints -- no longer repaints it or nudges its scroll (the V4
+  // idle creep). Null when no chat is open, so the next open always paints.
+  let lastPaintKey: string | null = null;
 
-  // V4 diagnostic (Lane C step 0): the last contentVersion inputs and message
-  // set of the open chat, so a repaint can name what actually changed. Keyed by
-  // session id; a chat switch resets the diff (a fresh id has no prior).
-  type RepaintSnap = {
-    id: string;
-    setSig: string;
-    status: string;
-    thinking: number;
-    turnSince: number;
-    lastActivity: number;
-    contextPct: number;
-  };
+  // V4 diagnostic (Lane C step 0, extended): a snapshot of EVERY chatSurfaceVersion
+  // input for the open chat, so a repaint can name exactly what moved. The first
+  // cut of this diagnostic only diffed five contentVersion sub-fields (status,
+  // thinking, turnSince, lastActivity, contextPct); the phone logged
+  // `chat.repaint set=false changed=""`, i.e. the trigger was NONE of those five,
+  // so the diff had to widen to name the real writer. contentVersion is folded
+  // in pieces here (message body, events, agent-runs) beside the header/list
+  // scalars and the non-content pane inputs, so `changed` can read e.g.
+  // `changed=events` (a TUI event appended with the overlay off) or
+  // `changed=runs` (an agent-run token tick). Keyed by session id; a chat switch
+  // resets the diff (a fresh id has no prior).
+  type RepaintSnap = {id: string; setSig: string; f: Record<string, string | number>};
   let lastRepaint: RepaintSnap | null = null;
-  const repaintSnap = (s: CycSession): RepaintSnap => {
+  const repaintSnap = (s: CycSession, overlayActive: boolean): RepaintSnap => {
+    const es = s as CycEngineSession;
     const msgs = s.messages ?? [];
     const n = msgs.length;
+    // The message body: text length + send state over every bubble, so a
+    // streaming tail or an in-place edit that keeps the count and the endpoints
+    // still perturbs the fingerprint.
+    let body = 0;
+    for (let i = 0; i < n; i++) {
+      const m = msgs[i] as CycMessage & {sendPct?: number};
+      body = (Math.imul(body, 31) + (m.text ? m.text.length : 0)) | 0;
+      body = (Math.imul(body, 31) + statusNum(m.status) + (m.queued ? 8 : 0)) | 0;
+      body = (Math.imul(body, 31) + (typeof m.sendPct === 'number' ? 1 : 0)) | 0;
+    }
+    const ev = es.events ?? [];
+    const evLast = ev.length ? ev[ev.length - 1] : null;
+    const runs = es.agentRuns ?? [];
+    let runFold = 0;
+    for (const r of runs)
+      runFold = (Math.imul(runFold, 31) + (r.endedTs ?? 0) + (r.tokens ? r.tokens.length : 0)) | 0;
+    const d = engine.globalSettings();
     return {
       id: s.id,
       setSig: `${n}|${n ? msgs[0].id : ''}|${n ? msgs[n - 1].id : ''}`,
-      status: s.status ?? '',
-      thinking: s.thinking ? 1 : 0,
-      turnSince: s.turnSince ?? 0,
-      lastActivity: s.lastActivity ?? 0,
-      contextPct: s.contextPct ?? -1
+      f: {
+        msgBody: body,
+        events: `${ev.length}#${evLast ? evLast.ts : -1}`,
+        runs: `${runs.length}#${runFold}`,
+        status: s.status ?? '',
+        thinking: s.thinking ? 1 : 0,
+        turnSince: s.turnSince ?? 0,
+        lastActivity: s.lastActivity ?? 0,
+        contextPct: s.contextPct ?? -1,
+        model: es.model ?? '',
+        subagents: s.subagentsRunning ?? 0,
+        heardTs: es.heardTs ?? 0,
+        historyPending: es.historyPending ? 1 : 0,
+        notOnEngine: es.notOnEngine ? 1 : 0,
+        unread: s.unread | 0,
+        muted: s.muted ? 1 : 0,
+        title: s.title ? s.title.text + '|' + (s.title.detail ?? '') : '',
+        agentLabel: s.agentLabel ?? '',
+        agentName: s.agentName ?? '',
+        name: s.name,
+        avatarUrl: s.avatarUrl ?? '',
+        ask: s.ask ? s.ask.question : '',
+        askUnknown: s.askUnknown ? 1 : 0,
+        order: s.order ?? -1,
+        alive: es.alive === false ? 0 : 1,
+        churnGrey: es.churnGrey ? 1 : 0,
+        overlay: overlayActive ? 1 : 0,
+        dead: isDead(s) ? 1 : 0,
+        reachable: reachable(s) ? 1 : 0,
+        voice: engine.voiceEngineHealthy(s.id) ? 1 : 0,
+        view: deps.mainColumns.dataset.view ?? '',
+        replyLevel: d.replyLevel,
+        complexity: d.complexity,
+        verbosity: d.verbosityOn ? 1 : 0,
+        complexityOn: d.complexityOn ? 1 : 0,
+        speed: tp.speedLabelOf(engine.effectiveSpeed()),
+        cron: tp.cronCountOf(s.id),
+        chatConv: sessionState.chatConversationMode.has(s.id) ? 1 : 0,
+        appConv: sessionState.appConversationMode ? 1 : 0,
+        composer: composerJson(engine.pluginsOf(es.engineKey)).length
+      }
     };
+  };
+  const namedChanges = (snap: RepaintSnap): string[] => {
+    const prev = lastRepaint && lastRepaint.id === snap.id ? lastRepaint : null;
+    if (!prev) return ['open'];
+    const changed: string[] = [];
+    for (const k of Object.keys(snap.f)) if (snap.f[k] !== prev.f[k]) changed.push(k);
+    return changed;
   };
 
   function renderChatPane() {
@@ -522,6 +590,7 @@ export function createRenderHub(deps: RenderHubDeps) {
       tp.refreshCronBadge(null);
       cs.hideChatBusy();
       lastScanKey = null;
+      lastPaintKey = null;
       return;
     }
 
@@ -545,109 +614,130 @@ export function createRenderHub(deps: RenderHubDeps) {
     const es = s as CycEngineSession;
     const overlayActive = dataState.mode === 'live' && engine.overlayOn(s.id);
 
-    // Name why this open-chat repaint ran: which contentVersion inputs moved
-    // and whether the message set itself changed. The bracket below re-seats
-    // scrollTop on every one of these, so this is the writer the V4 idle-creep
-    // chain blames. Rate-limited inside logChatRepaint (1/2s).
-    {
-      const snap = repaintSnap(s);
-      const prev = lastRepaint && lastRepaint.id === s.id ? lastRepaint : null;
-      const changed: string[] = [];
-      if (prev) {
-        if (snap.status !== prev.status) changed.push('status');
-        if (snap.thinking !== prev.thinking) changed.push('thinking');
-        if (snap.turnSince !== prev.turnSince) changed.push('turnSince');
-        if (snap.lastActivity !== prev.lastActivity) changed.push('lastActivity');
-        if (snap.contextPct !== prev.contextPct) changed.push('contextPct');
-      }
+    // The transcript paint gate. chatScanKey folds exactly what renderMessages
+    // draws -- the message set, the unread divider, the visible range, the DOM
+    // epoch, and the overlay events ONLY when the overlay is on -- and none of
+    // the facts the transcript does not paint (status, thinking, context, an
+    // agent-run token tick, or a TUI event appended with the overlay off). It
+    // drops the growing tail's volatile body so the DOM scans skip a stream
+    // chunk; the transcript ITSELF must draw that chunk, so the paint gate is
+    // the scan key plus the tail's live body. When it is unchanged the bracket
+    // -- the sole writer of the message scroller's scrollTop -- does not run, so
+    // an idle open chat neither repaints nor creeps upward (the V4 symptom).
+    const scanKey = chatScanKey(s, overlayActive, es.events);
+    const msgs = s.messages ?? [];
+    const tail = msgs.length
+      ? (msgs[msgs.length - 1] as CycMessage & {
+          growing?: boolean;
+          durationS?: number;
+          sendPct?: number;
+        })
+      : null;
+    const tailBody =
+      tail && tail.growing
+        ? `${tail.text ? tail.text.length : 0}|${tail.durationS ? tail.durationS | 0 : 0}|${
+            typeof tail.sendPct === 'number' ? 1 : 0
+          }`
+        : '';
+    const paintKey = scanKey + '\x1f' + tailBody;
+    const paintChanged = paintKey !== lastPaintKey;
+    lastPaintKey = paintKey;
+
+    if (paintChanged) {
+      // Name why this transcript repaint ran: which chatSurfaceVersion input
+      // moved and whether the message set itself changed. This now fires ONLY on
+      // a real transcript change, so a fields-only tick no longer logs a
+      // set=false repaint. Rate-limited inside logChatRepaint (1/2s).
+      const snap = repaintSnap(s, overlayActive);
+      const changed = namedChanges(snap);
       logChatRepaint({
         session: s.id,
-        set: prev ? snap.setSig !== prev.setSig : true,
+        set: lastRepaint && lastRepaint.id === s.id ? snap.setSig !== lastRepaint.setSig : true,
         rows: s.messages?.length ?? 0,
-        changed: prev ? changed.join(',') : 'open'
+        changed: changed.join(',')
       });
       lastRepaint = snap;
-    }
 
-    cs.bracketMessageRender(s.id, () => {
-      renderMessages(
-        cs.messageListInner,
-        s,
-        audio.onMessagePlay,
-        cs.firstUnread(),
-        audio.onMessageSeek,
-        media.onOpenFileCard,
-        overlayActive ? es.events : undefined,
+      cs.bracketMessageRender(s.id, () => {
+        renderMessages(
+          cs.messageListInner,
+          s,
+          audio.onMessagePlay,
+          cs.firstUnread(),
+          audio.onMessageSeek,
+          media.onOpenFileCard,
+          overlayActive ? es.events : undefined,
 
-        (m) =>
-          m.upload
-            ? (localUploadUrl(m.upload.uploadId) ?? engine.uploadUrl(s.id, m.upload.uploadId))
-            : '',
+          (m) =>
+            m.upload
+              ? (localUploadUrl(m.upload.uploadId) ?? engine.uploadUrl(s.id, m.upload.uploadId))
+              : '',
 
-        (u) => {
-          if (u.image) {
-            // The viewer resolves the picture itself: engine URL as the cache
-            // key, the local object URL looked up live, then the wire.
-            media.openAlbumAt(uploadKey(u.uploadId), {
-              url: engine.uploadUrl(s.id, u.uploadId),
-              name: u.name,
-              local: () => localUploadUrl(u.uploadId)
-            });
-            return;
-          }
-          const url = localUploadUrl(u.uploadId) ?? engine.uploadUrl(s.id, u.uploadId);
-          media.openDocAttachment(u.name, url, u.mime);
-        },
-        (m) => (m.file ? engine.docUrl(s.id, m.file.docId) + '/raw' : ''),
+          (u) => {
+            if (u.image) {
+              // The viewer resolves the picture itself: engine URL as the cache
+              // key, the local object URL looked up live, then the wire.
+              media.openAlbumAt(uploadKey(u.uploadId), {
+                url: engine.uploadUrl(s.id, u.uploadId),
+                name: u.name,
+                local: () => localUploadUrl(u.uploadId)
+              });
+              return;
+            }
+            const url = localUploadUrl(u.uploadId) ?? engine.uploadUrl(s.id, u.uploadId);
+            media.openDocAttachment(u.name, url, u.mime);
+          },
+          (m) => (m.file ? engine.docUrl(s.id, m.file.docId) + '/raw' : ''),
 
-        cs.renderEarlier,
+          cs.renderEarlier,
 
-        (_m, u) => localUploadUrl(u.uploadId) ?? engine.uploadUrl(s.id, u.uploadId)
-      );
-    });
+          (_m, u) => localUploadUrl(u.uploadId) ?? engine.uploadUrl(s.id, u.uploadId)
+        );
+      });
 
-    // The open's first paint is the one the store settled (the cache, or the
-    // engine's replay); a render before that shows leftovers, not the open.
-    if (
-      cs.openPaintIsPending() &&
-      dataState.mode === 'live' &&
-      sessionState.activeId === s.id &&
-      es.paintSource
-    ) {
-      cs.clearOpenPaint();
-      const painted = s.messages;
-      // Order check: the chat must read oldest to newest. Name the first place
-      // it does not, with enough of each row to trace (2026-09-24: August rows
-      // painted after today's on two devices; a fresh client was fine).
-      const inv = painted.findIndex((m, i) => i > 0 && m.ts < painted[i - 1].ts);
-      if (inv > 0) {
-        const brief = (m: (typeof painted)[number]) => ({
-          ts: m.ts,
-          seq: (m as {seq?: number}).seq ?? null,
-          id: String((m as {id?: string}).id ?? '').slice(0, 24),
-          mid: (m as {mid?: string}).mid ?? null,
-          cid: (m as {cid?: string}).cid ?? null,
-          role: m.role
-        });
-        cyclog('chat.order.broken', {
+      // The open's first paint is the one the store settled (the cache, or the
+      // engine's replay); a render before that shows leftovers, not the open.
+      if (
+        cs.openPaintIsPending() &&
+        dataState.mode === 'live' &&
+        sessionState.activeId === s.id &&
+        es.paintSource
+      ) {
+        cs.clearOpenPaint();
+        const painted = s.messages;
+        // Order check: the chat must read oldest to newest. Name the first place
+        // it does not, with enough of each row to trace (2026-09-24: August rows
+        // painted after today's on two devices; a fresh client was fine).
+        const inv = painted.findIndex((m, i) => i > 0 && m.ts < painted[i - 1].ts);
+        if (inv > 0) {
+          const brief = (m: (typeof painted)[number]) => ({
+            ts: m.ts,
+            seq: (m as {seq?: number}).seq ?? null,
+            id: String((m as {id?: string}).id ?? '').slice(0, 24),
+            mid: (m as {mid?: string}).mid ?? null,
+            cid: (m as {cid?: string}).cid ?? null,
+            role: m.role
+          });
+          cyclog('chat.order.broken', {
+            session: s.id,
+            at: inv,
+            count: painted.length,
+            inversions: painted.filter((m, i) => i > 0 && m.ts < painted[i - 1].ts).length,
+            before: JSON.stringify(brief(painted[inv - 1])),
+            after: JSON.stringify(brief(painted[inv]))
+          });
+        }
+        cyclog('chat.painted', {
           session: s.id,
-          at: inv,
+          source: es.paintSource,
           count: painted.length,
-          inversions: painted.filter((m, i) => i > 0 && m.ts < painted[i - 1].ts).length,
-          before: JSON.stringify(brief(painted[inv - 1])),
-          after: JSON.stringify(brief(painted[inv]))
+          range: [
+            painted.length ? painted[0].ts : 0,
+            painted.length ? painted[painted.length - 1].ts : 0
+          ],
+          ms: Date.now() - cs.openPaintStartedAt()
         });
       }
-      cyclog('chat.painted', {
-        session: s.id,
-        source: es.paintSource,
-        count: painted.length,
-        range: [
-          painted.length ? painted[0].ts : 0,
-          painted.length ? painted[painted.length - 1].ts : 0
-        ],
-        ms: Date.now() - cs.openPaintStartedAt()
-      });
     }
 
     const waiting = dataState.mode === 'live' && !es.notOnEngine && !!es.historyPending;
@@ -669,7 +759,6 @@ export function createRenderHub(deps: RenderHubDeps) {
       audio.updateMessagePlays();
     });
 
-    const scanKey = chatScanKey(s, overlayActive, es.events);
     if (scanKey !== lastScanKey) {
       lastScanKey = scanKey;
       deps.hydrateWaveforms();
