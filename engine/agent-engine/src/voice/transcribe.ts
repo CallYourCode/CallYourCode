@@ -62,6 +62,24 @@ export function isTimeoutAbort(e: unknown): boolean {
   return !!e && typeof e === "object" && (e as { name?: unknown }).name === "TimeoutError";
 }
 
+/* WAITING OUT A BUSY VOICE ENGINE rather than failing the note (#stt-busy).
+ *
+ * The voice engine answers 503 the moment its batch slots are full (#551), and
+ * the rescue used to treat that as "could not read the clip" and ship
+ * "(voice note: transcription failed)": a seven-second note behind one 166 s
+ * upload was lost after a single two-second try. A 503 is not a failure, it is
+ * "wait your turn", so the POST is retried with a climbing backoff until a slot
+ * frees -- bounded by the SAME deadline the decode itself already carries
+ * (RESCUE_STT_TIMEOUT_MS for the rescue, WORDS_STT_TIMEOUT_MS for deferred
+ * words), so a wedged-busy engine still gives up and only THEN falls back to the
+ * placeholder. The backoff climbs from MIN to MAX so a short note retries often
+ * enough to grab the slot the instant it frees, without hammering the engine
+ * while it is genuinely working. FIFO ordering is not imposed here: whichever
+ * waiting note wins the next free slot proceeds, which is fine because every
+ * wait is bounded by its own decode deadline. */
+export const STT_BUSY_BACKOFF_MIN_MS = Number(process.env.STT_BUSY_BACKOFF_MIN_MS ?? 500);
+export const STT_BUSY_BACKOFF_MAX_MS = Number(process.env.STT_BUSY_BACKOFF_MAX_MS ?? 5_000);
+
 /* WHAT THE STREAMING DECODER ALREADY SETTLED ON THE DEVICE: the words its
  * live decoder finalized and how far into the audio they reach. This engine
  * then decodes ONLY the tail past `upToS`. Absent means the old contract:
@@ -123,6 +141,103 @@ function timeoutSignal(ms: number): { signal: AbortSignal; done(): void } {
   return { signal: c.signal, done: () => clock.clearTimeout(t) };
 }
 
+/* Sleep `ms` on the injected clock, waking early if `signal` aborts. Used
+ * between 503 retries so the backoff wait is itself bounded by the decode
+ * deadline: the moment the deadline fires the sleep ends and the next fetch
+ * sees an aborted signal. */
+function sleepOn(ms: number, signal: AbortSignal): Promise<void> {
+  const clock = CLOCK();
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    let t: unknown;
+    const onAbort = () => { clock.clearTimeout(t); resolve(); };
+    t = clock.setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/* ONE decode of a clip through the voice engine's POST /stt, waiting out a busy
+ * (503) engine rather than failing the note (#stt-busy).
+ *
+ * Both decode paths -- the rescue (transcribeStored) and deferred words
+ * (sttDecode) -- POST the same shape and want the same 503 handling, so it lives
+ * here once. A 503 means the engine's batch slots are full, not that the clip
+ * could not be read: log `stt.queued`/`stt.retry`, back off on the injected
+ * clock, and try again until a slot frees or `deadlineMs` runs out. The single
+ * timeout signal spans every retry, so the whole wait -- decode plus every
+ * busy-backoff -- is bounded by the one deadline. When it fires the fetch aborts,
+ * which closes the socket and cancels the decode on the voice engine
+ * (`stt.cancelled`). The voice op is recorded once, for the final outcome. */
+async function sttFetch(opts: {
+  url: string; mime: string; body: ArrayBuffer;
+  deadlineMs: number; cid?: string; msgId?: string;
+}): Promise<{ text: string; dropped: string[]; mode?: "salvaged" | "broken" }> {
+  const t0 = performance.now();
+  const bound = timeoutSignal(opts.deadlineMs);
+  let attempt = 0;
+  try {
+    for (;;) {
+      const res = await fetch(opts.url, {
+        method: "POST",
+        headers: { "Content-Type": opts.mime },
+        body: opts.body,
+        signal: bound.signal,
+      });
+      if (res.status === 503) {
+        /* The engine is busy (every batch slot taken). Wait our turn and retry
+         * rather than shipping the placeholder; the backoff is bounded by the
+         * deadline via the shared signal. */
+        const info = await res.json().catch(() => ({} as Record<string, unknown>));
+        const backoff = Math.min(STT_BUSY_BACKOFF_MAX_MS,
+          STT_BUSY_BACKOFF_MIN_MS * 2 ** Math.min(attempt, 8));
+        D().log(attempt === 0 ? "stt.queued" : "stt.retry", {
+          cid: opts.cid, msgId: opts.msgId, attempt: attempt + 1,
+          busy: typeof info?.error === "string" ? info.error : undefined,
+          waitMs: backoff, waitedMs: Math.round(performance.now() - t0) });
+        attempt++;
+        await sleepOn(backoff, bound.signal);
+        continue;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      const text = typeof json?.text === "string" ? json.text.trim() : "";
+      const dropped = Array.isArray(json?.dropped) ? json.dropped.filter((x: unknown) => typeof x === "string") : [];
+      /* The voice engine re-muxed a broken container (task 594): visible in the
+       * voice log rather than shipping as a silent chars=0. */
+      const mode = json?.mode === "salvaged" || json?.mode === "broken" ? json.mode : undefined;
+      const timing = json?.timing ?? {};
+      recordVoiceOp({
+        op: "stt", cid: opts.cid, chars: text.length,
+        queueWaitMs: Number.isFinite(timing.queueMs) ? timing.queueMs : undefined,
+        upstreamMs: Number.isFinite(timing.decodeMs) ? timing.decodeMs : undefined,
+        audioS: Number.isFinite(timing.audioS) ? timing.audioS : undefined,
+        rtf: Number.isFinite(timing.rtf) ? timing.rtf : undefined,
+        mode,
+        engineMs: Math.round(performance.now() - t0),
+        outcome: "ok",
+      });
+      return { text, dropped, mode };
+    }
+  } catch (e) {
+    recordVoiceOp({
+      op: "stt", cid: opts.cid,
+      engineMs: Math.round(performance.now() - t0),
+      outcome: isTimeoutAbort(e) ? "timeout" : "error", err: String(e),
+    });
+    if (isTimeoutAbort(e)) {
+      /* The deadline arrived (in a decode, or while waiting out a busy engine):
+       * the fetch aborted, closing the socket, which tells the voice engine to
+       * cancel the decode instead of burning the decoder on it (#stt-busy). */
+      D().log("stt.cancelled", { cid: opts.cid, msgId: opts.msgId,
+        waitedMs: Math.round(performance.now() - t0),
+        why: "the decode deadline passed; the in-flight decode is cancelled on the voice engine" });
+    }
+    throw e;
+  } finally {
+    bound.done();
+  }
+}
+
 /* HOW LONG DELIVERY HOLDS A WORDLESS NOTE INLINE (#458), raced against the
  * decode itself. It lives here rather than in deliver.ts because the deadline
  * and the decode it bounds are one decision, and because this is the module
@@ -177,44 +292,15 @@ export async function transcribeStored(msgId: string, cid?: string,
   d.log("rescue.start", { cid, msgId, bytes: clip.bytes.byteLength, mime: clip.mime,
     tailOnly: tailOnly || undefined, fromS: tailOnly ? fromS : undefined,
     settledChars: tailOnly ? settled.length : undefined });
-  /* One POST of the stored clip: whole (offsetS 0) or the tail past offsetS. */
+  /* One POST of the stored clip: whole (offsetS 0) or the tail past offsetS. A
+   * busy engine (503) is waited out rather than failed; the wait is bounded by
+   * RESCUE_STT_TIMEOUT_MS (sttFetch, #stt-busy). */
   const post = async (offsetS: number): Promise<{ text: string; dropped: string[] }> => {
-    const t0 = performance.now();
-    const bound = timeoutSignal(RESCUE_STT_TIMEOUT_MS);
-    try {
-      const base = await d.voiceUrl();
-      const url = offsetS > 0 ? `${base}/stt?offset=${encodeURIComponent(offsetS)}` : `${base}/stt`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": clip.mime },
-        body: clip.bytes as unknown as ArrayBuffer,
-        signal: bound.signal,
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      const text = typeof json?.text === "string" ? json.text.trim() : "";
-      const dropped = Array.isArray(json?.dropped) ? json.dropped.filter((x: unknown) => typeof x === "string") : [];
-      const timing = json?.timing ?? {};
-      recordVoiceOp({
-        op: "stt", cid, chars: text.length,
-        queueWaitMs: Number.isFinite(timing.queueMs) ? timing.queueMs : undefined,
-        upstreamMs: Number.isFinite(timing.decodeMs) ? timing.decodeMs : undefined,
-        audioS: Number.isFinite(timing.audioS) ? timing.audioS : undefined,
-        rtf: Number.isFinite(timing.rtf) ? timing.rtf : undefined,
-        engineMs: Math.round(performance.now() - t0),
-        outcome: "ok",
-      });
-      return { text, dropped };
-    } catch (e) {
-      recordVoiceOp({
-        op: "stt", cid,
-        engineMs: Math.round(performance.now() - t0),
-        outcome: isTimeoutAbort(e) ? "timeout" : "error", err: String(e),
-      });
-      throw e;
-    } finally {
-      bound.done();
-    }
+    const base = await d.voiceUrl();
+    const url = offsetS > 0 ? `${base}/stt?offset=${encodeURIComponent(offsetS)}` : `${base}/stt`;
+    const r = await sttFetch({ url, mime: clip.mime, body: clip.bytes as unknown as ArrayBuffer,
+      deadlineMs: RESCUE_STT_TIMEOUT_MS, cid, msgId });
+    return { text: r.text, dropped: r.dropped };
   };
   const finish = (text: string, dropped: string[], mode: DecodeMode): string => {
     /* The floor is the record's now (#550): feed the raw decode in and read
@@ -345,49 +431,16 @@ export async function sweepPendingTranscripts(): Promise<void> {
   if (redriven) console.log(`[rescue] re-drove ${redriven} pending transcript(s) after restart`);
 }
 
-/** POST the clip (whole, or the tail past `offsetS`) to the voice engine. */
+/** POST the clip (whole, or the tail past `offsetS`) to the voice engine. A busy
+ *  engine (503) is waited out, bounded by WORDS_STT_TIMEOUT_MS (sttFetch,
+ *  #stt-busy). */
 export async function sttDecode(u: UploadRec, offsetS: number, cid?: string):
   Promise<{ text: string; dropped: string[]; mode?: "salvaged" | "broken" }> {
   const base = await D().voiceUrl();
   const url = offsetS > 0 ? `${base}/stt?offset=${encodeURIComponent(offsetS)}` : `${base}/stt`;
-  const t0 = performance.now();
-  const bound = timeoutSignal(WORDS_STT_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": u.mime || "audio/webm" },
-      body: (await Bun.file(u.path).arrayBuffer()) as unknown as ArrayBuffer,
-      signal: bound.signal,
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    const text = typeof json?.text === "string" ? json.text.trim() : "";
-    const dropped = Array.isArray(json?.dropped) ? json.dropped.filter((x: unknown) => typeof x === "string") : [];
-    /* The voice engine re-muxed a broken container (task 594): visible in the
-     * voice log rather than shipping as a silent chars=0. */
-    const mode = json?.mode === "salvaged" || json?.mode === "broken" ? json.mode : undefined;
-    const timing = json?.timing ?? {};
-    recordVoiceOp({
-      op: "stt", cid, chars: text.length,
-      queueWaitMs: Number.isFinite(timing.queueMs) ? timing.queueMs : undefined,
-      upstreamMs: Number.isFinite(timing.decodeMs) ? timing.decodeMs : undefined,
-      audioS: Number.isFinite(timing.audioS) ? timing.audioS : undefined,
-      rtf: Number.isFinite(timing.rtf) ? timing.rtf : undefined,
-      mode,
-      engineMs: Math.round(performance.now() - t0),
-      outcome: "ok",
-    });
-    return { text, dropped, mode };
-  } catch (e) {
-    recordVoiceOp({
-      op: "stt", cid,
-      engineMs: Math.round(performance.now() - t0),
-      outcome: isTimeoutAbort(e) ? "timeout" : "error", err: String(e),
-    });
-    throw e;
-  } finally {
-    bound.done();
-  }
+  const body = (await Bun.file(u.path).arrayBuffer()) as unknown as ArrayBuffer;
+  return sttFetch({ url, mime: u.mime || "audio/webm", body,
+    deadlineMs: WORDS_STT_TIMEOUT_MS, cid });
 }
 
 /** Read one uploaded recording off this engine's own disk. Tail-only when the

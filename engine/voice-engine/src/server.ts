@@ -50,6 +50,7 @@ import {
 import { unbackedStock, unbackedStockAfter } from "./stt/stock";
 import { flattenTranscript } from "./stt/transcript";
 import { BatchGate } from "./stt/batch-gate";
+import { DecodeHub, abortError } from "./stt/inflight";
 import { defaultTtsSelfCheck, resolveTtsRestartCooldownMs, runTtsSelfCheck } from "./tts/tts-watchdog";
 import { SherpaBackend } from "./backend/sherpa";
 import { refuseOutsider } from "./gate";
@@ -135,6 +136,29 @@ const SALVAGE_PROBE_S = Number(process.env.VOICE_SALVAGE_PROBE_S ?? 2);
 const SALVAGE_BYTES_PER_S = Number(process.env.VOICE_SALVAGE_BYTES_PER_S ?? 12_000);
 
 const batchGate = new BatchGate(BATCH_MAX);
+
+// Deduplicate concurrent identical decodes and cancel one nobody is waiting for
+// (#stt-busy, stt/inflight.ts). The three-way pile-up on one 166.6 s clip that
+// starved the short notes on 2026-09-28 collapses to a single decode here.
+const decodeHub = new DecodeHub();
+
+/** A stable key for a decode request: the exact bytes and the ?offset. Two
+ *  requests with this key produce the same transcript, so the second joins the
+ *  first rather than starting a rival decode. */
+function decodeKey(bytes: Uint8Array, offsetS: number): string {
+  return `${offsetS}:${bytes.byteLength}:${Bun.hash(bytes)}`;
+}
+
+/** Thrown from inside the decode work when no batch slot came free within the
+ *  queue wait: the engine is full, and the caller should see a 503. Carried as a
+ *  class (not a plain 503 return) because the return path now runs one level
+ *  down, inside the hub's `work`. */
+class BusyError extends Error {
+  constructor(readonly inFlight: number, readonly queued: number) {
+    super(`voice engine busy: ${inFlight} decoding, ${queued} queued`);
+    this.name = "BusyError";
+  }
+}
 
 // ------------------------------------------------------------- self-check
 // A real inference round trip through the batch path, so /health stops lying
@@ -237,7 +261,7 @@ function rollRtf(r: Rolling, computeS: number, audioS: number) {
  * the 2 GB ceiling. Decoding to a temp file and reading the file back allocates
  * exactly the wav's bytes (measured: 9 MB, rss flat), so the decoder's own
  * memory is the audio and nothing more. */
-async function decodeWindow(tmp: string, startS: number, durS: number): Promise<Uint8Array> {
+async function decodeWindow(tmp: string, startS: number, durS: number, signal?: AbortSignal): Promise<Uint8Array> {
   const out = join(tmpdir(), `voice-engine-win-${crypto.randomUUID()}.wav`);
   const proc = Bun.spawn(
     [
@@ -268,11 +292,18 @@ async function decodeWindow(tmp: string, startS: number, durS: number): Promise<
     killed = true;
     try { proc.kill(9); } catch {}
   }, FFMPEG_TIMEOUT_MS);
+  // The caller gave up mid-decode (#stt-busy): kill this ffmpeg now rather than
+  // letting it run the window out for nobody.
+  const onAbort = () => { try { proc.kill(9); } catch {} };
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const [err, code] = await Promise.all([
       new Response(proc.stderr).text(),
       proc.exited,
     ]);
+    if (signal?.aborted) {
+      throw abortError(signal.reason);
+    }
     if (killed) {
       throw new Error(`ffmpeg timed out after ${FFMPEG_TIMEOUT_MS}ms and was killed`);
     }
@@ -280,6 +311,7 @@ async function decodeWindow(tmp: string, startS: number, durS: number): Promise<
     return new Uint8Array(await Bun.file(out).arrayBuffer());
   } finally {
     clearTimeout(killTimer);
+    signal?.removeEventListener("abort", onAbort);
     // Ensure the child is dead on EVERY exit path, including a throw from
     // reading the file back: a live ffmpeg outliving its request is the leak.
     try { proc.kill(9); } catch {}
@@ -340,7 +372,7 @@ async function salvageContainer(tmp: string): Promise<string | null> {
  * used to be all of `transcribe()`; now it runs once per outer window (see
  * `transcribe`), and its own memory -- the trim copy and the parts -- is bounded
  * by one window rather than by the clip. */
-async function transcribeWav(wav: Uint8Array): Promise<{ texts: string[]; dropped: string[]; audioS: number }> {
+async function transcribeWav(wav: Uint8Array, signal?: AbortSignal): Promise<{ texts: string[]; dropped: string[]; audioS: number }> {
   // Never hand the decoder silence. Whisper loops on it: the user's own
   // 94.2 s capture with a 25 s pause in it decodes correctly up to the pause
   // and then says "and" eighty-odd times, losing everything he said after
@@ -370,6 +402,9 @@ async function transcribeWav(wav: Uint8Array): Promise<{ texts: string[]; droppe
   const texts: string[] = [];
   const dropped: string[] = [];
   for (const part of parts) {
+    // The caller gave up (see runWindows): stop between parts rather than
+    // decoding the rest of a clip nobody is waiting for (#stt-busy).
+    if (signal?.aborted) throw abortError(signal.reason);
     // Bound the decode. The retry-ladder bound (temperature_inc=0) used to
     // ride this request as a form field for the retired python whisper server,
     // which applied it on every batch call. The WHY survives that stack:
@@ -422,7 +457,7 @@ async function transcribeWav(wav: Uint8Array): Promise<{ texts: string[]; droppe
  * so the source is always a real file on disk. Decodes WINDOW_S windows from
  * `startFrom`, trims/splits/transcribes each and releases it before the next, so
  * peak memory is one window (see the #449 note on `transcribe`). */
-async function runWindows(source: string, startFrom: number):
+async function runWindows(source: string, startFrom: number, signal?: AbortSignal):
   Promise<{ texts: string[]; dropped: string[]; audioS: number }> {
   const winSamples = (WINDOW_S + WINDOW_SEARCH_S) * 16000;
   const texts: string[] = [];
@@ -430,7 +465,12 @@ async function runWindows(source: string, startFrom: number):
   let start = startFrom > 0 ? startFrom : 0;
   let audioS = 0;
   for (let win = 0; ; win++) {
-    const wav = await decodeWindow(source, start, WINDOW_S + WINDOW_SEARCH_S);
+    // The caller gave up (its deadline passed and it closed the socket): stop
+    // decoding this clip rather than burning the decoder on windows nobody will
+    // read (#stt-busy). A whole 166 s note is 7 parts across its windows, so
+    // this bounds the wasted work to at most the part in flight.
+    if (signal?.aborted) throw abortError(signal.reason);
+    const wav = await decodeWindow(source, start, WINDOW_S + WINDOW_SEARCH_S, signal);
     const pcm = parseWav(wav);
     // Nothing decodable past here: either the clean end of the clip, or a wav
     // this engine does not touch (which the whole-clip path passed through
@@ -438,7 +478,7 @@ async function runWindows(source: string, startFrom: number):
     // decode", so hand the raw bytes to the trim/split path exactly as before.
     if (!pcm) {
       if (win === 0) {
-        const r = await transcribeWav(wav);
+        const r = await transcribeWav(wav, signal);
         texts.push(...r.texts); dropped.push(...r.dropped); audioS += r.audioS;
       }
       break;
@@ -454,14 +494,14 @@ async function runWindows(source: string, startFrom: number):
       // The tail of the clip (and, for a clip that fits in one window, the
       // whole of it). No seam to cut, so hand the decoded bytes straight to
       // the trim/split path -- byte-for-byte the request the old code made.
-      const r = await transcribeWav(wav);
+      const r = await transcribeWav(wav, signal);
       texts.push(...r.texts); dropped.push(...r.dropped); audioS += r.audioS;
       break;
     }
     // A full window: more audio remains, so cut the seam at the quietest frame
     // past WINDOW_S and carry nothing over into the next window.
     const cut = outerWindowCut(pcm.samples);
-    const r = await transcribeWav(writeWav(pcm.samples.subarray(0, cut)));
+    const r = await transcribeWav(writeWav(pcm.samples.subarray(0, cut)), signal);
     texts.push(...r.texts); dropped.push(...r.dropped); audioS += r.audioS;
     console.log(`[stt] window ${win} decoded ${(cut / 16000).toFixed(1)}s from ${start.toFixed(1)}s`);
     start += cut / 16000;
@@ -502,14 +542,14 @@ function looksBroken(audioS: number, bytes: number): boolean {
  * min) and the transcript is the windows concatenated in order. A clip that fits
  * in one window takes exactly the path -- and produces exactly the bytes -- it
  * did before. */
-async function transcribe(bytes: Uint8Array, offsetS = 0):
+async function transcribe(bytes: Uint8Array, offsetS = 0, signal?: AbortSignal):
   Promise<{ text: string; dropped: string[]; audioS: number; computeMs: number;
     mode: "normal" | "salvaged" | "broken" }> {
   const tmp = join(tmpdir(), `voice-engine-${crypto.randomUUID()}`);
   await Bun.write(tmp, bytes);
   const t0 = performance.now();
   try {
-    let result = await runWindows(tmp, offsetS);
+    let result = await runWindows(tmp, offsetS, signal);
     let mode: "normal" | "salvaged" | "broken" = "normal";
 
     /* A BROKEN CONTAINER GETS ONE TOLERANT RE-MUX (task 594). The ordinary
@@ -522,7 +562,7 @@ async function transcribe(bytes: Uint8Array, offsetS = 0):
       const repaired = await salvageContainer(tmp);
       if (repaired) {
         try {
-          const salv = await runWindows(repaired, offsetS);
+          const salv = await runWindows(repaired, offsetS, signal);
           if (salv.audioS > result.audioS) {
             console.log(`[stt] salvaged broken container: ${result.audioS.toFixed(2)}s -> ${salv.audioS.toFixed(2)}s`);
             result = salv;
@@ -1197,48 +1237,76 @@ async function handleHttp(req: Request, server: import("bun").Server): Promise<R
      * never crash a transcription. */
     const rawOffset = Number(url.searchParams.get("offset"));
     const offsetS = Number.isFinite(rawOffset) && rawOffset > 0 ? rawOffset : 0;
-    /* BOUND THE CONCURRENCY (#551). At most BATCH_MAX decodes run at once; a
-     * request that cannot get a slot within BATCH_QUEUE_WAIT_MS fails LOUDLY
-     * with 503 instead of queueing behind a wedge for ever. The slot is
-     * released on EVERY exit path below (the finally), so a request that throws
-     * between acquire and release cannot leak one -- which is the shape that let
-     * the old unbounded path pile up hung decodes until the engine wedged. */
-    /* The wait for a decode slot is part of "why was stt slow", so it is
-     * measured from the request arriving to the slot being granted and handed
-     * back to the caller (agent-engine logs the split, #575). */
-    const tReq = performance.now();
-    const got = await batchGate.acquire(BATCH_QUEUE_WAIT_MS);
-    const queueMs = performance.now() - tReq;
-    if (!got) {
-      return json({ error: `voice engine busy: ${batchGate.inFlight} decoding, ${batchGate.queued} queued` }, 503);
-    }
+    /* NEVER DECODE THE SAME CLIP TWICE AT ONCE (#stt-busy). Identical concurrent
+     * requests -- the agent engine's deferred-words POST and the app's own batch
+     * fallback carried the same bytes and each held a slot -- join one decode
+     * through the hub. `req.signal` fires on client disconnect, so a caller that
+     * gives up (the agent's deadline) stops burning the decoder once no joiner is
+     * left waiting on it. A joined caller takes no slot: the gate is acquired
+     * INSIDE the work below, only by the caller that starts the decode. */
+    const key = decodeKey(bytes, offsetS);
     try {
-      const raw = await transcribe(bytes, offsetS);
-      const { text, corrections } = correct(raw.text, vocab);
-      /* Additive timing so the caller can log queue vs decode rather than only
-       * its own wall time. `rtf` is null when nothing decodable was found
-       * (audioS 0), the same guard rollRtf uses. Existing readers take `text`
-       * and `dropped` and never look here, so the shape is safe. */
-      const rtf = raw.audioS > 0 ? raw.computeMs / 1000 / raw.audioS : null;
-      return json({
-        text, corrections, dropped: raw.dropped,
-        // "salvaged" when a broken container was re-muxed to recover its audio,
-        // "broken" when it read broken and nothing more could be salvaged; the
-        // caller logs it so restart-corrupt notes are visible (task 594). Omitted
-        // on the ordinary path so existing readers see the shape unchanged.
-        mode: raw.mode === "normal" ? undefined : raw.mode,
-        timing: {
-          queueMs: Math.round(queueMs),
-          decodeMs: Math.round(raw.computeMs),
-          audioS: Number(raw.audioS.toFixed(2)),
-          rtf: rtf === null ? null : Number(rtf.toFixed(3)),
-        },
+      const { result, joined } = await decodeHub.run(key, req.signal, async (signal) => {
+        /* BOUND THE CONCURRENCY (#551). At most BATCH_MAX decodes run at once; a
+         * request that cannot get a slot within BATCH_QUEUE_WAIT_MS fails LOUDLY
+         * with 503 instead of queueing behind a wedge for ever. The slot is
+         * released on EVERY exit path below (the finally), so a request that
+         * throws between acquire and release cannot leak one -- which is the
+         * shape that let the old unbounded path pile up hung decodes until the
+         * engine wedged. */
+        /* The wait for a decode slot is part of "why was stt slow", so it is
+         * measured from the request arriving to the slot being granted and
+         * handed back to the caller (agent-engine logs the split, #575). */
+        const tReq = performance.now();
+        const got = await batchGate.acquire(BATCH_QUEUE_WAIT_MS);
+        const queueMs = performance.now() - tReq;
+        if (!got) throw new BusyError(batchGate.inFlight, batchGate.queued);
+        try {
+          if (signal.aborted) throw abortError(signal.reason);
+          const raw = await transcribe(bytes, offsetS, signal);
+          const { text, corrections } = correct(raw.text, vocab);
+          /* Additive timing so the caller can log queue vs decode rather than
+           * only its own wall time. `rtf` is null when nothing decodable was
+           * found (audioS 0), the same guard rollRtf uses. Existing readers take
+           * `text` and `dropped` and never look here, so the shape is safe. */
+          const rtf = raw.audioS > 0 ? raw.computeMs / 1000 / raw.audioS : null;
+          return {
+            text, corrections, dropped: raw.dropped,
+            // "salvaged" when a broken container was re-muxed to recover its
+            // audio, "broken" when it read broken and nothing more could be
+            // salvaged; the caller logs it so restart-corrupt notes are visible
+            // (task 594). Omitted on the ordinary path so existing readers see
+            // the shape unchanged.
+            mode: raw.mode === "normal" ? undefined : raw.mode,
+            timing: {
+              queueMs: Math.round(queueMs),
+              decodeMs: Math.round(raw.computeMs),
+              audioS: Number(raw.audioS.toFixed(2)),
+              rtf: rtf === null ? null : Number(rtf.toFixed(3)),
+            },
+          };
+        } finally {
+          batchGate.release();
+        }
       });
+      if (joined) console.log(`[stt] joined an in-flight decode of an identical clip; no second decode ran`);
+      return json(result);
     } catch (e) {
+      if (e instanceof BusyError) {
+        return json({ error: `voice engine busy: ${e.inFlight} decoding, ${e.queued} queued` }, 503);
+      }
+      /* The caller gave up and closed the socket (the agent engine's deadline).
+       * The decode was cancelled and its slot freed; nobody is listening for
+       * this response, so it only needs to be a clean, quiet non-answer. Keyed on
+       * the request's OWN signal, not the error name: an internal decode timeout
+       * (a wedged whisper) also throws an abort-shaped error but is a real 502
+       * the caller is still waiting to hear, not a client that went away. */
+      if (req.signal.aborted) {
+        console.log(`[stt] cancelled: the caller gave up before the decode finished`);
+        return json({ error: "cancelled" }, 499);
+      }
       console.error("[stt]", e);
       return json({ error: String(e) }, 502);
-    } finally {
-      batchGate.release();
     }
   }
 
