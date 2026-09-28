@@ -590,7 +590,17 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
         ? messageListInner.querySelector<HTMLElement>(`.cyc-message[data-mid="${CSS.escape(anchorMid)}"]`)
         : null;
     const reseated = findAnchor();
-    if (reseated) {
+    // The paint already re-seated the scroll itself (messageList's front-prepend
+    // hold, which rides the virtualizer's measured offsets): defer to it. The
+    // offsetTop math below cannot preserve a prepend anyway -- row.offsetTop is
+    // measured against the row's positioned GROUP, not the scroll content, so a
+    // prepend that pushes the whole group down leaves offsetTop unchanged and
+    // this computes a zero move, snapping the view back to the top. When the
+    // paint left scrollTop where it was (an append, an edit, a growing reply),
+    // this holds the anchor as before.
+    if (messageListScroll.scrollTop !== before) {
+      // paint moved it: keep the paint's re-seat.
+    } else if (reseated) {
       // The anchor survived (possibly as a fresh node): re-seat so it keeps the
       // same offset from the top.
       messageListScroll.scrollTop = reseated.offsetTop - anchorDelta;

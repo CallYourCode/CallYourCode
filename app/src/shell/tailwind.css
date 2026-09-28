@@ -1,4 +1,17 @@
-@import 'tailwindcss';
+/* Disable Tailwind v4's automatic content detection and scan ONLY the hand-
+ * written sources. Auto-detection walks the whole project and includes the
+ * committed build output (app/dist carries the PREVIOUS bundle so already-open
+ * pages keep loading across a deploy); a class that exists only in that stale
+ * bundle (e.g. a dropped arbitrary utility) then leaked into every fresh CSS
+ * and the committed dist stopped being reproducible from src alone. `@source
+ * not "../../dist"` did not exclude it under the vite plugin, so the sources
+ * are pinned explicitly instead. Paths are relative to this file: src/shell ->
+ * ../../src = app/src and ../../index.html = app/index.html, the only places
+ * the app's markup and class strings live (the plugin pages build their own
+ * CSS). */
+@import 'tailwindcss' source(none);
+@source "../../src";
+@source "../../index.html";
 
 @theme {
   --breakpoint-tab: 34.4375rem;

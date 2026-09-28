@@ -9,7 +9,7 @@ import {
 } from '@tanstack/virtual-core';
 
 import {h} from '@/components/domHelpers';
-import {markMachineTop, logScrollWrite} from './machineScroll';
+import {markMachineTop, isMachineTop, logScrollWrite} from './machineScroll';
 import {syncedAt} from '@/engine/sync';
 import {cyclog} from '@/shared/logging';
 import {DEFAULT_AGENT_NAME} from '../navigation/chatRow';
@@ -247,6 +247,15 @@ type RenderState = {
   // neither and keeps the fast incremental path.
   lastHeadKey: string | number | null;
   lastRowCount: number;
+  // The scroll offset this list last committed a window at, plus a flag set only
+  // for the duration of a LIVE scroll re-window (the sync fling path). Together
+  // they gate the selection hold: a paint holds the current window (touching no
+  // row) while a selection is live UNLESS it is a live scroll that actually
+  // moved the offset -- that one alone re-windows so the list is never frozen
+  // under the reader's own scroll. A store change, a prepend's follow-up, a
+  // settle, and a spurious same-offset range notification all hold.
+  lastScrollTop: number;
+  syncScroll: boolean;
   // Wired by the render hub: after a scroll-driven re-window, re-run the DOM
   // sweeps (waveform hydration, sticky dates, play state) over the freshly
   // mounted rows so a row scrolled into view hydrates like a store paint.
@@ -487,13 +496,20 @@ function scheduleRepaint(inner: HTMLElement, st: RenderState, sync = false): voi
   }
   if (sync) {
     if (st.scheduled) return;
+    // A sync re-window driven by a MACHINE scroll (the front-prepend re-seat,
+    // the render bracket, an open landing) is not the reader scrolling, so it
+    // stays hold-eligible while a selection is live; only a genuine reader
+    // scroll (the offset is not the last machine write) exempts the hold.
+    const sbox = scrollBoxOf(inner);
     st.painting = true;
+    st.syncScroll = !sbox || !isMachineTop(sbox, sbox.scrollTop);
     try {
       anchoredRewindow(inner, st);
       recoverIfUncovered(inner, st);
       st.onWindowChange?.();
     } finally {
       st.painting = false;
+      st.syncScroll = false;
     }
     return;
   }
@@ -651,6 +667,108 @@ function syncGeom(inner: HTMLElement, st: RenderState, box: HTMLElement): MsgVir
   v.scrollRect = {width: box.clientWidth, height: box.clientHeight};
   v.scrollOffset = box.scrollTop;
   return v;
+}
+
+// The stable model key of a mounted frame's row: `m|<id>` for a message row
+// (its data-mid), the row identity for a session-event row (the head of its
+// cacheKey, before the content-version separator). Used to re-find a mounted
+// row after the item list was reindexed by a front prepend. Only message
+// anchors are matched against the item list below, so the mid form is enough.
+function frameMessageId(f: ItemFrame): string | null {
+  return f.node.dataset.mid ?? null;
+}
+
+// True when a non-collapsed selection has at least one end inside the list. A
+// re-window that rebuilds, moves or re-parents rows (even reusing the SAME node
+// out of the detached LRU) detaches the range's container for an instant and
+// the browser collapses the selection -- the reader loses their highlight the
+// moment older history lands (or a message arrives, or a measurement settles).
+// While this holds, a store paint / settle holds the current window verbatim so
+// no row is touched; a real user scroll (isScrolling) still re-windows normally.
+function selectionInList(inner: HTMLElement): boolean {
+  const win = inner.ownerDocument?.defaultView;
+  const sel = win?.getSelection?.();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+  const a = sel.anchorNode;
+  const f = sel.focusNode;
+  return !!((a && inner.contains(a)) || (f && inner.contains(f)));
+}
+
+// The new item index of the message `id`, searching FORWARD from `from` first
+// (older history prepends move a row to a HIGHER index) then the whole list (a
+// front trim moves it lower), or -1 if the message is gone.
+function findMessageItemIndex(items: RowItem[], id: string, from: number): number {
+  for (let i = Math.max(0, from); i < items.length; i++)
+    if (items[i].m && items[i].m!.id === id) return i;
+  for (let i = 0; i < from && i < items.length; i++)
+    if (items[i].m && items[i].m!.id === id) return i;
+  return -1;
+}
+
+// Older STORE history landed at the FRONT: every loaded row still exists but its
+// item index shifted up by the page that arrived. A paint that recomputed its
+// window at the (still pre-re-seat) scroll offset landed on the newly-prepended
+// older rows and rebuilt the whole visible window -- detaching the row nodes and
+// dropping the reader's text selection (3 of 4 rounds), and even when a row
+// survived, moving its day section collapsed the range (the 4th). This detects
+// the shift by re-finding the topmost mounted MESSAGE row in the reindexed item
+// list, then re-seats the scroll box HERE so the window lands on the SAME rows
+// the reader is looking at and the edge reconcile keeps every unchanged row in
+// place (rows are only added at the top edge and trimmed at the bottom). The
+// re-seat rides the virtualizer's measured/estimated offsets (not DOM rects), so
+// it holds under jsdom too. The render bracket cannot do this re-seat itself: it
+// keys off row.offsetTop, which is measured against the row's positioned GROUP,
+// not the scroll content, so a prepend that pushes the whole group down by the
+// top spacer leaves offsetTop unchanged and the bracket computes a zero move --
+// snapping the view back to the top and re-triggering the full rebuild. The
+// bracket now DEFERS to this re-seat (it sees scrollTop already moved).
+// Returns the item shift so the caller can hold the previous window (reindexed),
+// or 0 when there is nothing to preserve (a fresh open, a chat switch, a tail
+// append, a pure scroll, a same-index paint, or a reader sitting at the bottom).
+function reseatForFrontShift(
+  inner: HTMLElement,
+  st: RenderState,
+  items: RowItem[],
+  rowOfItem: number[],
+  prevFrames: ItemFrame[],
+  prevFromItem: number,
+  sameChat: boolean
+): number {
+  if (!sameChat || !st.virt || !prevFrames.length) return 0;
+  const box = scrollBoxOf(inner);
+  if (!box || !box.clientHeight) return 0;
+  // At the bottom the list follows the end, never a top anchor (anchoredRewindow);
+  // a prepend there keeps its bottom pin rather than re-seating upward.
+  if (box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_PIN_PX) return 0;
+  // Anchor on the first mounted message row (a session-event head has no stable
+  // per-item id to match, and the reader's selection lives in a message anyway).
+  let ap = 0;
+  while (ap < prevFrames.length && !(prevFrames[ap] && frameMessageId(prevFrames[ap]))) ap++;
+  const anchor = prevFrames[ap];
+  if (!anchor || !anchor.node.isConnected) return 0;
+  const id = frameMessageId(anchor)!;
+  const anchorOldItem = prevFromItem + ap;
+  const newPos = findMessageItemIndex(items, id, anchorOldItem);
+  if (newPos < 0) return 0;
+  const shift = newPos - anchorOldItem;
+  if (shift === 0) return 0;
+  const v = st.virt;
+  const oldMeas = v.measurementsCache;
+  const oldIdx = Number(anchor.node.dataset.index);
+  const oldStart = (Number.isFinite(oldIdx) && oldMeas[oldIdx]?.start) || 0;
+  const gap = box.scrollTop - oldStart;
+  // Prime the virtualizer on the reindexed model (syncGeom rebuilds the offset
+  // cache from index 0 on a head or count change -- a prepend is exactly that),
+  // then place the anchor's NEW row at the same on-screen offset it held.
+  syncGeom(inner, st, box);
+  const newRowIdx = rowOfItem[newPos];
+  const newStart = v.measurementsCache[newRowIdx]?.start ?? oldStart;
+  const next = Math.max(0, newStart + gap);
+  if (Math.abs(next - box.scrollTop) > 0.5) {
+    box.scrollTop = next;
+    markMachineTop(box);
+  }
+  return shift;
 }
 
 function computeWindow(
@@ -1055,6 +1173,8 @@ function paintMessages(
       forceFull: false,
       lastHeadKey: null,
       lastRowCount: -1,
+      lastScrollTop: -1,
+      syncScroll: false,
       onWindowChange: null,
       nodeCache: new Map()
     };
@@ -1071,6 +1191,7 @@ function paintMessages(
   }
   const prevFrames = sameChat ? st.frames : [];
   const prevFromItem = st.fromItem;
+  const prevToItem = st.toItem;
 
   // The full render-row model, then the visible slice. The virtualizer bounds
   // the DOM to the viewport (+ overscan); with no scroll box the whole list
@@ -1082,6 +1203,30 @@ function paintMessages(
   const rowOfItem = model.rowOfItem;
   const dateRowOfDay = model.dateRowOfDay;
   st.rows = rows;
+  // Hold the current window whenever the reader has text selected in the list:
+  // a store paint, a prepend, a live append or a measurement settle must not
+  // rebuild/move/re-parent any mounted row, or the range's container detaches
+  // for an instant and the browser collapses the selection. Only a genuine
+  // reader scroll (a live sync re-window whose offset actually moved) is exempt,
+  // so the list is never frozen under the reader's own scroll. With no selection
+  // this is off and the list windows exactly as before (the scroll-stability
+  // contract the list-rig pins is untouched).
+  const holdBox = scrollBoxOf(inner);
+  const scrollMoved = !holdBox || Math.abs(holdBox.scrollTop - st.lastScrollTop) > 1;
+  const holdForSelection =
+    sameChat &&
+    !(st.syncScroll && scrollMoved) &&
+    prevFrames.length > 0 &&
+    selectionInList(inner);
+  // Older history prepended at the front? While holding a selection, re-seat the
+  // scroll to keep the reader's rows on screen BEFORE the window is computed and
+  // learn the item shift, so the reconcile treats the mounted rows as unchanged
+  // (kept in place) instead of rebuilding them and dropping the selection. When
+  // nothing is selected the prepend takes the pre-existing render-bracket path.
+  const frontShift = holdForSelection
+    ? reseatForFrontShift(inner, st, items, rowOfItem, prevFrames, prevFromItem, sameChat)
+    : 0;
+  const reusePrevFrom = prevFromItem + frontShift;
   const win = computeWindow(inner, st);
   const windowed = !!win;
   let fromItem: number;
@@ -1102,6 +1247,32 @@ function paintMessages(
     padTop = win.padTop;
     padBottom = win.padBottom;
     startsWithDate = rows[win.r0].kind === 'date';
+    // Older history landed at the front and the scroll was re-seated to hold the
+    // reader's view (reseatForFrontShift). Hold EXACTLY the previously mounted
+    // window, reindexed, for this paint: the edge reconcile then reuses every
+    // row verbatim (dropHead 0) and rebuilds/moves nothing, so the reader's text
+    // selection survives. computeWindow's band around the freshly re-seated
+    // offset can land a row or two off the true anchor (the anchor is the top
+    // mounted message, the band is symmetric about the offset), which slid the
+    // window and left rows the reconcile did not trim; pinning it to the shifted
+    // previous window sidesteps that. The very next re-window (the render
+    // bracket's re-seat, a scroll, a settle) runs with frontShift 0 and adjusts
+    // the edges cleanly from this correct base.
+    if (holdForSelection && prevFrames.length && st.virt) {
+      const fFrom = Math.max(0, reusePrevFrom);
+      const fTo = Math.min(items.length - 1, prevToItem + frontShift);
+      if (fTo >= fFrom) {
+        fromItem = fFrom;
+        toItem = fTo;
+        const meas = st.virt.measurementsCache;
+        const rTop = rowOfItem[fromItem];
+        const rBot = rowOfItem[toItem];
+        const total = st.virt.getTotalSize();
+        padTop = meas[rTop]?.start ?? padTop;
+        padBottom = meas[rBot] ? Math.max(0, total - meas[rBot].end) : padBottom;
+        startsWithDate = rows[rTop]?.kind === 'date';
+      }
+    }
   } else {
     fromItem = 0;
     toItem = items.length - 1;
@@ -1281,6 +1452,17 @@ function paintMessages(
     if (windowed) {
       inner.style.paddingTop = padTop + 'px';
       inner.style.paddingBottom = padBottom + 'px';
+      // A front prepend reindexed the rows: refresh the data-index on every kept
+      // node (only when it actually changed, so a plain repaint still writes
+      // nothing) so the virtualizer keys each row's measured height by the right
+      // row and anchoredRewindow finds the right anchor. Kept rows are never
+      // rebuilt for this -- their index attribute is patched in place.
+      for (let p = 0; p < finalFrames.length; p++) {
+        const f = finalFrames[p];
+        if (!f) continue;
+        const idx = String(rowOfItem[fromItem + p]);
+        if (f.node.dataset.index !== idx) f.node.dataset.index = idx;
+      }
     } else if (inner.style.paddingTop || inner.style.paddingBottom) {
       inner.style.removeProperty('padding-top');
       inner.style.removeProperty('padding-bottom');
@@ -1291,6 +1473,10 @@ function paintMessages(
     st!.toItem = toItem;
     st!.count = items.length;
     st!.rows = rows;
+    {
+      const cb = scrollBoxOf(inner);
+      st!.lastScrollTop = cb ? cb.scrollTop : -1;
+    }
     st!.lastPaint = () =>
       paintMessages(
         inner,
@@ -1351,8 +1537,8 @@ function paintMessages(
   // every frame (the measured up-fling jank). Returns true when it handled the
   // paint; false falls through to the general path (a full rebuild).
   function tryPrependWindow(): boolean {
-    const P = prevFromItem - fromItem; // items entering at the top
-    const keptItemCount = toItem - prevFromItem + 1; // overlap items
+    const P = reusePrevFrom - fromItem; // items entering at the top
+    const keptItemCount = toItem - reusePrevFrom + 1; // overlap items
     if (P <= 0 || keptItemCount <= 0 || keptItemCount > prevFrames.length) return false;
     const kept = prevFrames.slice(0, keptItemCount);
     if (!kept[0]) return false;
@@ -1516,13 +1702,17 @@ function paintMessages(
   let leavingHead: ItemFrame[] = [];
   let reusable: ItemFrame[] | null = null;
   // A forced full rebuild (the coverage net recovering a collapsed window):
-  // reuse nothing, so the window is recomputed and mounted from scratch.
-  const forceFull = st.forceFull;
+  // reuse nothing, so the window is recomputed and mounted from scratch. But a
+  // full rebuild detaches every row -- fatal to a live selection -- so while the
+  // reader has text selected the hold wins and the coverage recovery is deferred
+  // (a held window can leave an overscan edge briefly uncovered; the recovery
+  // lands the moment the selection clears).
+  const forceFull = st.forceFull && !holdForSelection;
   st.forceFull = false;
   if (forceFull) {
     // fall through with reusable = null (full rebuild)
   } else if (sameChat && windowed) {
-    const dropHead = fromItem - prevFromItem;
+    const dropHead = fromItem - reusePrevFrom;
     if (dropHead === 0) {
       reusable = prevFrames;
     } else if (dropHead > 0 && dropHead < prevFrames.length && prevFrames[dropHead]) {
@@ -1533,7 +1723,7 @@ function paintMessages(
       reusable = prevFrames.slice(dropHead);
       leavingHead = prevFrames.slice(0, dropHead);
     }
-  } else if (sameChat && prevFromItem === fromItem) {
+  } else if (sameChat && reusePrevFrom === fromItem) {
     reusable = prevFrames;
   }
 
@@ -1546,8 +1736,8 @@ function paintMessages(
     reusable === null &&
     sameChat &&
     windowed &&
-    fromItem < prevFromItem &&
-    prevFromItem <= toItem &&
+    fromItem < reusePrevFrom &&
+    reusePrevFrom <= toItem &&
     prevFrames.length > 0 &&
     prevFrames[0] &&
     tryPrependWindow()
