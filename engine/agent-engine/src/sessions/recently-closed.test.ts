@@ -16,7 +16,7 @@
 import { test, expect, afterEach, spyOn } from "bun:test";
 import { utimes } from "node:fs/promises";
 
-import { sessionOpsRoutes } from "../routes/session-ops.ts";
+import { sessionOpsRoutes, isMuxUnreachableError } from "../routes/session-ops.ts";
 import { wireCore, type WireCore } from "../test-utils/wire-core.ts";
 import { serveRoutes, type ServedRoutes } from "../test-utils/serve-routes.ts";
 import { HARNESS_CWD } from "../test-utils/fake-herdr.ts";
@@ -272,4 +272,47 @@ test("a reopen with the mux down answers 502 and logs the failure", async () => 
   } finally {
     errSpy.mockRestore();
   }
+});
+
+/* THE MUX-DOWN 502 CARRIES A DISTINCT CODE (fail-before / pass-after): the app
+ * must be able to tell "the multiplexer is not running" (start herdr) apart from
+ * a genuine spawn failure, without parsing the bare "Failed to connect" string.
+ * The body names the code AND the mux, and the same failure lands in the
+ * structured engine.log (mirrored to console.log), not only the journal. */
+test("a reopen with the mux down answers code:mux-unreachable, in the body AND engine.log", async () => {
+  const { c, http: h } = await routed();
+  await seedDead(
+    { agentId: AG(1), name: "Ada", harness: "claude", cwd: HARNESS_CWD, sessionId: UUID },
+    Date.now()
+  );
+  c.herdr.stop(true); // herdr is gone: tab.create cannot connect
+  const logSpy = spyOn(console, "log");
+  try {
+    const res = await reopen(h, AG(1), true);
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { ok: boolean; code?: string; mux?: string };
+    expect(body.ok).toBe(false);
+    expect(body.code, "the app keys off this to say 'start the mux'").toBe("mux-unreachable");
+    expect(typeof body.mux, "the mux name so the sentence is host-specific").toBe("string");
+    // the structured logbook line (mirrored to console.log) is what the app and
+    // diagnostics read out of ~/.callyourcode/logs/engine.log
+    const inEngineLog = logSpy.mock.calls
+      .map((c2) => String(c2[0]))
+      .some((l) => l.includes("new-session.failed") && l.includes("muxUnreachable=true"));
+    expect(inEngineLog, "the mux-down failure is in engine.log, not only the journal").toBe(true);
+  } finally {
+    logSpy.mockRestore();
+  }
+});
+
+/* The classifier is pure and narrow: only connect-establishment failures are
+ * "the mux is not there". A herdr that answered and refused (a real error string)
+ * is a genuine 502, not a "start the mux" case. */
+test("isMuxUnreachableError: connect failures yes, a mid-op herdr error no", () => {
+  expect(isMuxUnreachableError(new Error("Failed to connect"))).toBe(true);
+  expect(isMuxUnreachableError(Object.assign(new Error("connect"), { code: "ECONNREFUSED" }))).toBe(true);
+  expect(isMuxUnreachableError(new Error("herdr rpc tab.create: connection closed"))).toBe(true);
+  expect(isMuxUnreachableError(new Error("tab.create returned no pane"))).toBe(false);
+  expect(isMuxUnreachableError(new Error("herdr tab.create: EINVAL: bad workspace"))).toBe(false);
+  expect(isMuxUnreachableError(null)).toBe(false);
 });

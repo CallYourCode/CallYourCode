@@ -187,6 +187,18 @@ export async function runDoctor(env: EngineEnv, io: DoctorIO): Promise<DoctorRes
 
   for (const l of legs) out.push(l.line);
 
+  // --- 3b. MUX: when the engine's mux is herdr, its server unit must be enabled
+  //        for boot, or a reboot brings the engine up with no mux and every
+  //        + -> reopen fails with a bare "Failed to connect" (k8plus, 2026-09-29).
+  //        The mux is read from the engine unit's own CYC_MUX (default tmux). --
+  const mux = (unitEnv.CYC_MUX ?? "tmux").trim().toLowerCase() === "herdr" ? "herdr" : "tmux";
+  const muxCheck = await herdrEnabledLine(mux, io);
+  if (muxCheck) {
+    out.push("");
+    out.push("MUX");
+    out.push(muxCheck.line);
+  }
+
   // --- 4. PI BRIDGE: the oneMByDefault setting must have code behind it, and
   //        the installed bridge must carry the auto-compaction loop fix --------
   const bridge = await bridgeLine(io)
@@ -198,8 +210,32 @@ export async function runDoctor(env: EngineEnv, io: DoctorIO): Promise<DoctorRes
     if (autocompact) out.push(autocompact.line);
   }
 
-  const failed = legs.some((l) => !l.ok) || diffs.length > 0 || bridge?.ok === false || autocompact?.ok === false;
+  const failed = legs.some((l) => !l.ok) || diffs.length > 0 || bridge?.ok === false
+    || autocompact?.ok === false || muxCheck?.ok === false;
   return { text: out.join("\n"), code: failed ? 1 : 0 };
+}
+
+/* When herdr is the engine's mux, its server unit must be enabled for boot, or
+ * the next reboot leaves the engine up with no mux to talk to and every reopen
+ * fails at connect. `systemctl --user is-enabled herdr-server.service` prints
+ * "enabled" (exit 0) only when it is; a disabled or absent unit yields anything
+ * else (io.run hands back the disabled-state stdout, or "" when the unit is
+ * missing), which FAILs and names the one command that fixes it. Null for tmux:
+ * there is no herdr unit to judge. */
+export async function herdrEnabledLine(
+  mux: string, io: Pick<DoctorIO, "run">,
+): Promise<{ line: string; ok: boolean } | null> {
+  if (mux !== "herdr") return null;
+  const state = (await io.run("systemctl", ["--user", "is-enabled", "herdr-server.service"])).trim();
+  const enabled = /^(enabled|enabled-runtime|static|indirect|alias)\b/.test(state);
+  if (!enabled) {
+    return {
+      line: "  FAIL herdr is the mux but herdr-server.service is not enabled for boot " +
+        "(a reboot then brings the engine up with no mux): run `systemctl --user enable herdr-server.service`",
+      ok: false,
+    };
+  }
+  return { line: "  PASS herdr-server.service enabled for boot", ok: true };
 }
 
 /* A pi reinstall/update can replace the bridge with one that lacks the

@@ -147,6 +147,7 @@ import {sessionState, dataState} from '../sessionState';
 import {openMenu} from '../components/popupMenu';
 import {toast} from '../components/widgets';
 import * as store from '../engine/store';
+import {rememberHostName} from '../engine/hostNames';
 const row = (id: string, la: number) => ({id, name: id, unread: 0, lastActivity: la});
 function mk(over: Partial<ListPaneDeps> = {}) {
   const deps: ListPaneDeps = {
@@ -616,6 +617,41 @@ describe('the new-session menu', () => {
     );
     for (const [arg] of vi.mocked(toast).mock.calls) {
       expect(String(arg)).not.toContain('has not appeared');
+    }
+  });
+
+  // THE MUX IS DOWN (engine /new-session code:"mux-unreachable"): after a reboot
+  // the engine can be up while herdr is not, and the reopen failed with a bare
+  // "Failed to connect". The app now says plainly what to do, naming the host.
+  test('a mux-unreachable failure toasts "start <mux>" naming the host, not the bare error', async () => {
+    rememberHostName('e1', 'shikher', 'k8plus');
+    vi.mocked(store.newSessionPlaces).mockResolvedValueOnce({
+      places: ['/w/app'],
+      home: '/home/u',
+      def: null,
+      harnesses: [{kind: 'claude', available: true}],
+      recent: []
+    });
+    vi.mocked(store.startSession).mockResolvedValueOnce({
+      paneId: '',
+      agentId: '',
+      why: 'Failed to connect',
+      muxUnreachable: true,
+      mux: 'herdr'
+    });
+    const {pane} = mk();
+    const items = await clickFab(pane);
+    items[1]!.onClick(); // "w/app"
+    await vi.waitFor(() =>
+      expect(vi.mocked(toast)).toHaveBeenCalledWith(
+        "herdr isn't running on shikher@k8plus, so the agent can't open. Start herdr, then try again.",
+        8000
+      )
+    );
+    // never the bare engine error, never the generic wrapper
+    for (const [arg] of vi.mocked(toast).mock.calls) {
+      expect(String(arg)).not.toContain('Could not start it');
+      expect(String(arg)).not.toBe('Failed to connect');
     }
   });
 });

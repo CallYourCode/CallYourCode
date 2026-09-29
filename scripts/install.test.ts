@@ -239,6 +239,38 @@ test("herdr on the machine wins without being told; CYC_MUX=tmux still overrides
   expect(forced.out).toContain("mux: tmux (default)");
 });
 
+test("herdr mux on Linux: the installer ensures herdr-server.service exists and is enabled for boot", async () => {
+  const home = scratchHome();
+  const { out, code } = await dryRun("Linux", home, { CYC_MUX: "herdr", CYC_FAKE_HERDR: "present" });
+
+  expect(code).toBe(0);
+  // the unit is written when absent, and enabled for the next boot
+  expect(out).toContain(`would write: ${join(home, ".config/systemd/user/herdr-server.service")}`);
+  expect(out).toContain("+ systemctl --user enable herdr-server.service");
+  // ENABLE-ONLY: never a `--now` that would start a SECOND server over a running
+  // one (a herdr server restart exits every open pane).
+  expect(out).not.toContain("enable --now herdr-server.service");
+  expectUntouched(home);
+});
+
+test("tmux mux on Linux: no herdr-server.service is written or enabled", async () => {
+  const home = scratchHome();
+  const { out, code } = await dryRun("Linux", home, {
+    CYC_MUX: "tmux", CYC_FAKE_TMUX: "present", CYC_FAKE_HERDR: "absent",
+  });
+
+  expect(code).toBe(0);
+  expect(out).not.toContain("herdr-server.service");
+  expectUntouched(home);
+});
+
+test("the herdr-server unit runs `herdr server` and is WantedBy default.target (boot)", async () => {
+  const script = await Bun.file(join(REPO_ROOT, "scripts/install.sh")).text();
+  const unit = heredocFor(script, "HERDR_UNIT");
+  expect(unit).toContain("ExecStart=%h/.local/bin/herdr server");
+  expect(unit.split("\n")).toContain("WantedBy=default.target");
+});
+
 test("the installer never upgrades or restarts herdr (2026-09-22: a herdr server stop kills every pane)", async () => {
   const script = await Bun.file(join(REPO_ROOT, "scripts/install.sh")).text();
   expect(script).not.toContain("herdr server stop");

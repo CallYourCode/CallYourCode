@@ -26,6 +26,7 @@ import { classifyPaneBox, refusesDelivery, SGR, type BoxVerdict, type PaneBox } 
 import { ANNOUNCED_SOURCE, normalizeAgentId, type AgentSessionRef } from "../runtime/agents.ts";
 import { hookBindFor, markParked, onHookAnnounce, pendingAnnounces, pruneHookBinds, takePending } from "./hook-announce.ts";
 import { stillAwaitingSubmit } from "./tmux.ts";
+import { openLog } from "../../../shared/logbook.ts";
 import type { AgentStatus, MuxAgent, Multiplexer } from "./mux.ts";
 
 // AgentStatus and the agent shape now live on the multiplexer seam (mux.ts), so
@@ -643,6 +644,12 @@ export class HerdrClient implements Multiplexer {
       } catch (e) {
         if (this.stopped) return;
         console.error(`[herdr] ${String(e)}; retrying in ${this.retryMs}ms`);
+        /* ALSO IN engine.log, not only the journal: on the live engine this
+         * console line is a journal-only record, but the app/diagnostics read
+         * the structured logbook. When herdr never came back after a reboot the
+         * retries were invisible there, and "the mux is down" could not be told
+         * apart from "nothing happened". */
+        openLog("engine").line("herdr.error", { err: String(e), retryMs: this.retryMs });
         await Bun.sleep(this.retryMs);
         this.retryMs = Math.min(this.retryMs * 2, RETRY_MAX_MS);
       }

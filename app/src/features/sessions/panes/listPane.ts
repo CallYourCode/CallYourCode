@@ -20,6 +20,7 @@ import * as interactionWindow from '@/shared/browser';
 import {opaqueKey} from '@/features/sessions/navigation';
 import {deviceClass} from '@/features/sessions/layout';
 import {enginePin} from '../../../engine/contract';
+import {cachedHostName} from '../../../engine/hostNames';
 import {sortByLatest, mergeTabs, rowChipShown} from '@/features/settings/preferences';
 import {seedKeymapFromServer} from '@/features/settings/preferences';
 import {speaker} from '../../../audio/speaker';
@@ -293,12 +294,32 @@ export function createListPane(deps: ListPaneDeps) {
       // Shared post-start landing: wait for the new/reopened session to appear,
       // then open its chat. `where` names the folder for the timeout toast.
       const landStarted = (
-        started: {paneId: string; agentId: string; why: string; notInstalled?: boolean},
+        started: {
+          paneId: string;
+          agentId: string;
+          why: string;
+          notInstalled?: boolean;
+          muxUnreachable?: boolean;
+          mux?: string;
+        },
         where: string
       ) => {
-        const {paneId, agentId, why, notInstalled} = started;
+        const {paneId, agentId, why, notInstalled, muxUnreachable, mux} = started;
         if (!paneId) {
           cyclog('session.open.fail', {agentId, why, notInstalled: !!notInstalled});
+          // The mux (herdr/tmux) being unreachable is not "could not start it":
+          // NOTHING opens until the multiplexer is back, so say exactly that and
+          // name the host, instead of surfacing the bare "Failed to connect".
+          if (muxUnreachable) {
+            const uh = cachedHostName(key);
+            const host = uh?.host ? (uh.user ? `${uh.user}@${uh.host}` : uh.host) : 'this host';
+            const m = mux || 'the multiplexer';
+            toast(
+              `${m} isn't running on ${host}, so the agent can't open. Start ${m}, then try again.`,
+              8000
+            );
+            return;
+          }
           // A typed harness-missing refusal (engine session-ops) carries a ready
           // human sentence ("claude is not installed on this host"); show it as
           // is. Other failures keep the generic "Could not start it" prefix.

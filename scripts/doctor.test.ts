@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   unitEnvFromCat, showEnvironment, diffLines, bunVersionNote, runDoctor, bridgeLine, bridgeAutocompactLine,
+  herdrEnabledLine,
   type DoctorIO,
 } from "./doctor.ts";
 
@@ -149,6 +150,57 @@ test("a CONFIG diff alone forces exit 1 even when the round-trip passes", async 
   }));
   expect(res.text).toContain("DIFF CYC_ENGINE_URL");
   expect(res.code).toBe(1);
+});
+
+test("herdrEnabledLine: herdr mux FAILs a not-enabled unit, PASSes an enabled one, null for tmux", async () => {
+  const io = (state: string) => ({ run: async () => state });
+  expect((await herdrEnabledLine("herdr", io("enabled")))!.ok).toBe(true);
+  expect((await herdrEnabledLine("herdr", io("enabled-runtime")))!.ok).toBe(true);
+  expect((await herdrEnabledLine("herdr", io("disabled")))!.ok).toBe(false);
+  expect((await herdrEnabledLine("herdr", io("")))!.ok, "an absent unit is not enabled").toBe(false);
+  const fail = await herdrEnabledLine("herdr", io("disabled"));
+  expect(fail!.line).toContain("systemctl --user enable herdr-server.service");
+  expect(await herdrEnabledLine("tmux", io("enabled")), "no herdr unit to judge on tmux").toBeNull();
+});
+
+test("MUX: a herdr mux with herdr-server.service NOT enabled FAILs and forces exit 1", async () => {
+  const fake = fakeSocketEngine();
+  const env = { CYC_ENGINE_SOCK: fake.sock, CYC_ENGINE_URL: `unix:${fake.sock}` };
+  const res = await runDoctor(env, io(fake.sock, {
+    run: async (_cmd, args) => {
+      if (args.includes("cat")) return "Environment=CYC_MUX=herdr\n";
+      if (args.includes("is-enabled")) return ""; // disabled/absent: not enabled for boot
+      return "";
+    },
+  }));
+  expect(res.text).toContain("MUX");
+  expect(res.text).toContain("herdr-server.service is not enabled");
+  expect(res.code, "a disabled mux unit is a gate failure").toBe(1);
+});
+
+test("MUX: a herdr mux with herdr-server.service enabled passes (exit 0)", async () => {
+  const fake = fakeSocketEngine();
+  const env = { CYC_ENGINE_SOCK: fake.sock, CYC_ENGINE_URL: `unix:${fake.sock}` };
+  const res = await runDoctor(env, io(fake.sock, {
+    run: async (_cmd, args) => {
+      if (args.includes("cat")) return "Environment=CYC_MUX=herdr\n";
+      if (args.includes("is-enabled")) return "enabled\n";
+      return "";
+    },
+  }));
+  expect(res.text).toContain("PASS herdr-server.service enabled for boot");
+  expect(res.code).toBe(0);
+});
+
+test("MUX: a tmux engine has no MUX section (no herdr unit to judge)", async () => {
+  const fake = fakeSocketEngine();
+  const env = { CYC_ENGINE_SOCK: fake.sock, CYC_ENGINE_URL: `unix:${fake.sock}` };
+  // is-enabled would answer "disabled", but a tmux engine must not read it or FAIL on it
+  const res = await runDoctor(env, io(fake.sock, {
+    run: async (_cmd, args) => (args.includes("is-enabled") ? "disabled" : ""),
+  }));
+  expect(res.text).not.toContain("MUX");
+  expect(res.code).toBe(0);
 });
 
 test("the bun WARN surfaces in RESOLVED for the known-bad 1.4.2", async () => {

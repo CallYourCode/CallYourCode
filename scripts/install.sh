@@ -509,6 +509,36 @@ if [ "$OS" = "Linux" ]; then
   # cyc-* unit) down when the last session closes.
   run loginctl enable-linger "$(id -un)"
 
+  # --- herdr server: exists and ENABLED for boot (only when herdr is the mux) ---
+  # After a reboot the engine's unit comes back but the mux must too, or the +
+  # menu's reopen fails with a bare "Failed to connect" (k8plus power-cut,
+  # 2026-09-29: shikher's herdr-server.service was DISABLED, so the engine
+  # retried the down mux forever and every recent-agent tap failed). herdr's own
+  # installer writes this unit; we only ENSURE it exists and is enabled for the
+  # next boot (linger, above, is what lets an enabled user unit start at boot
+  # with no login). We never `--now` it: a `herdr server` already running must
+  # not be restarted (that exits every open pane), and enabling alone never
+  # starts a second one.
+  if [ "$MUX" = "herdr" ]; then
+    HERDR_UNIT="$HOME/.config/systemd/user/herdr-server.service"
+    if [ ! -f "$HERDR_UNIT" ]; then
+      write_file "$HERDR_UNIT" <<EOF
+[Unit]
+Description=herdr server
+
+[Service]
+ExecStart=%h/.local/bin/herdr server
+Restart=always
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+EOF
+      run systemctl --user daemon-reload
+    fi
+    run systemctl --user enable herdr-server.service
+  fi
+
   ENGINE_UNIT="$HOME/.config/systemd/user/cyc-agent-engine.service"
   APP_UNIT="$HOME/.config/systemd/user/cyc-app-server.service"
   VOICE_UNIT="$HOME/.config/systemd/user/cyc-voice-engine.service"
