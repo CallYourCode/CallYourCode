@@ -45,7 +45,9 @@ vi.mock('../engine/store', () => ({
   docUrl: () => '',
   activityMark: (s: {status?: string}) =>
     s.status === 'done' || s.status === 'blocked' || s.status === 'unknown' ? s.status : null,
-  effectiveNotify: (s?: {settings?: {notify?: boolean}}) => s?.settings?.notify ?? true
+  effectiveNotify: (s?: {settings?: {notify?: boolean}}) => s?.settings?.notify ?? true,
+  readStateFreshOnConn: () => true,
+  onReadStateFresh: () => () => {}
 }));
 vi.mock('../shared/browser', () => ({
   active: (name: string) => name === 'gesture' && fake.gestureActive,

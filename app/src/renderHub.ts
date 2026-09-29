@@ -811,5 +811,15 @@ export function createRenderHub(deps: RenderHubDeps) {
     }, 900);
   });
 
+  // Speech-on-open defers until the engine has refreshed the open chat's read
+  // state on this connection (readState.readStateFreshOnConn). The sessions/
+  // catchup frame that delivers it fires this edge; run the deferred selection
+  // now, on the engine's truth, so a cold-boot / notification-tap open speaks
+  // only the genuinely unheard reply instead of replaying the loaded window.
+  engine.onReadStateFresh((sessionId) => {
+    if (dataState.mode === 'live' && sessionId === sessionState.activeId)
+      cs.speakUnheard(sessionId);
+  });
+
   return {render, renderRows, renderChatPane, refreshProfileAttachments};
 }

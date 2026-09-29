@@ -121,33 +121,47 @@ export function createReaderLanding(options: ReaderLandingOptions) {
     if (sessionId !== sessionState.activeId || !mayStartSpeech(sessionId)) return;
     const session = engine.get(sessionId);
     if (!session) return;
+    // NEVER decide what is unheard from a stale or unknown read state. At a cold
+    // boot / reconnect / notification-tap open the marker and the count on the
+    // session are the CACHED roster values, and those can be stale: the owner
+    // read the chat on the laptop while the phone slept, so the phone's persisted
+    // unread is 0 and its marker is undefined (readThrough is not persisted) even
+    // though a live reply is genuinely unheard. Selecting then either replays the
+    // whole loaded window (the old `!marker -> start=0`) or a `ts` scan queues an
+    // ALREADY-HEARD clip -- the owner's "back on the phone it plays some old audio
+    // message". Wait until the engine has refreshed THIS session's read state on
+    // THIS connection (the sessions/catchup frame); its arrival re-invokes this
+    // (readState.onReadStateFresh -> renderHub), so speech runs once, on truth.
+    if (!engine.readStateFreshOnConn(sessionId)) return;
     const msgs = session.messages;
-    // The to-play set derives from the SAME read-through IDENTITY the divider and
-    // the count anchor on (readState / firstUnheardId), never a `ts >` scan. A
-    // restamp, a mis-sorted legacy page, or a read-through row that aged out of
-    // the loaded window while a ts twin sits in it made the ts scan replay an
-    // ALREADY-HEARD clip -- the owner coming back on the phone to an old audio
-    // message, the count reading 0 while speech played on. The start is the row
-    // AFTER the marker; speech and the divider now select the identical rows.
     if (!msgs.length) return;
+    // WHETHER anything is unheard is the engine's unread COUNT alone -- the same
+    // authority the divider uses (nothingUnseen). The attached chat's own badge
+    // is zeroed in the store (you are reading it), so read the engine count kept
+    // beside it (engineUnread), falling back to the session count off that path.
+    // unread === 0 means caught up: speak nothing, exactly like the divider.
+    const unread = session.engineUnread ?? session.unread;
+    if (unread <= 0) return;
+    // WHERE the unheard run is, is the read-through ROW IDENTITY -- the same
+    // anchor the divider lands on (firstUnheardId), never a `ts >` scan. Two
+    // shapes, both selecting exactly the clips the engine counts unread:
+    //   - the read-through row is in the loaded window: speak the claude rows
+    //     AFTER it.
+    //   - the marker is unknown, or its row aged out of the window to an older
+    //     page: speak the NEWEST `unread` claude rows -- the engine's count --
+    //     never nothing (the old `idx < 0 -> return` went silent on a genuine new
+    //     reply) and never the whole window (the old `!marker -> start=0`).
     const marker = furthestMarker(msgs, openMarker(), deps.readMarkerOf(session));
-    let start: number;
-    if (!marker) {
-      start = 0; // nothing read here: speak every claude row from the top
-    } else {
-      const idx = markerIndex(msgs, marker);
-      // Marker present but its row is not in the loaded window (it aged out to an
-      // older page): the divider lands at bottom, and speech gives up here too
-      // rather than replaying whatever a ts scan would sweep in. He reaches the
-      // tail by scrolling to it or tapping.
-      if (idx < 0) return;
-      start = idx + 1;
-    }
-    const candidates: CycEngineMessage[] = [];
-    for (let i = start; i < msgs.length; i++) {
-      const m = msgs[i] as CycEngineMessage;
-      if (m.role === 'claude' && m.msgId) candidates.push(m);
-    }
+    const idx = marker ? markerIndex(msgs, marker) : -1;
+    const claudeFrom = (from: number): CycEngineMessage[] => {
+      const out: CycEngineMessage[] = [];
+      for (let i = from; i < msgs.length; i++) {
+        const m = msgs[i] as CycEngineMessage;
+        if (m.role === 'claude' && m.msgId) out.push(m);
+      }
+      return out;
+    };
+    const candidates = idx >= 0 ? claudeFrom(idx + 1) : claudeFrom(0).slice(-unread);
     if (!candidates.length) return;
     const pending = speaker.pending();
     const queue = candidates.filter((m) => !pending.has(m.msgId!));

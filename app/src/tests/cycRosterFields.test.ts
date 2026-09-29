@@ -36,6 +36,7 @@ const RUNTIME_ONLY = [
   'historyAskedAt',
   'churnGrey',
   'notOnEngine',
+  'engineUnread',
   'engineTotal',
   'loadingOlder',
   'paintSource',

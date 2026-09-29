@@ -24,7 +24,9 @@ vi.mock('../engine/store', () => ({
   onReplayed: () => () => {},
   canOlder: () => false,
   loadOlder: vi.fn(async () => 0),
-  overlayOn: () => false
+  overlayOn: () => false,
+  readStateFreshOnConn: () => true,
+  onReadStateFresh: () => () => {}
 }));
 vi.mock('../components/domHelpers', () => ({h: (_t: string, cls: string) => mkEl(cls)}));
 vi.mock('../components/iconGlyphs', () => ({makeIcon: () => mkEl('icon')}));
