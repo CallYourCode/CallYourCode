@@ -137,11 +137,17 @@ vi.mock('../components/popupMenu', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   openMenu: vi.fn()
 }));
+const cyclogMock = vi.hoisted(() => vi.fn());
+vi.mock('../shared/logging', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  cyclog: cyclogMock
+}));
 import {createListPane, type ListPaneDeps} from '../features/sessions/panes/listPane';
 import {sessionState, dataState} from '../sessionState';
 import {openMenu} from '../components/popupMenu';
 import {toast} from '../components/widgets';
 import * as store from '../engine/store';
+import {rememberHostName} from '../engine/hostNames';
 const row = (id: string, la: number) => ({id, name: id, unread: 0, lastActivity: la});
 function mk(over: Partial<ListPaneDeps> = {}) {
   const deps: ListPaneDeps = {
@@ -520,6 +526,66 @@ describe('the new-session menu', () => {
     });
   });
 
+  // THE k8plus POWER-CUT (2026-09-29): the owner tapped a recently-closed agent
+  // to reopen it and it "did not work", but app.log held NO line for the tap, so
+  // we could not tell whether the tap fired or what came back. The flow now logs
+  // the tap AND its result.
+  test('a recently-closed reopen logs the tap and its result', async () => {
+    vi.mocked(store.newSessionPlaces).mockResolvedValueOnce({
+      places: ['/w/app'],
+      home: '/home/u',
+      def: null,
+      harnesses: [{kind: 'claude', available: true}],
+      recent: []
+    });
+    vi.mocked(store.recentlyClosed).mockResolvedValueOnce([
+      {
+        agentId: 'ag-AAAAAAAAAAAAAAAA',
+        name: 'Ada',
+        harness: 'claude',
+        cwd: '/old/proj',
+        canResume: true
+      }
+    ]);
+    // the reopen comes back empty (the incident): landStarted takes the fail arm
+    vi.mocked(store.startSession).mockResolvedValueOnce({
+      paneId: '',
+      agentId: '',
+      why: 'could not reach the engine'
+    });
+    const {pane} = mk();
+    const items = await clickFab(pane);
+    cyclogMock.mockClear(); // ignore render-time nav.tap noise
+    items[1]!.onClick(); // tap "Ada"
+    expect(cyclogMock).toHaveBeenCalledWith('session.open.tap', {
+      kind: 'reopen',
+      agentId: 'ag-AAAAAAAAAAAAAAAA',
+      cwd: '/old/proj'
+    });
+    await vi.waitFor(() =>
+      expect(cyclogMock).toHaveBeenCalledWith('session.open.fail', {
+        agentId: '',
+        why: 'could not reach the engine',
+        notInstalled: false
+      })
+    );
+  });
+
+  // The + menu itself failing to reach the engine (post-reboot reconnect window)
+  // used to only toast; it now logs a line, so a menu that never populated is no
+  // longer invisible.
+  test('a + menu that cannot reach the engine logs it', async () => {
+    vi.mocked(store.newSessionPlaces).mockResolvedValueOnce(null as never);
+    const {pane} = mk();
+    const floatingAction = pane.leftContent.querySelector(
+      '.cyc-new-conversation'
+    ) as HTMLElement;
+    cyclogMock.mockClear();
+    floatingAction.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+    await vi.waitFor(() => expect(cyclogMock).toHaveBeenCalledWith('session.open.unreachable', {}));
+    expect(vi.mocked(openMenu)).not.toHaveBeenCalled();
+  });
+
   // The engine refuses when the chosen harness is not installed on its host
   // (session-ops /new-session typed refusal). startSession maps that to
   // {paneId:'', notInstalled:true, why:<server sentence>}; the menu must show
@@ -551,6 +617,41 @@ describe('the new-session menu', () => {
     );
     for (const [arg] of vi.mocked(toast).mock.calls) {
       expect(String(arg)).not.toContain('has not appeared');
+    }
+  });
+
+  // THE MUX IS DOWN (engine /new-session code:"mux-unreachable"): after a reboot
+  // the engine can be up while herdr is not, and the reopen failed with a bare
+  // "Failed to connect". The app now says plainly what to do, naming the host.
+  test('a mux-unreachable failure toasts "start <mux>" naming the host, not the bare error', async () => {
+    rememberHostName('e1', 'shikher', 'k8plus');
+    vi.mocked(store.newSessionPlaces).mockResolvedValueOnce({
+      places: ['/w/app'],
+      home: '/home/u',
+      def: null,
+      harnesses: [{kind: 'claude', available: true}],
+      recent: []
+    });
+    vi.mocked(store.startSession).mockResolvedValueOnce({
+      paneId: '',
+      agentId: '',
+      why: 'Failed to connect',
+      muxUnreachable: true,
+      mux: 'herdr'
+    });
+    const {pane} = mk();
+    const items = await clickFab(pane);
+    items[1]!.onClick(); // "w/app"
+    await vi.waitFor(() =>
+      expect(vi.mocked(toast)).toHaveBeenCalledWith(
+        "herdr isn't running on shikher@k8plus, so the agent can't open. Start herdr, then try again.",
+        8000
+      )
+    );
+    // never the bare engine error, never the generic wrapper
+    for (const [arg] of vi.mocked(toast).mock.calls) {
+      expect(String(arg)).not.toContain('Could not start it');
+      expect(String(arg)).not.toBe('Failed to connect');
     }
   });
 });

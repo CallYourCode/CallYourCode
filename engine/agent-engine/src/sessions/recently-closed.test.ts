@@ -13,10 +13,10 @@
  *   bun test agent-engine/src/sessions/recently-closed.test.ts
  */
 
-import { test, expect, afterEach } from "bun:test";
+import { test, expect, afterEach, spyOn } from "bun:test";
 import { utimes } from "node:fs/promises";
 
-import { sessionOpsRoutes } from "../routes/session-ops.ts";
+import { sessionOpsRoutes, isMuxUnreachableError } from "../routes/session-ops.ts";
 import { wireCore, type WireCore } from "../test-utils/wire-core.ts";
 import { serveRoutes, type ServedRoutes } from "../test-utils/serve-routes.ts";
 import { HARNESS_CWD } from "../test-utils/fake-herdr.ts";
@@ -199,4 +199,120 @@ test("reopen refuses an agent this engine does not own", async () => {
   const { http: h } = await routed();
   const res = await reopen(h, "ag-neverseenthisid0", true);
   expect(res.status).toBe(400);
+});
+
+/* ---------------------------------------------- observability after a reboot */
+
+/* THE k8plus POWER-CUT (2026-09-29): the owner opened the app and tapped a
+ * recently-closed agent to reopen it, and it "did not work". engine.log held
+ * NOTHING about the reopen, so we could not even tell the request had reached
+ * the engine. The route now writes an arrival line the instant the body is
+ * parsed, BEFORE the spawn that used to be the first thing logged. */
+test("a reopen logs its arrival before the outcome, naming the agent and resume", async () => {
+  const { http: h } = await routed();
+  await seedDead(
+    { agentId: AG(1), name: "Ada", harness: "claude", cwd: HARNESS_CWD, sessionId: UUID },
+    Date.now()
+  );
+  const logSpy = spyOn(console, "log");
+  try {
+    const res = await reopen(h, AG(1), true);
+    expect((await res.json()).ok).toBe(true);
+    const lines = logSpy.mock.calls.map((c) => String(c[0]));
+    // the arrival line: written before the [new-session] <pane> success line
+    const arrival = lines.findIndex((l) => l === `[new-session] request reopen ${AG(1)} (resume=true)`);
+    const outcome = lines.findIndex((l) => l.startsWith("[new-session] ") && l.includes(`(${AG(1)},`));
+    expect(arrival, "the arrival line is present").toBeGreaterThanOrEqual(0);
+    expect(outcome, "the outcome line is present").toBeGreaterThanOrEqual(0);
+    expect(arrival, "arrival is logged before the outcome").toBeLessThan(outcome);
+  } finally {
+    logSpy.mockRestore();
+  }
+});
+
+/* PANE IDS CHANGE AFTER A REBOOT: the owner guessed the stale pane ids were the
+ * problem. They are not -- a reopen NEVER reuses the old pane. It mints a fresh
+ * pane (the mux picks the id) and adopts the OLD agent id onto it, so the pane
+ * the agent lived on before the reboot is irrelevant. */
+test("a reopen opens on a FRESH pane, never the agent's pre-reboot pane", async () => {
+  const { c, http: h } = await routed();
+  await seedDead(
+    // the agent lived on w1:p6 before the reboot; that pane is gone now
+    { agentId: AG(1), name: "Ada", harness: "claude", cwd: HARNESS_CWD, sessionId: UUID },
+    Date.now()
+  );
+  const body = (await reopen(h, AG(1), true).then((r) => r.json())) as { ok: boolean; paneId?: string };
+  expect(body.ok).toBe(true);
+  expect(body.paneId, "a fresh pane the mux minted, not the stale w1:p6").not.toBe("w1:p6");
+  // and the resume verb still rode onto the fresh pane
+  const typed = c.herdr.texts.find((t) => t.paneId === body.paneId)?.text ?? "";
+  expect(typed).toContain(`--resume ${UUID}`);
+});
+
+/* HERDR NOT RUNNING YET (the owner's other guess): a reopen that REACHES the
+ * spawn but cannot talk to the mux fails 502 AND logs it. So a reopen that
+ * reached the engine is always visible in the log -- which is why the incident's
+ * empty log proves the request never arrived, not that the engine ate it. */
+test("a reopen with the mux down answers 502 and logs the failure", async () => {
+  const { c, http: h } = await routed();
+  await seedDead(
+    { agentId: AG(1), name: "Ada", harness: "claude", cwd: HARNESS_CWD, sessionId: UUID },
+    Date.now()
+  );
+  c.herdr.stop(true); // herdr is gone: tab.create cannot connect
+  const errSpy = spyOn(console, "error");
+  try {
+    const res = await reopen(h, AG(1), true);
+    expect(res.status).toBe(502);
+    expect((await res.json()).ok).toBe(false);
+    const failed = errSpy.mock.calls
+      .map((c2) => String(c2[0]))
+      .some((l) => l.startsWith(`[new-session] failed in ${HARNESS_CWD}`));
+    expect(failed, "the 502 is logged, so a reached reopen is never silent").toBe(true);
+  } finally {
+    errSpy.mockRestore();
+  }
+});
+
+/* THE MUX-DOWN 502 CARRIES A DISTINCT CODE (fail-before / pass-after): the app
+ * must be able to tell "the multiplexer is not running" (start herdr) apart from
+ * a genuine spawn failure, without parsing the bare "Failed to connect" string.
+ * The body names the code AND the mux, and the same failure lands in the
+ * structured engine.log (mirrored to console.log), not only the journal. */
+test("a reopen with the mux down answers code:mux-unreachable, in the body AND engine.log", async () => {
+  const { c, http: h } = await routed();
+  await seedDead(
+    { agentId: AG(1), name: "Ada", harness: "claude", cwd: HARNESS_CWD, sessionId: UUID },
+    Date.now()
+  );
+  c.herdr.stop(true); // herdr is gone: tab.create cannot connect
+  const logSpy = spyOn(console, "log");
+  try {
+    const res = await reopen(h, AG(1), true);
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { ok: boolean; code?: string; mux?: string };
+    expect(body.ok).toBe(false);
+    expect(body.code, "the app keys off this to say 'start the mux'").toBe("mux-unreachable");
+    expect(typeof body.mux, "the mux name so the sentence is host-specific").toBe("string");
+    // the structured logbook line (mirrored to console.log) is what the app and
+    // diagnostics read out of ~/.callyourcode/logs/engine.log
+    const inEngineLog = logSpy.mock.calls
+      .map((c2) => String(c2[0]))
+      .some((l) => l.includes("new-session.failed") && l.includes("muxUnreachable=true"));
+    expect(inEngineLog, "the mux-down failure is in engine.log, not only the journal").toBe(true);
+  } finally {
+    logSpy.mockRestore();
+  }
+});
+
+/* The classifier is pure and narrow: only connect-establishment failures are
+ * "the mux is not there". A herdr that answered and refused (a real error string)
+ * is a genuine 502, not a "start the mux" case. */
+test("isMuxUnreachableError: connect failures yes, a mid-op herdr error no", () => {
+  expect(isMuxUnreachableError(new Error("Failed to connect"))).toBe(true);
+  expect(isMuxUnreachableError(Object.assign(new Error("connect"), { code: "ECONNREFUSED" }))).toBe(true);
+  expect(isMuxUnreachableError(new Error("herdr rpc tab.create: connection closed"))).toBe(true);
+  expect(isMuxUnreachableError(new Error("tab.create returned no pane"))).toBe(false);
+  expect(isMuxUnreachableError(new Error("herdr tab.create: EINVAL: bad workspace"))).toBe(false);
+  expect(isMuxUnreachableError(null)).toBe(false);
 });

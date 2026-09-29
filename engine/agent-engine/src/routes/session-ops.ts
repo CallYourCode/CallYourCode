@@ -25,6 +25,30 @@ import { broadcastSessions, sessionList } from "../sessions/sessions-frame.ts";
 import { titleOf } from "../sessions/title.ts";
 import { broadcast } from "../transport/wire.ts";
 import { piSubagentRunsFresh } from "../readers/pi-subagent-runs.ts";
+import { openLog } from "../../../shared/logbook.ts";
+
+/* WHICH MUX THIS ENGINE DRIVES, from the one env var the units set (default
+ * tmux). Named here so the /agents row and the /new-session mux-down answer
+ * agree on the string the app shows the user. */
+export function muxName(): string {
+  return (process.env.CYC_MUX ?? "tmux").trim().toLowerCase() === "herdr" ? "herdr" : "tmux";
+}
+
+/* IS THIS SPAWN FAILURE "THE MUX ISN'T THERE"? A herdr server that never came
+ * back after a reboot (the k8plus power-cut, 2026-09-29) makes tab.create's
+ * Bun.connect reject with message "Failed to connect" (ENOENT: no socket) or
+ * ECONNREFUSED (a stale socket, nothing listening); a tmux mux with no binary
+ * on PATH is the same class. This is DISTINCT from a herdr that answered and
+ * refused (a bad cwd, an unknown workspace), which carries a herdr error string
+ * and is a real 502, not "start the mux". Kept narrow on purpose: only the
+ * connect-establishment failures, never a mid-op error. */
+export function isMuxUnreachableError(e: unknown): boolean {
+  const err = e as { code?: unknown; message?: unknown };
+  const code = typeof err?.code === "string" ? err.code : "";
+  const msg = typeof err?.message === "string" ? err.message : "";
+  if (code === "ECONNREFUSED" || code === "ECONNRESET" || code === "EPIPE") return true;
+  return /failed to connect|connection (refused|closed)/i.test(msg);
+}
 
 /* THE RESTART PRE-FLIGHT, factored out of the /restart route as a pure function
  * so the mode/sid/command decision is unit-testable without restartPane's
@@ -121,7 +145,7 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
   if (req.method === "GET" && path === "/agents") {
     const denied = requireLocal(req, server);
     if (denied) return denied;
-    const mux = (process.env.CYC_MUX ?? "tmux").trim().toLowerCase() === "herdr" ? "herdr" : "tmux";
+    const mux = muxName();
     const agents = [...sessions.values()].map((s) => ({
       agentId: s.agentId,
       name: titleOf(nameOverrideOf(s.id), claudeTitleOf(s), s.name).text,
@@ -468,6 +492,17 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
     let aid: string;
     let harness: string | undefined;
     const wantAgentId = typeof body.agentId === "string" ? body.agentId : "";
+    /* ARRIVAL, LOGGED BEFORE THE OUTCOME. Every branch below already logs its
+     * answer, but each of those lines sits after a check the request had to
+     * pass; a spawn that reaches ctx.adapter.spawn logs only once that returns.
+     * After the k8plus power-cut (2026-09-29) a + -> recently-closed reopen "did
+     * not work" and the log held nothing about it, so we could not even tell the
+     * request had arrived. This one line, written the instant the body is
+     * parsed, makes "did the reopen reach the engine, and what did it ask for"
+     * answerable independently of whatever the outcome turns out to be. */
+    console.log(wantAgentId
+      ? `[new-session] request reopen ${wantAgentId} (resume=${body.resume === true})`
+      : `[new-session] request new in ${typeof body.cwd === "string" ? body.cwd : ""}`);
     if (wantAgentId) {
       /* REOPEN A RECENTLY-CLOSED AGENT (the + menu's "Recently closed" row). The
        * body names an agent this engine already owns; its cwd and harness come
@@ -591,7 +626,23 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
       return json({ ok: true, paneId, agentId: aid });
     } catch (e) {
       const why = (e as Error)?.message ?? "could not start it";
+      const muxDown = isMuxUnreachableError(e);
       console.error(`[new-session] failed in ${cwd}: ${why}`);
+      /* ALSO IN engine.log, NOT ONLY THE JOURNAL. The console line above is
+       * captured by systemd's journal, but the app and diagnostics read the
+       * structured logbook (~/.callyourcode/logs/engine.log). After the k8plus
+       * power-cut the failure was in the journal and nowhere the app could see,
+       * so the reopen looked like it never reached the engine. */
+      openLog("engine").line("new-session.failed", {
+        cwd, agentId: aid, harness: harness ?? "claude", err: why,
+        muxUnreachable: muxDown ? true : undefined,
+      });
+      /* THE MUX IS DOWN gets its own code so the app can say "start herdr"
+       * rather than showing the bare "Failed to connect". `mux` names it so the
+       * app's sentence is specific to this host's multiplexer. */
+      if (muxDown) {
+        return json({ ok: false, error: why, code: "mux-unreachable", mux: muxName() }, 502);
+      }
       return json({ ok: false, error: why }, 502);
     }
   }

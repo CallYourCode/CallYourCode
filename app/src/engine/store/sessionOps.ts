@@ -308,6 +308,12 @@ export type StartedSession = {
   // this host"), so the caller shows it as-is rather than the generic
   // "Could not start it" wrapper or the misleading "has not appeared" timeout.
   notInstalled?: boolean;
+  // THE MUX IS DOWN (engine /new-session code:"mux-unreachable"): the engine
+  // could not reach its multiplexer, so the agent cannot open at all. The
+  // caller shows a plain "start <mux> on <host>" sentence rather than the bare
+  // "Failed to connect" the engine's error string carries. `mux` names it.
+  muxUnreachable?: boolean;
+  mux?: string;
 };
 
 export async function startSession(
@@ -349,8 +355,11 @@ export async function startSession(
     agentId?: unknown;
     error?: unknown;
     harness?: unknown;
+    code?: unknown;
+    mux?: unknown;
   } | null;
   if (!res.ok) {
+    const muxUnreachable = json?.code === 'mux-unreachable';
     return {
       paneId: '',
       agentId: '',
@@ -360,7 +369,9 @@ export async function startSession(
           : `the engine answered ${res.status}`,
       // The typed harness-missing refusal carries the harness name; anything
       // else (unknown dir, unreachable engine) leaves this false.
-      notInstalled: typeof json?.harness === 'string' && !!json.harness
+      notInstalled: typeof json?.harness === 'string' && !!json.harness,
+      muxUnreachable,
+      mux: muxUnreachable && typeof json?.mux === 'string' ? json.mux : undefined
     };
   }
   if (typeof json?.paneId !== 'string' || !json.paneId) {

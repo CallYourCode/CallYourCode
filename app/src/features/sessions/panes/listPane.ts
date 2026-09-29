@@ -20,6 +20,7 @@ import * as interactionWindow from '@/shared/browser';
 import {opaqueKey} from '@/features/sessions/navigation';
 import {deviceClass} from '@/features/sessions/layout';
 import {enginePin} from '../../../engine/contract';
+import {cachedHostName} from '../../../engine/hostNames';
 import {sortByLatest, mergeTabs, rowChipShown} from '@/features/settings/preferences';
 import {seedKeymapFromServer} from '@/features/settings/preferences';
 import {speaker} from '../../../audio/speaker';
@@ -265,6 +266,10 @@ export function createListPane(deps: ListPaneDeps) {
   const openNewSessionMenu = (e: MouseEvent, trigger: HTMLElement) => {
     const key = activeEngineKey();
     if (!key || dataState.mode !== 'live') {
+      // Logged, not just toasted: after the k8plus power-cut a reopen from this
+      // menu "did not work" and NOTHING was written for the tap, so we could not
+      // tell whether the tap was even blocked here or reached the engine.
+      cyclog('session.open.blocked', {reason: !key ? 'no-engine' : 'not-live'});
       toast('Needs a live engine');
       return;
     }
@@ -276,6 +281,7 @@ export function createListPane(deps: ListPaneDeps) {
       engine.recentlyClosed ? engine.recentlyClosed(key) : Promise.resolve([])
     ]).then(([got, closed]) => {
       if (!got) {
+        cyclog('session.open.unreachable', {});
         toast('Could not reach the engine to list folders; try again');
         return;
       }
@@ -288,11 +294,32 @@ export function createListPane(deps: ListPaneDeps) {
       // Shared post-start landing: wait for the new/reopened session to appear,
       // then open its chat. `where` names the folder for the timeout toast.
       const landStarted = (
-        started: {paneId: string; agentId: string; why: string; notInstalled?: boolean},
+        started: {
+          paneId: string;
+          agentId: string;
+          why: string;
+          notInstalled?: boolean;
+          muxUnreachable?: boolean;
+          mux?: string;
+        },
         where: string
       ) => {
-        const {paneId, agentId, why, notInstalled} = started;
+        const {paneId, agentId, why, notInstalled, muxUnreachable, mux} = started;
         if (!paneId) {
+          cyclog('session.open.fail', {agentId, why, notInstalled: !!notInstalled});
+          // The mux (herdr/tmux) being unreachable is not "could not start it":
+          // NOTHING opens until the multiplexer is back, so say exactly that and
+          // name the host, instead of surfacing the bare "Failed to connect".
+          if (muxUnreachable) {
+            const uh = cachedHostName(key);
+            const host = uh?.host ? (uh.user ? `${uh.user}@${uh.host}` : uh.host) : 'this host';
+            const m = mux || 'the multiplexer';
+            toast(
+              `${m} isn't running on ${host}, so the agent can't open. Start ${m}, then try again.`,
+              8000
+            );
+            return;
+          }
           // A typed harness-missing refusal (engine session-ops) carries a ready
           // human sentence ("claude is not installed on this host"); show it as
           // is. Other failures keep the generic "Could not start it" prefix.
@@ -307,6 +334,7 @@ export function createListPane(deps: ListPaneDeps) {
               ? engine.get(`${key}|${paneId}`)
               : undefined;
           if (found) {
+            cyclog('session.open.done', {agentId, paneId});
             deps.openChat(found.id);
             return;
           }
@@ -314,11 +342,13 @@ export function createListPane(deps: ListPaneDeps) {
             setTimeout(land, 400);
             return;
           }
+          cyclog('session.open.timeout', {agentId, paneId, where});
           toast('Started it in ' + where + ', but it has not appeared here yet');
         };
         land();
       };
       const startIn = (cwd: string, harness?: string) => {
+        cyclog('session.open.tap', {kind: 'new', cwd, harness: harness ?? null});
         toast('Starting a session…');
         void engine.startSession(key, cwd, near(), harness).then((s) => landStarted(s, cwd));
       };
@@ -326,6 +356,7 @@ export function createListPane(deps: ListPaneDeps) {
       // from the agent's meta, so neither is chosen here; resume replays its
       // conversation.
       const reopenClosed = (entry: {agentId: string; cwd: string}) => {
+        cyclog('session.open.tap', {kind: 'reopen', agentId: entry.agentId, cwd: entry.cwd});
         toast('Reopening…');
         void engine
           .startSession(key, entry.cwd, near(), undefined, {agentId: entry.agentId, resume: true})
