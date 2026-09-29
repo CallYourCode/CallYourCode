@@ -264,6 +264,19 @@ type RenderState = {
   // settle, and a spurious same-offset range notification all hold.
   lastScrollTop: number;
   syncScroll: boolean;
+  // The top overscan boundary the last computeWindow committed, with the row-set
+  // identity it was computed against and whether the list was pinned at the
+  // bottom then. While the list stays pinned at the bottom, a PURE re-window (no
+  // row-set change) holds this boundary instead of re-deriving it from the live
+  // scrollTop: the bottom pin's own sub-row scroll jitter would otherwise flip
+  // the boundary across a row, and when that row's cached measurement differs
+  // from its rendered height the top spacer (so scrollHeight) turns bistable and
+  // the pin chases it -- the open-bounce jitter. A reader scroll off the bottom,
+  // or any row-set change, drops the hold and recomputes.
+  winR0: number | null;
+  winRowCount: number;
+  winHeadKey: string | number | null;
+  winAtBottom: boolean;
   // Wired by the render hub: after a scroll-driven re-window, re-run the DOM
   // sweeps (waveform hydration, sticky dates, play state) over the freshly
   // mounted rows so a row scrolled into view hydrates like a store paint.
@@ -889,6 +902,41 @@ function computeWindow(
   const viewBottom = box.scrollTop + box.clientHeight;
   while (r0 > 0 && meas[r0] && meas[r0].start > viewTop) r0--;
   while (r1 < last && meas[r1] && meas[r1].end < viewBottom) r1++;
+  // While the list stays pinned at the bottom, a PURE re-window (the row set
+  // unchanged since the last window) must not re-derive the top overscan
+  // boundary from the live scrollTop. The bottom pin writes scrollTop to the
+  // end every re-window, and that offset carries the pin's own sub-pixel jitter;
+  // when it wobbles across a row's measured extent the boundary flips that row
+  // in and out of the mounted set. If the row's cached measurement differs from
+  // its rendered height (a common estimate/measure gap for a row above the fold)
+  // the top spacer -- and so scrollHeight -- becomes bistable, the pin chases the
+  // taller state, the browser clamps the shorter, and the view oscillates every
+  // frame (the open-bounce jitter). Hold the boundary at the smaller index it
+  // last committed while pinned, so a row already mounted is never dropped by
+  // that jitter. A reader scrolling off the bottom (atBottom false) or any
+  // row-set change recomputes it cleanly. The hold is scoped to the boundary
+  // JITTER -- the newly computed r0 dropping the previous boundary row by one or
+  // two rows -- so it never fights a paint that legitimately re-derives a much
+  // smaller window (an early full-list paint committed winR0 0, and a later
+  // virtualized paint's r0 must be free to jump forward to the real bottom band).
+  const headKey = st.rows.length ? st.rows[0].key : null;
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_PIN_PX;
+  if (
+    atBottom &&
+    st.winAtBottom &&
+    st.winR0 !== null &&
+    st.winR0 < r0 &&
+    r0 - st.winR0 <= 2 &&
+    st.winR0 <= last &&
+    st.winRowCount === st.rows.length &&
+    st.winHeadKey === headKey
+  ) {
+    r0 = st.winR0;
+  }
+  st.winR0 = r0;
+  st.winRowCount = st.rows.length;
+  st.winHeadKey = headKey;
+  st.winAtBottom = atBottom;
   const padTop = meas[r0] ? meas[r0].start : vitems[0].start;
   const padBottom = meas[r1] ? Math.max(0, total - meas[r1].end) : 0;
   return {r0, r1, padTop, padBottom};
@@ -1243,12 +1291,20 @@ function paintMessages(
       lastSecondKey: null,
       lastScrollTop: -1,
       syncScroll: false,
+      winR0: null,
+      winRowCount: -1,
+      winHeadKey: null,
+      winAtBottom: false,
       onWindowChange: null,
       nodeCache: new Map()
     };
     renderStates.set(inner, st);
   } else if (!sameChat) {
     st.sessionId = s.id;
+    st.winR0 = null;
+    st.winRowCount = -1;
+    st.winHeadKey = null;
+    st.winAtBottom = false;
     st.frames = [];
     st.fromItem = 0;
     st.toItem = -1;
