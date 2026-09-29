@@ -137,6 +137,11 @@ vi.mock('../components/popupMenu', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   openMenu: vi.fn()
 }));
+const cyclogMock = vi.hoisted(() => vi.fn());
+vi.mock('../shared/logging', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  cyclog: cyclogMock
+}));
 import {createListPane, type ListPaneDeps} from '../features/sessions/panes/listPane';
 import {sessionState, dataState} from '../sessionState';
 import {openMenu} from '../components/popupMenu';
@@ -518,6 +523,66 @@ describe('the new-session menu', () => {
       agentId: 'ag-AAAAAAAAAAAAAAAA',
       resume: true
     });
+  });
+
+  // THE k8plus POWER-CUT (2026-09-29): the owner tapped a recently-closed agent
+  // to reopen it and it "did not work", but app.log held NO line for the tap, so
+  // we could not tell whether the tap fired or what came back. The flow now logs
+  // the tap AND its result.
+  test('a recently-closed reopen logs the tap and its result', async () => {
+    vi.mocked(store.newSessionPlaces).mockResolvedValueOnce({
+      places: ['/w/app'],
+      home: '/home/u',
+      def: null,
+      harnesses: [{kind: 'claude', available: true}],
+      recent: []
+    });
+    vi.mocked(store.recentlyClosed).mockResolvedValueOnce([
+      {
+        agentId: 'ag-AAAAAAAAAAAAAAAA',
+        name: 'Ada',
+        harness: 'claude',
+        cwd: '/old/proj',
+        canResume: true
+      }
+    ]);
+    // the reopen comes back empty (the incident): landStarted takes the fail arm
+    vi.mocked(store.startSession).mockResolvedValueOnce({
+      paneId: '',
+      agentId: '',
+      why: 'could not reach the engine'
+    });
+    const {pane} = mk();
+    const items = await clickFab(pane);
+    cyclogMock.mockClear(); // ignore render-time nav.tap noise
+    items[1]!.onClick(); // tap "Ada"
+    expect(cyclogMock).toHaveBeenCalledWith('session.open.tap', {
+      kind: 'reopen',
+      agentId: 'ag-AAAAAAAAAAAAAAAA',
+      cwd: '/old/proj'
+    });
+    await vi.waitFor(() =>
+      expect(cyclogMock).toHaveBeenCalledWith('session.open.fail', {
+        agentId: '',
+        why: 'could not reach the engine',
+        notInstalled: false
+      })
+    );
+  });
+
+  // The + menu itself failing to reach the engine (post-reboot reconnect window)
+  // used to only toast; it now logs a line, so a menu that never populated is no
+  // longer invisible.
+  test('a + menu that cannot reach the engine logs it', async () => {
+    vi.mocked(store.newSessionPlaces).mockResolvedValueOnce(null as never);
+    const {pane} = mk();
+    const floatingAction = pane.leftContent.querySelector(
+      '.cyc-new-conversation'
+    ) as HTMLElement;
+    cyclogMock.mockClear();
+    floatingAction.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+    await vi.waitFor(() => expect(cyclogMock).toHaveBeenCalledWith('session.open.unreachable', {}));
+    expect(vi.mocked(openMenu)).not.toHaveBeenCalled();
   });
 
   // The engine refuses when the chosen harness is not installed on its host

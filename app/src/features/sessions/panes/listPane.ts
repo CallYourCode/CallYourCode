@@ -265,6 +265,10 @@ export function createListPane(deps: ListPaneDeps) {
   const openNewSessionMenu = (e: MouseEvent, trigger: HTMLElement) => {
     const key = activeEngineKey();
     if (!key || dataState.mode !== 'live') {
+      // Logged, not just toasted: after the k8plus power-cut a reopen from this
+      // menu "did not work" and NOTHING was written for the tap, so we could not
+      // tell whether the tap was even blocked here or reached the engine.
+      cyclog('session.open.blocked', {reason: !key ? 'no-engine' : 'not-live'});
       toast('Needs a live engine');
       return;
     }
@@ -276,6 +280,7 @@ export function createListPane(deps: ListPaneDeps) {
       engine.recentlyClosed ? engine.recentlyClosed(key) : Promise.resolve([])
     ]).then(([got, closed]) => {
       if (!got) {
+        cyclog('session.open.unreachable', {});
         toast('Could not reach the engine to list folders; try again');
         return;
       }
@@ -293,6 +298,7 @@ export function createListPane(deps: ListPaneDeps) {
       ) => {
         const {paneId, agentId, why, notInstalled} = started;
         if (!paneId) {
+          cyclog('session.open.fail', {agentId, why, notInstalled: !!notInstalled});
           // A typed harness-missing refusal (engine session-ops) carries a ready
           // human sentence ("claude is not installed on this host"); show it as
           // is. Other failures keep the generic "Could not start it" prefix.
@@ -307,6 +313,7 @@ export function createListPane(deps: ListPaneDeps) {
               ? engine.get(`${key}|${paneId}`)
               : undefined;
           if (found) {
+            cyclog('session.open.done', {agentId, paneId});
             deps.openChat(found.id);
             return;
           }
@@ -314,11 +321,13 @@ export function createListPane(deps: ListPaneDeps) {
             setTimeout(land, 400);
             return;
           }
+          cyclog('session.open.timeout', {agentId, paneId, where});
           toast('Started it in ' + where + ', but it has not appeared here yet');
         };
         land();
       };
       const startIn = (cwd: string, harness?: string) => {
+        cyclog('session.open.tap', {kind: 'new', cwd, harness: harness ?? null});
         toast('Starting a session…');
         void engine.startSession(key, cwd, near(), harness).then((s) => landStarted(s, cwd));
       };
@@ -326,6 +335,7 @@ export function createListPane(deps: ListPaneDeps) {
       // from the agent's meta, so neither is chosen here; resume replays its
       // conversation.
       const reopenClosed = (entry: {agentId: string; cwd: string}) => {
+        cyclog('session.open.tap', {kind: 'reopen', agentId: entry.agentId, cwd: entry.cwd});
         toast('Reopening…');
         void engine
           .startSession(key, entry.cwd, near(), undefined, {agentId: entry.agentId, resume: true})

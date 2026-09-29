@@ -468,6 +468,17 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
     let aid: string;
     let harness: string | undefined;
     const wantAgentId = typeof body.agentId === "string" ? body.agentId : "";
+    /* ARRIVAL, LOGGED BEFORE THE OUTCOME. Every branch below already logs its
+     * answer, but each of those lines sits after a check the request had to
+     * pass; a spawn that reaches ctx.adapter.spawn logs only once that returns.
+     * After the k8plus power-cut (2026-09-29) a + -> recently-closed reopen "did
+     * not work" and the log held nothing about it, so we could not even tell the
+     * request had arrived. This one line, written the instant the body is
+     * parsed, makes "did the reopen reach the engine, and what did it ask for"
+     * answerable independently of whatever the outcome turns out to be. */
+    console.log(wantAgentId
+      ? `[new-session] request reopen ${wantAgentId} (resume=${body.resume === true})`
+      : `[new-session] request new in ${typeof body.cwd === "string" ? body.cwd : ""}`);
     if (wantAgentId) {
       /* REOPEN A RECENTLY-CLOSED AGENT (the + menu's "Recently closed" row). The
        * body names an agent this engine already owns; its cwd and harness come
