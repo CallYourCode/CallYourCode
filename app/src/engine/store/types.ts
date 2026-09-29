@@ -25,6 +25,13 @@ export type CycEngineSession = CycSession & {
    * overlaid at display time with this device's own pending sightings
    * (readState.ts effectiveMarkerOf). Never recomputed from row timestamps. */
   readThrough?: EngineReadThrough | null;
+  /* THE ENGINE'S UNREAD COUNT as last broadcast, kept UNZEROED even for the
+   * attached (open) chat whose badge `unread` above is forced to 0 (you are
+   * reading it). Speech-on-open reads THIS as the same authority the divider
+   * uses for WHETHER anything is unheard, and as the count of newest clips to
+   * speak when the read-through row has aged out of the loaded window. Runtime
+   * only: it never persists and never paints the list. */
+  engineUnread?: number;
   replayed?: boolean;
 
   historyAdded?: number;

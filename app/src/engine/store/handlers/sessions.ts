@@ -14,7 +14,20 @@ import {noteRosterSynced, persistRoster} from '../roster';
 import {pruneNotifAvatars, syncNotifAvatars} from '@/features/media/notifAvatars';
 import * as sync from '../../sync';
 import type {HandlerCtx} from './types';
-import {applyBroadcastReadThrough} from '../readState';
+import {
+  applyBroadcastReadThrough,
+  forgetReadStateFresh,
+  noteReadStateFresh
+} from '../readState';
+
+/* The engine's live read state for a session no longer holds "on this
+ * connection" once the pipe drops: after a reconnect the owner may have read the
+ * chat elsewhere while offline. Clear the freshness flag so speech-on-reconnect
+ * waits for THIS connection's sessions frame before it decides what is unheard
+ * (readState.readStateFreshOnConn), instead of speaking from the pre-drop state. */
+sync.onDisconnected((engineKey) => {
+  for (const s of sessions.values()) if (s.engineKey === engineKey) forgetReadStateFresh(s.id);
+});
 
 /* THE DEATH GRACE (dead-session archive): a session the engine still lists but
  * whose pane just ended (alive flipped true -> false in a frame) is not yanked
@@ -85,6 +98,10 @@ function applySessionRow(
        * and this frame carries that, so honour it. Cleared on open
        * (store.attach), so the badge still lifts the moment he comes back. */
       s.unread = s.id === ctx.attachedId() && !markedUnread.has(s.id) ? 0 : es.unread;
+      // The badge above is zeroed for the attached chat; keep the engine's real
+      // count beside it so speech-on-open reads the same unread authority the
+      // divider does even while the owner is reading this chat.
+      s.engineUnread = es.unread;
 
       /* THE ENGINE IS THE ONE AUTHORITY (fix-unread): adopt its broadcast
        * read-through IDENTITY verbatim, no max()-of-timestamps reconcile with a
@@ -95,6 +112,9 @@ function applySessionRow(
       if (es.readThrough !== undefined) applyBroadcastReadThrough(s, es.readThrough);
       else if (es.heardTs !== undefined) applyBroadcastReadThrough(s, {ts: es.heardTs});
       if (es.heardTs !== undefined) s.heardTs = es.heardTs;
+      // The engine has now served this session's read state on the live pipe:
+      // speech deferred at open (readStateFreshOnConn) may run, on this truth.
+      noteReadStateFresh(s.id);
       if (es.thinking !== undefined) {
         engineThinking.add(s.id);
 

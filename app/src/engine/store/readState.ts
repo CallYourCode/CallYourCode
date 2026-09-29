@@ -99,6 +99,49 @@ export function applyBroadcastReadThrough(
   s.readThrough = rt ?? undefined;
 }
 
+/* HAS THE ENGINE REFRESHED THIS SESSION'S READ STATE ON THE CURRENT LIVE
+ * CONNECTION? At a cold boot / reconnect / notification-tap open the marker and
+ * the unread count on the session are the CACHED roster values (persisted in
+ * roster.ts), and those can be STALE: the owner read the chat on the laptop
+ * while the phone slept, so the phone's persisted unread is 0 and its marker is
+ * behind the truth. Speech-on-open must not select the to-play set from that --
+ * a `ts` scan replays already-heard clips (the owner's "back on the phone it
+ * plays some old audio message") and a stale marker misses a genuine new reply.
+ * speakUnheard waits for this flag; the sessions/catchup frame sets it when the
+ * engine serves this session's live row, and its arrival re-invokes speakUnheard
+ * (onReadStateFresh -> renderHub) so speech runs once, on the engine's truth.
+ * Cleared on disconnect so "on this connection" holds again after a reconnect. */
+const readStateFresh = new Set<string>();
+const readStateFreshSubs = new Set<(sessionId: string) => void>();
+
+export function noteReadStateFresh(sessionId: string): void {
+  if (readStateFresh.has(sessionId)) return;
+  readStateFresh.add(sessionId);
+  for (const cb of [...readStateFreshSubs]) cb(sessionId);
+}
+
+export function readStateFreshOnConn(sessionId: string): boolean {
+  return readStateFresh.has(sessionId);
+}
+
+export function forgetReadStateFresh(sessionId: string): void {
+  readStateFresh.delete(sessionId);
+}
+
+/* Fired ONCE on the not-fresh -> fresh edge for a session (the first live read
+ * state of this connection). speakUnheard, deferred at open, is re-invoked here
+ * so it decides on the engine's truth instead of the cache. */
+export function onReadStateFresh(cb: (sessionId: string) => void): () => void {
+  readStateFreshSubs.add(cb);
+  return () => readStateFreshSubs.delete(cb);
+}
+
+// Test seam: module state (the fresh set) outlives a test's sessions.clear().
+export function __resetReadStateFreshForTest(): void {
+  readStateFresh.clear();
+  readStateFreshSubs.clear();
+}
+
 /* REPORT A SIGHTING: "this device saw row R". Overlays it optimistically (the
  * durable heard intent IS the overlay) and queues that intent for the drain to
  * deliver on the next sealed pipe. Coalesces per session, keeping the furthest

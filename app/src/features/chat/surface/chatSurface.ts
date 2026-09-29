@@ -22,6 +22,7 @@ import {active, allSessions, selectTabFor} from '@/sessionSelectors';
 import {createChatChrome} from './chatChrome';
 import {installHistoryPager} from './historyPager';
 import {createReaderLanding} from './readerLanding';
+import type {PlayReason} from './audioPlayback';
 import {
   markMachineTop,
   isMachineTop as machineTopMatches,
@@ -46,7 +47,7 @@ export interface ChatSurfaceDeps {
   heardTsOf(s: CycSession): number;
   readMarkerOf(s: CycSession): ReadMarker | undefined;
   reportViewedThrough(id: string): void;
-  play(sessionId: string, msgId: string, text: string): void;
+  play(sessionId: string, msgId: string, text: string, reason?: PlayReason): void;
   suppressAutoSpeak(): boolean;
   clearSuppressAutoSpeak(): void;
   isChatViewOpen(): boolean;

@@ -30,7 +30,9 @@ vi.mock('../engine/store', () => ({
   onReplayed: () => () => {},
   canOlder: () => false,
   loadOlder: vi.fn(async () => 0),
-  overlayOn: () => false
+  overlayOn: () => false,
+  readStateFreshOnConn: () => true,
+  onReadStateFresh: () => () => {}
 }));
 vi.mock('../components/domHelpers', () => ({
   h: (_tag: string, cls: string) => mkEl(cls)

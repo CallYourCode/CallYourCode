@@ -8,7 +8,9 @@ export {
   reportSighting,
   forgetSighting,
   effectiveMarkerOf,
-  applyBroadcastReadThrough
+  applyBroadcastReadThrough,
+  readStateFreshOnConn,
+  onReadStateFresh
 } from './store/readState';
 export type {Alongside} from './intents';
 import * as drain from './sync/drain';

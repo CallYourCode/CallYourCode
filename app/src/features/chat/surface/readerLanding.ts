@@ -7,11 +7,12 @@ import {speaker} from '@/audio/speaker';
 import {mayStartSpeech} from '@/speechGate';
 import {UNREAD_LANDING_SELECTOR} from '../messages/messageFrame';
 import {scrollMessageIntoView, repaintMessagesAtScroll, rewindowMessages} from './messageList';
+import type {PlayReason} from './audioPlayback';
 
 interface ReaderLandingDeps {
   heardTsOf(session: CycSession): number;
   readMarkerOf(session: CycSession): ReadMarker | undefined;
-  play(sessionId: string, msgId: string, text: string): void;
+  play(sessionId: string, msgId: string, text: string, reason?: PlayReason): void;
   suppressAutoSpeak(): boolean;
   isChatViewOpen(): boolean;
 }
@@ -41,6 +42,25 @@ function markerIndex(
   const mid = marker.mid;
   if (!mid) return -1;
   return messages.findIndex((m) => (m as CycEngineMessage).mid === mid);
+}
+
+/* Which of two markers sits FURTHER FORWARD by ROW identity (readState.furthest,
+ * mirrored here for the surface): both resolve to a row index and the higher
+ * wins; an unresolved row falls back to its instant so a marker past the loaded
+ * tail still wins. Speech starts at the most-advanced read position -- the pin
+ * captured at open, or this device's live marker once a clip has been heard --
+ * so a re-run after a clip plays does not re-queue it. */
+function furthestMarker(
+  messages: readonly CycSession['messages'][number][],
+  a: ReadMarker | undefined,
+  b: ReadMarker | undefined
+): ReadMarker | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const ia = markerIndex(messages, a);
+  const ib = markerIndex(messages, b);
+  if (ia >= 0 && ib >= 0) return ib > ia ? b : a;
+  return b.ts > a.ts ? b : a;
 }
 
 export function createReaderLanding(options: ReaderLandingOptions) {
@@ -101,19 +121,53 @@ export function createReaderLanding(options: ReaderLandingOptions) {
     if (sessionId !== sessionState.activeId || !mayStartSpeech(sessionId)) return;
     const session = engine.get(sessionId);
     if (!session) return;
-    const speakable = session.messages.filter(
-      (message): message is CycEngineMessage =>
-        message.role === 'claude' && !!(message as CycEngineMessage).msgId
-    );
-    if (!speakable.length) return;
-    // Speech starts at the SAME marker the divider does: the engine's, overlaid
-    // with this device's sightings, pinned to where the chat was opened.
-    const heard = Math.max(openMarker()?.ts ?? 0, deps.heardTsOf(session));
+    // NEVER decide what is unheard from a stale or unknown read state. At a cold
+    // boot / reconnect / notification-tap open the marker and the count on the
+    // session are the CACHED roster values, and those can be stale: the owner
+    // read the chat on the laptop while the phone slept, so the phone's persisted
+    // unread is 0 and its marker is undefined (readThrough is not persisted) even
+    // though a live reply is genuinely unheard. Selecting then either replays the
+    // whole loaded window (the old `!marker -> start=0`) or a `ts` scan queues an
+    // ALREADY-HEARD clip -- the owner's "back on the phone it plays some old audio
+    // message". Wait until the engine has refreshed THIS session's read state on
+    // THIS connection (the sessions/catchup frame); its arrival re-invokes this
+    // (readState.onReadStateFresh -> renderHub), so speech runs once, on truth.
+    if (!engine.readStateFreshOnConn(sessionId)) return;
+    const msgs = session.messages;
+    if (!msgs.length) return;
+    // WHETHER anything is unheard is the engine's unread COUNT alone -- the same
+    // authority the divider uses (nothingUnseen). The attached chat's own badge
+    // is zeroed in the store (you are reading it), so read the engine count kept
+    // beside it (engineUnread), falling back to the session count off that path.
+    // unread === 0 means caught up: speak nothing, exactly like the divider.
+    const unread = session.engineUnread ?? session.unread;
+    if (unread <= 0) return;
+    // WHERE the unheard run is, is the read-through ROW IDENTITY -- the same
+    // anchor the divider lands on (firstUnheardId), never a `ts >` scan. Two
+    // shapes, both selecting exactly the clips the engine counts unread:
+    //   - the read-through row is in the loaded window: speak the claude rows
+    //     AFTER it.
+    //   - the marker is unknown, or its row aged out of the window to an older
+    //     page: speak the NEWEST `unread` claude rows -- the engine's count --
+    //     never nothing (the old `idx < 0 -> return` went silent on a genuine new
+    //     reply) and never the whole window (the old `!marker -> start=0`).
+    const marker = furthestMarker(msgs, openMarker(), deps.readMarkerOf(session));
+    const idx = marker ? markerIndex(msgs, marker) : -1;
+    const claudeFrom = (from: number): CycEngineMessage[] => {
+      const out: CycEngineMessage[] = [];
+      for (let i = from; i < msgs.length; i++) {
+        const m = msgs[i] as CycEngineMessage;
+        if (m.role === 'claude' && m.msgId) out.push(m);
+      }
+      return out;
+    };
+    const candidates = idx >= 0 ? claudeFrom(idx + 1) : claudeFrom(0).slice(-unread);
+    if (!candidates.length) return;
     const pending = speaker.pending();
-    const queue = speakable.filter((message) => message.ts > heard && !pending.has(message.msgId!));
+    const queue = candidates.filter((m) => !pending.has(m.msgId!));
     if (!queue.length) return;
     speaker.stopAll();
-    for (const message of queue) deps.play(sessionId, message.msgId!, message.text);
+    for (const m of queue) deps.play(sessionId, m.msgId!, m.text, 'autoplay-open');
   };
 
   const scrollToFirstUnread = (firstUnreadId?: string): boolean => {

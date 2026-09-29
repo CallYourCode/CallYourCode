@@ -1,5 +1,6 @@
 import {resolveAudioUrl} from './audioCache';
 import {WebAudioClip, unlockPlayback} from './webAudioClip';
+import {cyclog} from '@/shared/logging';
 
 const DEBUG = new URLSearchParams(location.search).has('audiodebug');
 function dbg(...a: unknown[]) {
@@ -24,6 +25,10 @@ type SpeakerItem = {
   durationS?: number;
 
   manual?: boolean;
+  /** WHY this clip is playing (audioPlayback.PlayReason): 'autoplay-open',
+   *  'autoplay-arrival' or 'tap'. Kept as a string here so the speaker owns no
+   *  app-surface types; it rides onto the clip.play log line for diagnosis. */
+  reason?: string;
 };
 
 type SpeakerStateName = 'idle' | 'loading' | 'speaking' | 'paused' | 'finished' | 'blocked';
@@ -379,6 +384,11 @@ class Speaker {
           } catch {}
         } else this.audio.src = src;
         if (this.stateName === 'paused') return;
+        cyclog('clip.play', {
+          session: item.sessionId,
+          msg: item.msgId,
+          reason: item.reason ?? 'tap'
+        });
         this.playEl(() => this.emit('speaking', item));
       })
       .catch((e) => {

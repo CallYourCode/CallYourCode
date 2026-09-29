@@ -87,7 +87,7 @@ describe('play() duration resolution', () => {
     );
     api.play('s1', 'm1', 'a');
     api.play('s1', 'm2', 'b');
-    api.play('s1', 'm3', 'c', true);
+    api.play('s1', 'm3', 'c', 'tap');
     const calls = (speaker.enqueue as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls[0][0]).toMatchObject({
       msgId: 'm1',
