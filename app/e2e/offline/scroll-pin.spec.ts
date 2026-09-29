@@ -66,6 +66,35 @@ async function geom(page: Page, at: string): Promise<Geom> {
   );
 }
 
+// What the READER SEES: the first fully-visible message row (top edge at or
+// below the scroller's top edge), by its stable data-mid and its on-screen top,
+// plus the distance to the end. On a virtualized list scrollTop is not a proxy
+// for content position -- a programmatic jump re-seats scrollTop against a
+// recomputed top spacer, so the raw number can shift hundreds of px while the
+// content on screen does not move -- so a "did the view move" assertion must read
+// the visible row, not scrollTop.
+async function visibleRow(page: Page) {
+  return page.evaluate((scrollSel) => {
+    const scroll = document.querySelector(scrollSel) as HTMLElement;
+    const box = scroll.getBoundingClientRect();
+    let first: HTMLElement | null = null;
+    for (const row of scroll.querySelectorAll<HTMLElement>('.cyc-message[data-mid]')) {
+      if (row.getBoundingClientRect().top >= box.top - 0.5) {
+        first = row;
+        break;
+      }
+    }
+    const fb = first?.getBoundingClientRect();
+    return {
+      mid: first?.dataset.mid ?? null,
+      rowTop: fb ? Math.round(fb.top - box.top) : null,
+      dist: Math.round(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight),
+      clientHeight: scroll.clientHeight,
+      text: (first?.textContent ?? '').slice(0, 40)
+    };
+  }, SCROLL);
+}
+
 function record(name: string, samples: Geom[]) {
   if (!OUT) return;
   mkdirSync(OUT, {recursive: true});
@@ -214,21 +243,32 @@ test('scroll pin (e): a user who scrolled up is not moved by an agent reply', as
   const eng = await startScrollEngine({count: 80});
   try {
     await openLong(page, eng.port);
-    const top = await page.evaluate((sel) => {
+    await page.evaluate((sel) => {
       const s = document.querySelector(sel) as HTMLElement;
       s.scrollTop = s.scrollTop - 2 * s.clientHeight;
-      return s.scrollTop;
     }, SCROLL);
+    // Let the programmatic jump settle: on the virtualized list it re-windows and
+    // re-seats scrollTop against the recomputed top spacer, so the baseline has to
+    // be read AFTER that settle. Measure the reader-visible row, not scrollTop --
+    // scrollTop legitimately shifts across the re-window while nothing on screen
+    // moves, which is exactly what a raw-scrollTop assertion here misread as a
+    // 311px jump.
     await page.waitForTimeout(400);
+    const before = await visibleRow(page);
+    expect(before.dist, 'the reader must be scrolled up before the reply').toBeGreaterThan(
+      before.clientHeight
+    );
+
     eng.say('A reply the reader did not ask to be scrolled to. '.repeat(4));
     await page.waitForTimeout(700);
-    const after = await page.evaluate((sel) => {
-      const s = document.querySelector(sel) as HTMLElement;
-      return {top: s.scrollTop, dist: s.scrollHeight - s.scrollTop - s.clientHeight};
-    }, SCROLL);
+    const after = await visibleRow(page);
     record('e-reply-held', [await geom(page, 'after-reply')]);
-    expect(Math.abs(after.top - top), 'the view moved under a reader who scrolled up').toBeLessThanOrEqual(2);
-    expect(after.dist).toBeGreaterThan(after.dist > 0 ? 100 : -1);
+    expect(after.mid, 'the reply changed which row the reader is looking at').toBe(before.mid);
+    expect(
+      Math.abs((after.rowTop ?? 0) - (before.rowTop ?? 0)),
+      'the view moved under a reader who scrolled up'
+    ).toBeLessThanOrEqual(2);
+    expect(after.dist, 'the reply pulled the view toward the bottom').toBeGreaterThan(100);
   } finally {
     await eng.close();
   }
