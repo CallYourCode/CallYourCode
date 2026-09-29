@@ -8,6 +8,12 @@ import {toast} from '@/components/widgets';
 
 export type MessageRef = {ts: number; role: 'user' | 'claude'; seq?: number};
 
+/* WHY A CLIP PLAYED, carried onto the clip.play log line so a future "it played
+ * an old message" is diagnosable from the log alone: 'autoplay-open' (speech
+ * catching a chat up on open / reconnect), 'autoplay-arrival' (a reply spoken as
+ * it lands while the chat is open), or 'tap' (he pressed play). */
+export type PlayReason = 'autoplay-open' | 'autoplay-arrival' | 'tap';
+
 export type SpeakerLike = {
   state: {state: string; msgId?: string | null; sessionId?: string | null; text?: string | null};
   enqueue(item: {
@@ -17,6 +23,7 @@ export type SpeakerLike = {
     sessionId: string;
     durationS?: number;
     manual?: boolean;
+    reason?: PlayReason;
   }): void;
   pause(): void;
   resume(): void;
@@ -78,14 +85,20 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
     decodedDurations
   } = deps;
 
-  function play(sessionId: string, msgId: string, text: string, manual = false) {
+  function play(
+    sessionId: string,
+    msgId: string,
+    text: string,
+    reason: PlayReason = 'autoplay-arrival'
+  ) {
     speaker.enqueue({
       msgId,
       url: store.audioUrl(sessionId, msgId),
       text,
       sessionId,
       durationS: knownDuration(sessionId, msgId) ?? deps.growingOf(msgId)?.durS,
-      manual
+      manual: reason === 'tap',
+      reason
     });
   }
 
@@ -140,7 +153,7 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
       return;
     }
 
-    play(id, latest.msgId, latest.text, true);
+    play(id, latest.msgId, latest.text, 'tap');
   }
 
   function onMessagePlay(m: CycMessage, el: HTMLElement) {
@@ -161,12 +174,12 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
     }
 
     speaker.stopAll();
-    play(s.id, em.msgId, m.text, true);
+    play(s.id, em.msgId, m.text, 'tap');
 
     for (const next of s.messages.slice(s.messages.findIndex((x) => x.id === m.id) + 1)) {
       const nm = next as CycEngineMessage;
       if (next.role !== 'claude' || !nm.msgId) continue;
-      play(s.id, nm.msgId, next.text, true);
+      play(s.id, nm.msgId, next.text, 'tap');
     }
   }
 
@@ -183,7 +196,7 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
     }
     pendingSeek = {msgId: em.msgId, ratio};
     speaker.stopAll();
-    play(s.id, em.msgId, m.text, true);
+    play(s.id, em.msgId, m.text, 'tap');
   }
 
   let tickMsgId = '';

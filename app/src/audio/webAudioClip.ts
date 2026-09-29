@@ -314,7 +314,7 @@ export class WebAudioClip {
   async play(): Promise<void> {
     if (this.elMode) {
       this._backend = 'element';
-      cyclog('clip.play', {
+      cyclog('clip.audio', {
         backend: 'element',
         rate: this._rate,
         from: Math.round((this.el?.currentTime || 0) * 10) / 10
@@ -325,7 +325,7 @@ export class WebAudioClip {
 
     this.playIntentAt = performance.now();
     this._firstAudioMs = -1;
-    cyclog('clip.play', {
+    cyclog('clip.audio', {
       backend: 'webaudio',
       rate: this._rate,
       bytes: this.buffer ? this.buffer.length * this.buffer.numberOfChannels * 4 : null,

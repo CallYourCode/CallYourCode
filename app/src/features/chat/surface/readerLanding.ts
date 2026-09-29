@@ -7,11 +7,12 @@ import {speaker} from '@/audio/speaker';
 import {mayStartSpeech} from '@/speechGate';
 import {UNREAD_LANDING_SELECTOR} from '../messages/messageFrame';
 import {scrollMessageIntoView, repaintMessagesAtScroll, rewindowMessages} from './messageList';
+import type {PlayReason} from './audioPlayback';
 
 interface ReaderLandingDeps {
   heardTsOf(session: CycSession): number;
   readMarkerOf(session: CycSession): ReadMarker | undefined;
-  play(sessionId: string, msgId: string, text: string): void;
+  play(sessionId: string, msgId: string, text: string, reason?: PlayReason): void;
   suppressAutoSpeak(): boolean;
   isChatViewOpen(): boolean;
 }
@@ -41,6 +42,25 @@ function markerIndex(
   const mid = marker.mid;
   if (!mid) return -1;
   return messages.findIndex((m) => (m as CycEngineMessage).mid === mid);
+}
+
+/* Which of two markers sits FURTHER FORWARD by ROW identity (readState.furthest,
+ * mirrored here for the surface): both resolve to a row index and the higher
+ * wins; an unresolved row falls back to its instant so a marker past the loaded
+ * tail still wins. Speech starts at the most-advanced read position -- the pin
+ * captured at open, or this device's live marker once a clip has been heard --
+ * so a re-run after a clip plays does not re-queue it. */
+function furthestMarker(
+  messages: readonly CycSession['messages'][number][],
+  a: ReadMarker | undefined,
+  b: ReadMarker | undefined
+): ReadMarker | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const ia = markerIndex(messages, a);
+  const ib = markerIndex(messages, b);
+  if (ia >= 0 && ib >= 0) return ib > ia ? b : a;
+  return b.ts > a.ts ? b : a;
 }
 
 export function createReaderLanding(options: ReaderLandingOptions) {
@@ -101,19 +121,39 @@ export function createReaderLanding(options: ReaderLandingOptions) {
     if (sessionId !== sessionState.activeId || !mayStartSpeech(sessionId)) return;
     const session = engine.get(sessionId);
     if (!session) return;
-    const speakable = session.messages.filter(
-      (message): message is CycEngineMessage =>
-        message.role === 'claude' && !!(message as CycEngineMessage).msgId
-    );
-    if (!speakable.length) return;
-    // Speech starts at the SAME marker the divider does: the engine's, overlaid
-    // with this device's sightings, pinned to where the chat was opened.
-    const heard = Math.max(openMarker()?.ts ?? 0, deps.heardTsOf(session));
+    const msgs = session.messages;
+    // The to-play set derives from the SAME read-through IDENTITY the divider and
+    // the count anchor on (readState / firstUnheardId), never a `ts >` scan. A
+    // restamp, a mis-sorted legacy page, or a read-through row that aged out of
+    // the loaded window while a ts twin sits in it made the ts scan replay an
+    // ALREADY-HEARD clip -- the owner coming back on the phone to an old audio
+    // message, the count reading 0 while speech played on. The start is the row
+    // AFTER the marker; speech and the divider now select the identical rows.
+    if (!msgs.length) return;
+    const marker = furthestMarker(msgs, openMarker(), deps.readMarkerOf(session));
+    let start: number;
+    if (!marker) {
+      start = 0; // nothing read here: speak every claude row from the top
+    } else {
+      const idx = markerIndex(msgs, marker);
+      // Marker present but its row is not in the loaded window (it aged out to an
+      // older page): the divider lands at bottom, and speech gives up here too
+      // rather than replaying whatever a ts scan would sweep in. He reaches the
+      // tail by scrolling to it or tapping.
+      if (idx < 0) return;
+      start = idx + 1;
+    }
+    const candidates: CycEngineMessage[] = [];
+    for (let i = start; i < msgs.length; i++) {
+      const m = msgs[i] as CycEngineMessage;
+      if (m.role === 'claude' && m.msgId) candidates.push(m);
+    }
+    if (!candidates.length) return;
     const pending = speaker.pending();
-    const queue = speakable.filter((message) => message.ts > heard && !pending.has(message.msgId!));
+    const queue = candidates.filter((m) => !pending.has(m.msgId!));
     if (!queue.length) return;
     speaker.stopAll();
-    for (const message of queue) deps.play(sessionId, message.msgId!, message.text);
+    for (const m of queue) deps.play(sessionId, m.msgId!, m.text, 'autoplay-open');
   };
 
   const scrollToFirstUnread = (firstUnreadId?: string): boolean => {
