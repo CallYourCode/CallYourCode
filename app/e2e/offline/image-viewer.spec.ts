@@ -541,3 +541,55 @@ test('wire down, bytes gone: the viewer shows tap to load, never the broken icon
     await engine.close();
   }
 });
+
+// Diagnostic trail (fix-image-open): a shown-image tap always names itself with
+// a `viewer.open` line carrying the docId, and every close names its path with
+// `viewer.close via=...`. The owner's report was a tap that opened nothing on a
+// long-lived page and left NO log at all; these lines make a silent failure
+// localise itself (a `viewer.open` with no `viewer.image.*` after it is the
+// open path failing, a missing `viewer.open` is the tap never reaching it).
+function collectOpenLog(page: Page): () => string[] {
+  const lines: string[] = [];
+  page.on('console', (msg) => {
+    const t = msg.text();
+    if (t.includes('viewer.open') || t.includes('viewer.close')) lines.push(t);
+  });
+  return () => [...lines];
+}
+
+test('a shown image tap logs viewer.open with its docId, and the close logs its path', async ({
+  page
+}) => {
+  test.setTimeout(90_000);
+  const engine = await startTransferEngine({echoUtterances: true, serveUploads: true});
+  const log = collectOpenLog(page);
+  try {
+    await bootPinned(page, engine.port, {size: PHONE});
+    await openChat(page);
+    const bytes = await pngBytes(page, 200);
+    const docId = engine.showImage('diagram.png', bytes, 'image/png');
+    await expect(bubbleImg(page)).toHaveCount(1, {timeout: 15_000});
+    await expectBubblePainted(page, 20_000);
+
+    await tapBubble(page);
+    await expectViewerPainted(page, 'diagnostic open', collectViewerLog(page));
+    await expect
+      .poll(() => log().filter((l) => l.includes('viewer.open ') && l.includes(`docId=${docId}`)), {
+        timeout: 5_000,
+        message: 'no viewer.open line named the tapped docId'
+      })
+      .not.toEqual([]);
+    expect(log().some((l) => l.includes('source=file-card'))).toBe(true);
+
+    await closeViewer(page);
+    await expect
+      .poll(() => log().filter((l) => l.includes('viewer.close') && l.includes('via=esc')), {
+        timeout: 5_000,
+        message: 'no viewer.close line named the escape close path'
+      })
+      .not.toEqual([]);
+    for (const l of log()) console.log('[image viewer] diagnostic log:', l);
+  } finally {
+    await engine.close();
+  }
+});

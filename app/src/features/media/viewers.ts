@@ -267,16 +267,47 @@ export function createMediaViewers(deps: MediaViewersDeps) {
     }
 
     if (m.file.fileKind === 'image') {
+      const docId = m.file.docId;
       if (dataState.mode === 'live' && s) {
-        const docId = m.file.docId;
         const raw = engine.docUrl(s.id, docId) + '/raw';
         const name = m.file.name;
 
-        openAlbumAt(shownKey(docId), {
-          url: raw,
-          name,
+        // Every shown-image tap names itself here, before the viewer builds, so a
+        // tap that then opens nothing (the owner's report) leaves a trail: this
+        // line with no viewer.image.* after it localises the failure to the open
+        // path itself, and viewer.open.failed catches a throw that would
+        // otherwise be silent.
+        cyclog('viewer.open', {
           docId,
-          bytes: () => showVault.imageBlob(docId, raw, s.id, name)
+          name,
+          kind: 'image',
+          source: 'file-card',
+          why: 'a shown image was tapped, so the album viewer is opening'
+        });
+        try {
+          openAlbumAt(shownKey(docId), {
+            url: raw,
+            name,
+            docId,
+            bytes: () => showVault.imageBlob(docId, raw, s.id, name)
+          });
+        } catch (err) {
+          cyclog('viewer.open.failed', {
+            docId,
+            name,
+            err: String(err),
+            why: 'opening the album for a tapped shown image threw, so nothing opened'
+          });
+          throw err;
+        }
+      } else {
+        cyclog('viewer.open.blocked', {
+          docId,
+          mode: dataState.mode,
+          hasSession: !!s,
+          why:
+            'a shown image was tapped but there is no live conversation behind it, ' +
+            'so the viewer did not open'
         });
       }
       return;
