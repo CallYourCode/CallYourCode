@@ -1,8 +1,10 @@
 /* The pi output extension CONSUMER, into the same downstream the transcript
- * feeds. A frame becomes a session-log row (logSession) or a working/idle edge
- * (applyJsonlStatus), and a row that the transcript ALSO produces (same durable
- * id) is not duplicated: the extension is a faster live source, never a second
- * copy.
+ * feeds. A tool frame becomes a session-log row (logSession) and a status frame
+ * a working/idle edge (applyJsonlStatus); a tool row the transcript ALSO
+ * produces (same toolCallId) is not duplicated. A prompt/reply MESSAGE frame is
+ * dropped: message rows come solely from the transcript, because the socket
+ * cannot carry a message's own record id (pi mints it after message_end, so
+ * leafId is the parent entry -- proven against a real transcript, 2026-09-30).
  *
  *   bun test agent-engine/src/chat/pi-ingest.test.ts
  */
@@ -67,31 +69,31 @@ beforeEach(() => {
 afterEach(() => { resetIngest(); resetChatlog(); });
 
 describe("a pi extension frame feeds the session log", () => {
-  test("a reply frame becomes a reply row keyed by its durable id", () => {
-    const s = mkPiSession();
-    const added = applyPiFrame("ag-pi", { t: "pi.event", kind: "reply", id: "leaf-1", ts: 100, text: "hi there" });
-    expect(added).toBe(true);
-    expect(s.log.map((r) => [r.kind, r.text, r.src!.rid])).toEqual([["reply", "hi there", "leaf-1"]]);
-    expect(appended.length).toBe(1);
-  });
-
   test("a tool frame becomes a tool row with its chip name", () => {
     const s = mkPiSession();
     applyPiFrame("ag-pi", { t: "pi.event", kind: "tool", id: "call-2", ts: 101, tool: "bash", text: "ls" });
     expect(s.log[0]).toMatchObject({ kind: "tool", text: "ls", tool: { name: "bash" }, src: { rid: "call-2" } });
   });
+
+  test("a reply/prompt MESSAGE frame is dropped: message rows come from the transcript only", () => {
+    const s = mkPiSession();
+    expect(applyPiFrame("ag-pi", { t: "pi.event", kind: "reply", id: "leaf-1", ts: 100, text: "hi there" })).toBe(false);
+    expect(applyPiFrame("ag-pi", { t: "pi.event", kind: "prompt", id: "leaf-2", ts: 101, text: "a question" })).toBe(false);
+    expect(s.log.length).toBe(0);
+    expect(appended.length).toBe(0);
+  });
 });
 
 describe("dedup against the transcript", () => {
-  test("a row the extension delivered is NOT duplicated when the transcript later carries the same id", () => {
+  test("a tool row the extension delivered is NOT duplicated when the transcript later carries the same toolCallId", () => {
     const s = mkPiSession();
     syncIngest(); // starts the transcript live tail (captures liveCb)
-    // the extension is first (faster): it logs the reply keyed by leaf-1
-    applyPiFrame("ag-pi", { t: "pi.event", kind: "reply", id: "leaf-1", ts: 200, text: "answer" });
+    // the extension is first (faster): it logs the tool keyed by its toolCallId
+    applyPiFrame("ag-pi", { t: "pi.event", kind: "tool", id: "call-1", ts: 200, tool: "bash", text: "ls" });
     expect(s.log.length).toBe(1);
-    // moments later the SAME row arrives from the transcript tail (same rid)
+    // moments later the SAME tool arrives from the transcript tail (same rid)
     liveCb!({
-      events: [{ uuid: "leaf-1", ts: 200, kind: "reply", text: "answer", off: 0 }],
+      events: [{ uuid: "call-1", ts: 200, kind: "tool", tool: "bash", text: "ls", off: 0 }],
       queueOps: [], consumed: [], delivered: [], offset: 512,
     });
     // still one row: logSession is idempotent on h|sid|rid
@@ -99,29 +101,39 @@ describe("dedup against the transcript", () => {
     expect(appended.length).toBe(1);
   });
 
-  test("the reverse order dedupes too (transcript first, then the extension frame)", () => {
+  /* THE DUPLICATE-REPLY REGRESSION (2026-09-30). A pi reply reaches the log by
+   * two paths after a plus-menu reopen turns the extension socket on: the socket
+   * (leafId(ctx) at message_end == the reply record's PARENT id) and the
+   * transcript tail (the reply record's OWN id). The two rids ALWAYS differ, so
+   * before the fix logSession's h|sid|rid dedup kept both and every reply
+   * painted twice. The socket now drops message frames, so exactly one reply
+   * row survives, from the transcript. */
+  test("a pi reply is logged ONCE even though the socket rid (the record's parentId) differs from the transcript's own id", () => {
     const s = mkPiSession();
     syncIngest();
+    // the socket is faster: it delivers the reply first, keyed by the PARENT id
+    applyPiFrame("ag-pi", { t: "pi.event", kind: "reply", id: "parent-toolresult", ts: 300, text: "answer" });
+    // then the transcript tail carries the SAME reply under its OWN record id
     liveCb!({
-      events: [{ uuid: "leaf-9", ts: 300, kind: "reply", text: "done", off: 0 }],
-      queueOps: [], consumed: [], delivered: [], offset: 512,
+      events: [{ uuid: "own-reply-id", ts: 300, kind: "reply", text: "answer", off: 6715092 }],
+      queueOps: [], consumed: [], delivered: [], offset: 6715300,
     });
-    const added = applyPiFrame("ag-pi", { t: "pi.event", kind: "reply", id: "leaf-9", ts: 300, text: "done" });
-    expect(added).toBe(false); // already logged by the transcript
-    expect(s.log.length).toBe(1);
+    const replies = s.log.filter((r) => r.kind === "reply");
+    expect(replies.length).toBe(1); // before the fix: 2 (rids parent-toolresult AND own-reply-id)
+    expect(replies[0].src!.rid).toBe("own-reply-id");
   });
 });
 
 /* THE ENGINE-SPAWNED pi STREAM (root cause of the dead binding, TASK B).
  *
- * pi's reader declares NO sessionEvents source, so the adapter's transcript
- * `subscribe` answers null for a pi pane -- exactly as it does in production.
- * startIngest USED to bail on that null (`if (!sub) return`) BEFORE it ever
- * called subscribePiEvents, so an engine-spawned pi bound its socket, streamed
- * frames into the buffer, and never had a consumer attached: engine.log carried
- * zero ingest.pi-event lines ever. This pins the fix at the seam that broke:
- * with a null transcript tail, the pi extension stream must still attach and
- * carry frames. */
+ * The transcript `subscribe` can answer null for a pi pane -- the transcript
+ * file may not be written yet when the pane first appears. startIngest USED to
+ * bail on that null (`if (!sub) return`) BEFORE it ever called
+ * subscribePiEvents, so an engine-spawned pi bound its socket, streamed frames
+ * into the buffer, and never had a consumer attached: engine.log carried zero
+ * ingest.pi-event lines ever. This pins the fix at the seam that broke: with a
+ * null transcript tail, the pi extension stream must still attach and carry
+ * frames. */
 describe("a pi pane with no transcript tail still attaches the extension stream", () => {
   test("startIngest subscribes to pi events even when the transcript tail is null", () => {
     let piCb: ((frame: PiFrame) => void) | null = null;
@@ -153,9 +165,10 @@ describe("a pi pane with no transcript tail still attaches the extension stream"
     expect(hasIngest("ag-pi")).toBe(true);
     expect(subscribeCalls).toBe(1); // the transcript tail was tried once, answered null
 
-    // and a frame delivered through that captured callback becomes a log row
-    piCb!({ t: "pi.event", kind: "reply", id: "leaf-e1", ts: 100, text: "live from pi" });
-    expect(s.log.map((r) => [r.kind, r.text, r.src!.rid])).toEqual([["reply", "live from pi", "leaf-e1"]]);
+    // and a TOOL frame delivered through that captured callback becomes a log
+    // row (message frames are dropped; the transcript carries those)
+    piCb!({ t: "pi.event", kind: "tool", id: "call-e1", ts: 100, tool: "bash", text: "live from pi" });
+    expect(s.log.map((r) => [r.kind, r.text, r.src!.rid])).toEqual([["tool", "live from pi", "call-e1"]]);
     expect(appended.length).toBe(1);
   });
 });

@@ -175,11 +175,25 @@ function appendBatch(s: IngestSession, sid: string, batch: OverlayBatch, live: b
  * A pi pane cyc launched also streams live events over a unix socket (the pi
  * output extension, adapters/pi-events.ts). Each frame lands here and becomes
  * exactly what a transcript record would: a session-log row (logSession) or a
- * working/idle edge (applyJsonlStatus). Both are ADDITIVE and DEDUPED:
- *  - a prompt/reply/tool frame carries the durable id pi also writes to the
- *    transcript record, so its `src.rid` matches the transcript row's and
- *    logSession keeps one (idempotent on h|sid|rid);
+ * working/idle edge (applyJsonlStatus). It is ADDITIVE and DEDUPED, but only
+ * TOOL rows and STATUS edges flow from the socket:
+ *  - a tool frame carries the toolCallId, the SAME id pi writes to the
+ *    transcript's toolCall record, so its `src.rid` matches the transcript
+ *    row's and logSession keeps one (idempotent on h|sid|rid);
  *  - a status frame goes to applyJsonlStatus, which ignores a repeat edge.
+ *
+ * A prompt/reply MESSAGE frame is DROPPED here: message rows come solely from
+ * the transcript tail (the source of truth every pi pane runs). The socket
+ * cannot carry a message's durable id -- pi mints the transcript record's id
+ * when it WRITES the record, AFTER message_end fires, so cyc-output.js's
+ * leafId(ctx) at that point is still the PARENT entry (the prior toolResult or
+ * user turn), not the assistant record's own id. Proven against a real pi
+ * transcript (2026-09-30): the socket reply's rid was exactly the transcript
+ * reply record's parentId, so the two rids always differ and logSession's
+ * h|sid|rid dedup keeps BOTH -- every reply painted twice in the grey session
+ * rows after a plus-menu reopen turned the extension socket on. Tools are
+ * exempt because their id (the toolCallId) IS known at tool_call time and is
+ * written verbatim to the transcript, so those two rids do match.
  * A `pi.session` identity frame is not a log row and is a no-op here: its
  * identity is consumed earlier and independently by PiEventServer.onSession,
  * the tap the adapter attaches at spawn (adapters/pi-events.ts onSession +
@@ -203,6 +217,10 @@ export function applyPiFrame(id: string, frame: PiFrame): boolean {
   }
   const ev = piFrameToEvent(frame);
   if (!ev) return false;
+  // Message rows come from the transcript only: the socket cannot supply a
+  // message's own record id (see the header note), so a prompt/reply frame
+  // would never dedupe against the transcript row and both would persist.
+  if (ev.kind === "prompt" || ev.kind === "reply") return false;
   const rec = logSession(s, recOf(s, sid, ev));
   if (rec) d.log("ingest.pi-event", { session: id, sid, kind: ev.kind, rid: ev.uuid });
   return !!rec;
@@ -267,13 +285,13 @@ export function startIngest(id: string) {
       }, saved ? saved.off : null)
     : null;
   /* PI OUTPUT EXTENSION (additive), attached INDEPENDENTLY of the transcript
-   * tail. Its frames feed the SAME log + status as the transcript, deduped by
-   * the frame's durable id (applyPiFrame). Gating it behind `sub` (or the
-   * transcript path) is exactly why an engine-spawned pi never delivered a live
-   * frame: pi's reader declares no sessionEvents, so `sub` is always null and
-   * startIngest returned before ever subscribing. It attaches whenever the pane
-   * has a pi-event server; a pane with no server (non-pi, hand-started, old pi)
-   * yields null and stays transcript-only, unchanged. */
+   * tail. Its frames feed the SAME status + tool rows as the transcript, deduped
+   * by the toolCallId both carry (applyPiFrame drops message frames). It must
+   * attach even when `sub` is null (the transcript file not written yet, or a
+   * reader with no sessionEvents source): gating it behind `sub` is what once
+   * left an engine-spawned pi with a bound socket and no consumer. It attaches
+   * whenever the pane has a pi-event server; a pane with no server (non-pi,
+   * hand-started, old pi) yields null and stays transcript-only, unchanged. */
   const piUnsub = d.subscribePiEvents?.(s.muxHandle, (frame) => applyPiFrame(id, frame)) ?? null;
   if (!sub && !piUnsub) return; // neither live source: retried on the next snapshot
   ingests.set(id, { sid, path, handle: s.muxHandle, sub, piUnsub });
