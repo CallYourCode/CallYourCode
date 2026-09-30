@@ -16,7 +16,7 @@ interface HistoryPagerOptions {
 }
 
 export function installHistoryPager(options: HistoryPagerOptions) {
-  const {container, messages, render, ownsOpening, isAnchoring} = options;
+  const {container, messages, render, ownsOpening, isAnchoring, isMachineScroll} = options;
   let prepending = false;
   // The rendered window is virtual now: reaching the top no longer extends an
   // in-memory floor (every loaded row is already in the model). It only pulls
@@ -72,6 +72,15 @@ export function installHistoryPager(options: HistoryPagerOptions) {
       const up = top < lastCoverTop;
       lastCoverTop = top;
       if (!up) return;
+      // The upward move is the APP'S OWN re-seat, not a reader flick: the render
+      // bracket, the anchored re-window, the open landing all write scrollTop and
+      // tag it here (machineScroll). Loading older history off a machine re-seat
+      // is the go-to-bottom runaway -- the field saw go-to-bottom's re-window
+      // yank scrollTop up ~8k px, which the pager read as reaching the top and
+      // answered with a loadEarlier burst (history.older dozens of times, the
+      // model grown far past its window) while the view was nowhere near the top.
+      // A real reader scroll is untagged, so it still loads older at the top.
+      if (isMachineScroll(top)) return pagerSay('machine');
       if (prepending) return pagerSay('prepending');
       const session = active();
       if (!session) return pagerSay('no-active');

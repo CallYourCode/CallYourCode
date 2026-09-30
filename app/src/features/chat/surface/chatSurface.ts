@@ -1396,6 +1396,10 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     readerTook,
     graceOpen,
     holdGraceGrowth,
+    // Whether the unread-divider landing is still actively holding the divider
+    // on screen. anchoredRewindow reads this (via setMessageDividerHold) so it
+    // anchors on the divider only during the hold, never after.
+    holdDividerActive: () => holdDivider,
     firstUnread,
     newBelowCount,
     openPaintIsPending,
