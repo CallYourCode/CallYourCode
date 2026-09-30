@@ -10,6 +10,7 @@ export {
   effectiveMarkerOf,
   applyBroadcastReadThrough,
   readStateFreshOnConn,
+  mayAutoplayArrival,
   onReadStateFresh
 } from './store/readState';
 export type {Alongside} from './intents';
