@@ -94,7 +94,10 @@ export function openImageViewer(
   const list: ViewerItem[] = Array.isArray(items)
     ? items
     : [{url: items, name: typeof index === 'string' ? index : ''}];
-  if (!list.length) return;
+  if (!list.length) {
+    cyclog('viewer.open.failed', {why: 'the image viewer was opened with no items to show'});
+    return;
+  }
   let at = typeof index === 'number' ? index : 0;
   if (at < 0) at = 0;
   if (at > list.length - 1) at = list.length - 1;
@@ -786,7 +789,7 @@ export function openImageViewer(
 
   let told = false;
 
-  const done = () => {
+  const done = (via = 'replace') => {
     document.removeEventListener('keydown', onKey, true);
     window.removeEventListener('popstate', onPop);
     window.clearTimeout(zoomWheelTimer);
@@ -806,6 +809,7 @@ export function openImageViewer(
 
     if (!told) {
       told = true;
+      cyclog('viewer.close', {via, docId: list[at]?.docId ?? null, name: list[at]?.name ?? ''});
       opts.onClose?.();
     }
   };
@@ -813,7 +817,7 @@ export function openImageViewer(
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      done();
+      done('esc');
       return;
     }
     if (!e.key.startsWith('Arrow')) return;
@@ -824,9 +828,9 @@ export function openImageViewer(
       show(at + (e.key === 'ArrowRight' ? 1 : -1));
   };
 
-  const onPop = () => done();
+  const onPop = () => done('back');
 
-  btnClose.addEventListener('click', done);
+  btnClose.addEventListener('click', () => done('x'));
 
   overlay.addEventListener('click', (e) => {
     if (scale > 1) return;
@@ -835,7 +839,7 @@ export function openImageViewer(
       travelled = false;
       return;
     }
-    if (e.target === overlay || e.target === stage || e.target === track) done();
+    if (e.target === overlay || e.target === stage || e.target === track) done('backdrop');
   });
   document.addEventListener('keydown', onKey, true);
   window.addEventListener('popstate', onPop);
@@ -906,7 +910,7 @@ export function openImageViewer(
       overlay.style.transition = `background-color ${IMG_ANIM_MS}ms ease`;
       stage.style.transform = `translateY(${height()}px) scale(.4)`;
       overlay.style.backgroundColor = 'rgba(0, 0, 0, 0)';
-      window.setTimeout(done, IMG_ANIM_MS);
+      window.setTimeout(() => done('dismiss'), IMG_ANIM_MS);
     };
 
     const dismissMove = (e: PointerEvent) => {
