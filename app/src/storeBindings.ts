@@ -188,6 +188,16 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
     {sessionId: string; text: string; origin?: string; growing?: boolean}
   >();
 
+  // A say may autoplay only when the chat is open here AND its row is genuinely
+  // unheard by the engine's read state (mayAutoplayArrival) -- the SAME truth the
+  // unread count and the divider use. Without the second half, a say that names a
+  // row already far behind the read-through (a stranded growing clip whose frame
+  // reaches an open chat, ~200 read rows past it) autoplayed as a fresh arrival:
+  // the owner's "I opened it and it played a very old audio". A genuine live reply
+  // sits AT OR AFTER the read-through, so it still speaks immediately.
+  const mayAutoplaySay = (sessionId: string, msgId: string, origin?: string): boolean =>
+    wouldAutoPlay(sessionId, origin) && engine.mayAutoplayArrival(sessionId, msgId);
+
   const handleSay = (
     sessionId: string,
     msgId: string,
@@ -196,14 +206,14 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
     growing?: boolean
   ) => {
     if (growing) {
-      const played = wouldAutoPlay(sessionId, origin);
+      const played = mayAutoplaySay(sessionId, msgId, origin);
       if (played) audio.play(sessionId, msgId, text);
       growingReplies.set(msgId, {sessionId, text, origin, played});
       audio.updateRowAudio();
       return;
     }
 
-    if (wouldAutoPlay(sessionId, origin)) audio.play(sessionId, msgId, text);
+    if (mayAutoplaySay(sessionId, msgId, origin)) audio.play(sessionId, msgId, text);
     audio.updateRowAudio();
   };
   deps.onTeardown(
@@ -261,7 +271,7 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
         pending &&
         !pending.played &&
         !speaker.pending().has(msgId) &&
-        wouldAutoPlay(sessionId, pending.origin)
+        mayAutoplaySay(sessionId, msgId, pending.origin)
       ) {
         audio.play(sessionId, msgId, pending.text);
       }

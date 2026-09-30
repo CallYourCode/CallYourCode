@@ -89,6 +89,40 @@ export function effectiveMarkerOf(s: CycEngineSession): ReadMarker | undefined {
   return furthest(msgs, broadcastPlusDurable, localMarks.get(s.id));
 }
 
+/* MAY A CLIP AUTOPLAY AS A LIVE ARRIVAL? The SAME truth the unread count and the
+ * divider use: a say only autoplays when its row sits AT OR AFTER this device's
+ * read-through (readState). speakUnheard was already taught this (fix-heard-sync);
+ * the say-frame ARRIVAL path (storeBindings.handleSay) was NOT, so a say that
+ * names a row already far behind the read-through -- a stranded growing clip whose
+ * frame reaches an open chat, ~200 read rows past it -- autoplayed as though it
+ * had just landed (the owner's "it played a very old audio"). Gated here, once,
+ * so both paths speak the same rows.
+ *
+ *   - readStateFreshOnConn: never decide from the CACHED roster read state. Until
+ *     the engine refreshes this session's marker on THIS connection, the marker
+ *     is stale (the owner read the chat elsewhere while this device slept) and a
+ *     decision would replay an already-heard clip. Wait, exactly as speakUnheard.
+ *   - the row must be LOADED: a live arrival's row is written by the `chat` frame
+ *     before its `say`, so it is always in the window; a row that is not loaded is
+ *     an old backfilled one, never a live arrival.
+ *   - AT OR AFTER the marker: a live reply, once auto-sighted on arrival, sits
+ *     exactly AT the read-through, so the boundary is inclusive -- a genuine live
+ *     arrival still speaks; a row strictly BEFORE the marker (heard, read past)
+ *     never does. No `ts` scan: identity alone, like the divider. */
+export function mayAutoplayArrival(sessionId: string, msgId: string): boolean {
+  if (!readStateFreshOnConn(sessionId)) return false;
+  const s = sessions.get(sessionId);
+  if (!s) return false;
+  const msgs = s.messages as CycEngineMessage[];
+  const rowIdx = msgs.findIndex((m) => m.msgId === msgId);
+  if (rowIdx < 0) return false;
+  const marker = effectiveMarkerOf(s);
+  if (!marker) return true; // the engine reports nothing read here: genuinely unheard
+  const markerIdx = markerIndexIn(msgs, marker);
+  if (markerIdx < 0) return true; // marker on an older page: every loaded row is past it
+  return rowIdx >= markerIdx;
+}
+
 /* Adopt the engine's broadcast onto the session. The overlay is left to the
  * intent: it drains and is removed once delivered, and effectiveMarkerOf then
  * reads the broadcast alone. */

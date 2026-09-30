@@ -3,7 +3,12 @@ type Handler = (...a: never[]) => void;
 const fake = vi.hoisted(() => ({
   handlers: {} as Record<string, Handler>,
   sessions: new Map<string, Record<string, unknown>>(),
-  clientId: 'me'
+  clientId: 'me',
+  // The read-through gate the arrival path now consults (engine.mayAutoplayArrival).
+  // Default true: the steady-state open where the reply is genuinely unheard. A
+  // test flips it to false to model a say for a row already at/behind the
+  // read-through (a stranded growing clip's frame reaching an open chat).
+  mayAutoplay: true
 }));
 vi.mock('../engine/store', () => ({
   onReplayed: (fn: Handler) => {
@@ -44,6 +49,7 @@ vi.mock('../engine/store', () => ({
   tabForHost: (): string | null => null,
   sessionFromNotifyKey: (): string | null => null,
   overlayOn: () => false,
+  mayAutoplayArrival: () => fake.mayAutoplay,
   pluginsOf: (): unknown[] => [],
   toolbarPluginIds: () => new Set<string>()
 }));
@@ -160,6 +166,7 @@ function mk(over: Partial<StoreBindingsDeps> = {}) {
 beforeEach(() => {
   fake.handlers = {};
   fake.sessions.clear();
+  fake.mayAutoplay = true;
   dataState.mode = 'live';
   sessionState.activeId = null;
   localStorage.clear();
@@ -175,6 +182,23 @@ describe('the say autoplay controller', () => {
     expect(audio.play).toHaveBeenCalledWith('s1', 'm1', 'hello');
     (audio.play as ReturnType<typeof vi.fn>).mockClear();
     (fake.handlers.say as Handler)(...(['s1', 'm2', 'theirs', 'other-device', false] as never[]));
+    expect(audio.play).not.toHaveBeenCalled();
+  });
+  test('a say for a row already at/behind the read-through never autoplays, open chat or not', () => {
+    // The owner's "I opened BZ Builder and it played a very old audio": a say
+    // frame names a row far behind this device's read-through. The chat is open
+    // and autoSpeak is on, so the old ungated path played it; the read-through
+    // gate (mayAutoplayArrival false) now holds it back.
+    const {audio, deps} = mk();
+    deps.mainColumns.dataset.view = 'chat';
+    sessionState.activeId = 's1';
+    sessionState.autoSpeak = true;
+    fake.mayAutoplay = false;
+    (fake.handlers.say as Handler)(...(['s1', 'old1', 'far back in history', undefined, false] as never[]));
+    expect(audio.play).not.toHaveBeenCalled();
+    // A growing say for such a row is also held, and stays held at say-done.
+    (fake.handlers.say as Handler)(...(['s1', 'old2', 'old growing', undefined, true] as never[]));
+    (fake.handlers.sayDone as Handler)(...(['s1', 'old2', 5] as never[]));
     expect(audio.play).not.toHaveBeenCalled();
   });
   test('a growing reply held back is played whole at say-done, once', () => {
