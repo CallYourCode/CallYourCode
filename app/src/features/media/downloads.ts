@@ -35,21 +35,25 @@ export function canShareFile(name: string, blob: Blob): boolean {
   }
 }
 
-/** How saving `blob` should reach the device: 'share' when the OS share sheet
- *  takes files (an iOS PWA), else 'download' via an `<a download>` link. The
- *  share sheet must be opened from a user gesture, so a caller that has awaited
- *  a fetch settles this only once it has a fresh tap and the bytes in hand. */
+/** How saving `blob` should reach the device: 'share' only on an iOS device
+ *  whose OS share sheet takes files (a home-screen PWA, where `<a download>` is
+ *  ignored), else 'download' via an `<a download>` link. Desktop Chrome also
+ *  reports canShare({files}) but must download straight to disk, never open the
+ *  share sheet. The share sheet must be opened from a user gesture, so a caller
+ *  that has awaited a fetch settles this only once it has a fresh tap and the
+ *  bytes in hand. */
 export function saveMethodFor(name: string, blob: Blob): 'share' | 'download' {
-  return canShareFile(name, blob) ? 'share' : 'download';
+  return iosLike() && canShareFile(name, blob) ? 'share' : 'download';
 }
 
 /** Save `blob` to the device from within a user gesture: the OS share sheet
- *  when it accepts files (iOS), else an `<a download>` link (desktop needs no
- *  gesture for that). Returns the method actually used; a share the user
- *  dismisses still counts as handled, not a failure, so it does not silently
- *  fall back to a download the user did not ask for. */
+ *  only on iOS, where it accepts files and `<a download>` is ignored, else an
+ *  `<a download>` link (desktop needs no gesture for that and must not open the
+ *  share sheet). Returns the method actually used; a share the user dismisses
+ *  still counts as handled, not a failure, so it does not silently fall back to
+ *  a download the user did not ask for. */
 export async function shareOrSaveBlob(name: string, blob: Blob): Promise<'share' | 'download'> {
-  if (canShareFile(name, blob)) {
+  if (iosLike() && canShareFile(name, blob)) {
     const nav = navigator as FileShareNav;
     try {
       await nav.share!({files: [fileFor(name, blob)], title: name});

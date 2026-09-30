@@ -122,6 +122,8 @@ describe('openMediaViewer: progress, playback, save-path and error states', () =
     vi.unstubAllGlobals();
     delete (navigator as {canShare?: unknown}).canShare;
     delete (navigator as {share?: unknown}).share;
+    delete (navigator as {userAgent?: unknown}).userAgent;
+    delete (navigator as {maxTouchPoints?: unknown}).maxTouchPoints;
     document.body.innerHTML = '';
   });
 
@@ -145,7 +147,12 @@ describe('openMediaViewer: progress, playback, save-path and error states', () =
     expect(document.querySelector<HTMLElement>('.cyc-mv-save')!.hidden).toBe(false);
   });
 
-  test('a non-playable file on a share-capable device offers a Save button', async () => {
+  test('a non-playable file on an iOS share-capable device offers a Save button', async () => {
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15'
+    });
+    Object.defineProperty(navigator, 'maxTouchPoints', {configurable: true, value: 5});
     Object.defineProperty(navigator, 'canShare', {configurable: true, value: () => true});
     Object.defineProperty(navigator, 'share', {configurable: true, value: vi.fn(() => Promise.resolve())});
     engineCapFetch.mockResolvedValue(res({blob: new Blob(['x'])}));
@@ -153,6 +160,20 @@ describe('openMediaViewer: progress, playback, save-path and error states', () =
     await flush();
     expect(document.querySelector('.cyc-mv-btn')?.textContent).toBe('Save');
     expect(document.querySelector('.cyc-mv-saved')).toBeNull();
+  });
+
+  test('a non-playable file on desktop (share API present) saves at once, no share sheet', async () => {
+    // Desktop Chrome reports canShare({files}) true; the viewer must still save
+    // straight to disk rather than offer a Save button that opens the share sheet.
+    const share = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, 'canShare', {configurable: true, value: () => true});
+    Object.defineProperty(navigator, 'share', {configurable: true, value: share});
+    engineCapFetch.mockResolvedValue(res({blob: new Blob(['x'])}));
+    openMediaViewer(file('archive.zip'), 'doc://d/raw', null);
+    await flush();
+    expect(document.querySelector('.cyc-mv-saved')).not.toBeNull();
+    expect(document.querySelector('.cyc-mv-btn')).toBeNull();
+    expect(share).not.toHaveBeenCalled();
   });
 
   test('a non-playable file with only a download link saves at once', async () => {
