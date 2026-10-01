@@ -7,8 +7,7 @@ import {
   messageVisibleRangeKey,
   messageDomEpoch,
   setMessageWindowHook,
-  setMessageDividerHold,
-  setMessageReaderDriving
+  setMessageDividerHold
 } from '@/features/chat/surface/messageList';
 import {cyclog} from '@/shared/logging';
 import {logChatRepaint} from '@/features/chat/surface/machineScroll';
@@ -763,10 +762,6 @@ export function createRenderHub(deps: RenderHubDeps) {
     // anchoredRewindow anchors on the unread divider only while the landing is
     // actively holding it; feed it the surface's live hold flag.
     setMessageDividerHold(cs.messageListInner, cs.holdDividerActive);
-    // anchoredRewindow's bottom pin must not write scrollTop to follow the end
-    // under a reader's own gesture (the first flick up from the bottom); feed it
-    // the surface's live reader-driving flag.
-    setMessageReaderDriving(cs.messageListInner, cs.readerDriving);
 
     if (scanKey !== lastScanKey) {
       lastScanKey = scanKey;

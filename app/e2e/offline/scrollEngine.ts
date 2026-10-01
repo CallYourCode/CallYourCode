@@ -34,12 +34,6 @@ export type ScrollEngineOptions = {
   // The utterance echo carries `queued: true` and a `dequeued` frame follows
   // after this many ms (the real engine's shape while the agent is working).
   dequeueDelayMs?: number;
-  // Override the seeded line text per index/role. The default LINES are short
-  // one-liners (a bubble well under EST_MSG); a scrolling-jitter repro needs the
-  // real chat's wide spread of wrapped-bubble heights -- many rows far taller
-  // than the estimate -- so the measure-driven re-window has something to
-  // compensate for. Shapes only; no private content is copied.
-  lineText?: (i: number, role: 'user' | 'claude') => string;
 };
 
 // One session record as the engine's log line carries it (`t:"s"` on a page,
@@ -177,10 +171,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
   for (let i = 0; i < count; i++) {
     const role = i % 2 === 0 ? 'user' : 'claude';
     const withImage = imageEvery > 0 && role === 'claude' && i % imageEvery === 0;
-    const text = o.lineText
-      ? o.lineText(i, role)
-      : LINES[i % LINES.length] + (i % 7 === 0 ? ` (#${i})` : '');
-    const m = push(role, text, withImage);
+    const m = push(role, LINES[i % LINES.length] + (i % 7 === 0 ? ` (#${i})` : ''), withImage);
     if (eventsEvery > 0 && role === 'claude' && i % eventsEvery === 0) {
       // The agent's activity before this line: a run of tool calls, then the
       // line's own transcript copy as a reply summary right after it.
