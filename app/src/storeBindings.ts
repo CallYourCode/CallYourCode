@@ -461,6 +461,12 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
 
       requestAnimationFrame(() => {
         const scrollEl = cs.messageListScroll;
+        // An arrival follows the bottom only when the reader was near it AND is not
+        // driving the scroll: a finger dragging up (even near the bottom, even
+        // mid-settle) owns the offset, so a streamed reply must not yank it back
+        // to the end (the stuck-at-bottom report). A pinned reader not touching
+        // still follows, so a live reply keeps the view at the bottom as before.
+        const followBottom = wasNearBottom && !cs.readerDriving();
 
         if (owned || cs.graceOpen()) {
           if (
@@ -483,15 +489,15 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
           s.id === prevSessionId &&
           count > 0 &&
           count !== prevMsgCount &&
-          wasNearBottom
+          followBottom
         ) {
           cs.scrollToBottom();
-        } else if (s && prevEvCount !== -1 && evCount > prevEvCount && wasNearBottom) {
+        } else if (s && prevEvCount !== -1 && evCount > prevEvCount && followBottom) {
           cs.scrollToBottom();
         } else if (
           s &&
           s.id === prevSessionId &&
-          wasNearBottom &&
+          followBottom &&
           count === prevMsgCount &&
           prevScrollH >= 0 &&
           scrollEl.scrollHeight > prevScrollH
