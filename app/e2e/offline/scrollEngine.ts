@@ -34,6 +34,15 @@ export type ScrollEngineOptions = {
   // The utterance echo carries `queued: true` and a `dequeued` frame follows
   // after this many ms (the real engine's shape while the agent is working).
   dequeueDelayMs?: number;
+  // Override the session id/name so a spec can stand up TWO distinct chats (the
+  // chat-switch case) without the fixed SESSION_ID colliding. Defaulted, so every
+  // existing caller keeps the single long thread unchanged.
+  id?: string;
+  name?: string;
+  // Override the seeded line pool. Defaulted to LINES, so existing specs are
+  // untouched; the scroll matrix seeds longer, wrapping rows shaped like the
+  // owner's real chats (varied heights are what the measure/estimate gap needs).
+  lines?: string[];
 };
 
 // One session record as the engine's log line carries it (`t:"s"` on a page,
@@ -107,6 +116,9 @@ const LINES = [
 ];
 
 export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<ScrollEngine> {
+  const SID = o.id ?? SESSION_ID;
+  const SNAME = o.name ?? SESSION_NAME;
+  const lines = o.lines ?? LINES;
   const count = o.count ?? 80;
   const imageEvery = o.imageEvery ?? 0;
   const imageDelayMs = o.imageDelayMs ?? 0;
@@ -146,7 +158,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
   const push = (role: 'user' | 'claude', text: string, image = false): Msg => {
     const n = seq++;
     const m: Msg = {
-      id: SESSION_ID,
+      id: SID,
       role,
       seq: n,
       ts: BASE + n * 60_000,
@@ -171,7 +183,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
   for (let i = 0; i < count; i++) {
     const role = i % 2 === 0 ? 'user' : 'claude';
     const withImage = imageEvery > 0 && role === 'claude' && i % imageEvery === 0;
-    const m = push(role, LINES[i % LINES.length] + (i % 7 === 0 ? ` (#${i})` : ''), withImage);
+    const m = push(role, lines[i % lines.length] + (i % 7 === 0 ? ` (#${i})` : ''), withImage);
     if (eventsEvery > 0 && role === 'claude' && i % eventsEvery === 0) {
       // The agent's activity before this line: a run of tool calls, then the
       // line's own transcript copy as a reply summary right after it.
@@ -203,8 +215,8 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
       t: 'sessions',
       list: [
         {
-          id: SESSION_ID,
-          name: SESSION_NAME,
+          id: SID,
+          name: SNAME,
           cwd: '/srv/long',
           unread: unreadOf(),
           muted: false,
@@ -219,7 +231,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
     });
   const wire = (m: Msg) => ({
     t: 'chat',
-    id: m.id,
+    id: SID,
     role: m.role,
     seq: m.seq,
     ts: m.ts,
@@ -237,7 +249,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
   const attachOkFrame = () =>
     JSON.stringify({
       t: 'attach-ok',
-      id: SESSION_ID,
+      id: SID,
       known: true,
       pageSize: 1000,
       total: seq,
@@ -248,7 +260,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
     });
 
   const utterances: {text: string; cid?: string}[] = [];
-  const dequeue = (ts: number) => broadcast(JSON.stringify({t: 'dequeued', id: SESSION_ID, ts}));
+  const dequeue = (ts: number) => broadcast(JSON.stringify({t: 'dequeued', id: SID, ts}));
 
   const CORS = {
     'access-control-allow-origin': '*',
@@ -282,7 +294,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
       res.end(JSON.stringify({ok: true, unread: unreadOf()}));
       return;
     }
-    if (method === 'GET' && path === `/session-agents/${SESSION_ID}`) {
+    if (method === 'GET' && path === `/session-agents/${SID}`) {
       res.writeHead(200, {'content-type': 'application/json', ...CORS});
       res.end(JSON.stringify({runs: agentRuns}));
       return;
@@ -305,7 +317,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
         return;
       }
       if (!f) return;
-      if (f.t === 'attach' && f.id === SESSION_ID) {
+      if (f.t === 'attach' && f.id === SID) {
         const answer = () => {
           if (ws.readyState === ws.OPEN) ws.send(attachOkFrame());
         };
@@ -318,7 +330,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
         if (Number.isFinite(ts) && ts > heardTs) heardTs = ts;
         return;
       }
-      if (f.t === 'utterance' && f.id === SESSION_ID) {
+      if (f.t === 'utterance' && f.id === SID) {
         const text = String(f.text ?? '');
         const cid = typeof f.cid === 'string' ? f.cid : undefined;
         utterances.push({text, cid});
@@ -343,7 +355,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
 
   return {
     port,
-    sessionId: SESSION_ID,
+    sessionId: SID,
     lastTs: () => messages[messages.length - 1].ts,
     say: (text, opts) => {
       const m = push('claude', text, !!opts?.image);
