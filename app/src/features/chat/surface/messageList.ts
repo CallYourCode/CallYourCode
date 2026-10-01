@@ -463,9 +463,26 @@ function ensureVirt(inner: HTMLElement, st: RenderState): MsgVirtualizer {
     // laid-out or display:none row, and every row under jsdom); caching 0 would
     // collapse the list's offsets and defeat the window bound.
     measureElement: (el: HTMLElement, entry: ResizeObserverEntry | undefined, instance: MsgVirtualizer) => {
+      const idx = instance.indexFromElement(el);
+      // Hold an already-measured row's committed height while the list is
+      // actively scrolling (isScrolling spans the scroll event AND the rAF
+      // settle re-window that follows each event, where syncScroll is already
+      // back to false). Re-measuring mounted rows mid-fling is what made
+      // anchoredRewindow bounce scrollTop by ~200px per frame and interrupt iOS
+      // momentum (the owner's jitter); it is also the cascade virtual-core
+      // guards against by not compensating a re-measurement during a backward
+      // scroll. Only a row's FIRST measurement (estimate->actual) is integrated
+      // while scrolling -- the one-step compensation for rows entering from
+      // above; a row that already carries a real height keeps it until the
+      // scroll settles (isScrolling clears after its reset delay), when a plain
+      // re-window re-measures it cleanly.
+      if (instance.isScrolling && idx >= 0) {
+        const key = st.rows[idx]?.key;
+        const held = key !== undefined ? instance.itemSizeCache.get(key) : undefined;
+        return held ?? st.rows[idx]?.estimate ?? EST_MSG;
+      }
       const size = measureElement(el, entry, instance);
       if (size > 0) return size;
-      const idx = instance.indexFromElement(el);
       return (idx >= 0 && st.rows[idx]?.estimate) || EST_MSG;
     },
     scrollToFn: (offset: number, o: {adjustments?: number; behavior?: ScrollBehavior}, instance: MsgVirtualizer) => {
@@ -670,6 +687,19 @@ function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
   if (!again) return;
   const now = again.getBoundingClientRect().top - box.getBoundingClientRect().top;
   const delta = now - screenOffset;
+  // Never WRITE scrollTop to hold the anchor while the list is actively
+  // scrolling. On iOS WebKit (no CSS scroll anchoring, so this compensation is
+  // load-bearing) a programmatic scrollTop write during a touch or momentum
+  // scroll interrupts the momentum and jumps -- the owner's "weirdly jittery":
+  // the field log showed rewindow.anchor writing +911/+251 and bouncing scrollTop
+  // by ~200px per frame against an upward fling (measured here as ~400 writes and
+  // ~30 against-direction reversals in one fling). The measureElement hold above
+  // keeps mounted rows at a stable height while isScrolling, so the anchor does
+  // not drift during the gesture and there is nothing to write; the scroll-end
+  // re-window (isScrolling cleared) re-measures and compensates once, cleanly.
+  // The bottom pin above is NOT gated: following the end as the tail grows is
+  // the pinned-reader contract, not an anchor hold a reader is fighting.
+  if ((st.virt as unknown as {isScrolling?: boolean}).isScrolling) return;
   if (Math.abs(delta) > 0.5) {
     const from = box.scrollTop;
     box.scrollTop += delta;
