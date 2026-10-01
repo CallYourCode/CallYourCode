@@ -194,7 +194,9 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
       };
       if (driving()) {
         if (padDelta) deps.bankShift(padDelta);
-        skipPin();
+        // Silent under a held finger (it plainly owns the offset); named when
+        // only the reader's scroll or momentum is live.
+        if (!deps.isReaderHolding()) skipPin();
         return;
       }
       if (deps.isDividerHeld() && !deps.isPinned() && deps.reseatDivider()) return;
