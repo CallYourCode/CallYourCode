@@ -20,6 +20,7 @@ async function dist(): Promise<string> {
   dirs.push(d);
   await writeFile(join(d, "index.html"), "<html></html>");
   await writeFile(join(d, "cyc-sw.js"), "// sw");
+  await writeFile(join(d, "boot-watchdog.js"), "// watchdog");
   await writeFile(join(d, "app-Ab12Cd34Ef.js"), "// hashed");
   await writeFile(join(d, "plain.js"), "// not hashed");
   await writeFile(join(d, SANDBOX_SHELL), "<html></html>");
@@ -47,6 +48,19 @@ test("hashed assets: immutable cache, baseline headers, no CSP", async () => {
   const d = await dist();
   const r = await serveStatic(d, "/app-Ab12Cd34Ef.js");
   expect(r.headers.get("cache-control")).toContain("immutable");
+  expect(r.headers.get("content-security-policy")).toBeNull();
+  expect(r.headers.get("x-content-type-options")).toBe("nosniff");
+});
+
+test("the boot watchdog is a non-hashed shell script: no-cache, baseline headers", async () => {
+  // Its name ('-watchdog.js') happens to match the hashed-asset immutable
+  // pattern, but it is NOT content-hashed: a year-long immutable cache would
+  // strand an edited watchdog on old browsers, so it is no-cache like cyc-sw.js
+  // and index.html, the other non-hashed shell files.
+  const d = await dist();
+  const r = await serveStatic(d, "/boot-watchdog.js");
+  expect(r.headers.get("cache-control")).toContain("no-store");
+  expect(r.headers.get("cache-control")).not.toContain("immutable");
   expect(r.headers.get("content-security-policy")).toBeNull();
   expect(r.headers.get("x-content-type-options")).toBe("nosniff");
 });

@@ -66,8 +66,15 @@ type Rig = {
   scheduled: (() => void)[];
   runScheduled: () => void;
   set: (
-    patch: Partial<{own: string; served: string; names: string[]; controlled: boolean}>
+    patch: Partial<{
+      own: string;
+      served: string;
+      names: string[];
+      controlled: boolean;
+      shellCached: boolean;
+    }>
   ) => void;
+  reloadTargets: string[];
   controller: ReturnType<typeof createStaleReloadController>;
 };
 
@@ -77,6 +84,10 @@ function makeRig(init: {
   names?: string[];
   controlled?: boolean;
   mark?: string;
+  // The newest bucket's name is present but it does not hold the shell yet
+  // (addAll in flight or failed). Defaults to "shell present" so a bucket named
+  // for the target is treated as fully installed unless a test says otherwise.
+  shellCached?: boolean;
   // Storage-blocked device: setItem throws (private mode) ...
   markWriteThrows?: boolean;
   // ... or the page wiring swallowed the error, so the write silently no-ops.
@@ -86,13 +97,15 @@ function makeRig(init: {
     own: init.own ?? '100',
     served: init.served ?? 'Build stamp: 200\n',
     names: init.names ?? [],
-    controlled: init.controlled ?? false
+    controlled: init.controlled ?? false,
+    shellCached: init.shellCached ?? true
   };
   const mark = {value: init.mark ?? ''};
   const rig: Rig = {
     reloads: 0,
     nudges: 0,
     mark,
+    reloadTargets: [],
     scheduled: [],
     runScheduled: () => {
       const fns = rig.scheduled.splice(0);
@@ -103,6 +116,7 @@ function makeRig(init: {
       ownStamp: () => state.own,
       fetchServedStamp: async () => state.served,
       cacheNames: async () => state.names,
+      shellCached: async () => state.shellCached,
       isControlled: () => state.controlled,
       nudgeWorker: () => {
         rig.nudges += 1;
@@ -114,8 +128,9 @@ function makeRig(init: {
         mark.value = t;
       },
       schedule: (fn) => rig.scheduled.push(fn),
-      reload: () => {
+      reload: (target) => {
         rig.reloads += 1;
+        rig.reloadTargets.push(target);
       }
     },
     controller: undefined as unknown as ReturnType<typeof createStaleReloadController>
@@ -189,6 +204,32 @@ describe('check, controlled page (cache-first shell)', () => {
     await rig.controller.check();
     await settle();
     expect(rig.reloads).toBe(1);
+    expect(rig.reloadTargets).toEqual(['200']);
+  });
+
+  // The black-screen cause: the new bucket NAME exists (install called
+  // caches.open) but its addAll has not stored the shell yet, or failed. A
+  // reload fired here lands on a shell whose hashed entry chunk is not cached
+  // and, with no network, paints nothing. The readiness gate must wait for the
+  // shell to really be there, then reload.
+  test('does NOT reload while the newest bucket name exists but holds no shell', async () => {
+    const rig = makeRig({
+      controlled: true,
+      names: [CACHE_PREFIX + '100', CACHE_PREFIX + '200'],
+      shellCached: false
+    });
+    await rig.controller.check();
+    await settle();
+    expect(rig.nudges).toBe(1);
+    expect(rig.reloads, 'reloaded onto an empty bucket: the black screen').toBe(0);
+    expect(rig.scheduled.length, 'the readiness poll must keep waiting').toBe(1);
+
+    // addAll finishes and the shell lands: now a reload is safe.
+    rig.set({shellCached: true});
+    rig.runScheduled();
+    await settle();
+    expect(rig.reloads).toBe(1);
+    expect(rig.reloadTargets).toEqual(['200']);
   });
 
   test('poll gives up after its tries and a later edge re-enters (no infinite poll)', async () => {
@@ -331,6 +372,17 @@ describe('onControllerChange (a new worker activated under the page)', () => {
 
   test('stale but the new bucket is not the newest: no reload (would land stale)', async () => {
     const rig = makeRig({controlled: true, names: [CACHE_PREFIX + '100']});
+    rig.controller.onControllerChange();
+    await settle();
+    expect(rig.reloads).toBe(0);
+  });
+
+  test('stale, new bucket newest, but its shell is not cached yet: no reload (would blank)', async () => {
+    const rig = makeRig({
+      controlled: true,
+      names: [CACHE_PREFIX + '100', CACHE_PREFIX + '200'],
+      shellCached: false
+    });
     rig.controller.onControllerChange();
     await settle();
     expect(rig.reloads).toBe(0);

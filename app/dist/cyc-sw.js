@@ -23,7 +23,7 @@
 // re-activates (drops old caches + clients.claim). In app/public it stays the
 // literal placeholder; nothing at runtime reads CYC_BUILD, it exists only to make
 // the bytes unique. cyc-precache.json's version still drives the cache name.
-const CYC_BUILD = '1790870215';
+const CYC_BUILD = '1790874745';
 
 const CYC_CACHE_PREFIX = 'cyc-precache-';
 const CYC_MANIFEST_URL = '/cyc-precache.json';
@@ -72,15 +72,28 @@ function cycRouteRequest(req) {
   if (url.origin !== self.location.origin) return 'network';
   const p = url.pathname;
   if (p === '/' || p === '/index.html') return 'shell';
-  if (p.startsWith('/assets/')) return 'asset';
+  // The boot watchdog is a non-hashed shell file (precached by name alongside
+  // index.html; see scripts/build-cyc.sh). addAll is all-or-nothing, so any
+  // bucket that holds the shell holds this too, and cycServeAsset's cross-
+  // bucket match keeps it present on an offline boot exactly like a chunk.
+  if (p.startsWith('/assets/') || p === '/boot-watchdog.js') return 'asset';
   return 'network';
 }
 
 async function cycServeShell(req) {
+  // Newest bucket FIRST, but only a bucket that actually HOLDS the shell. A
+  // bucket name appears the instant install calls caches.open, before addAll
+  // stores anything and even if addAll later fails/hangs; serving the network's
+  // new index.html from that empty bucket points the page at a hashed entry
+  // chunk that is not cached either, and with no network it paints nothing (the
+  // black screen). addAll is all-or-nothing, so a bucket that has index.html has
+  // every chunk that shell names. Falling back to the newest FULLY-cached shell
+  // keeps the page booting (stale but alive) until the new bucket really fills;
+  // the reload flow re-fires once it does. Only when no bucket holds the shell
+  // do we go to the network.
   const names = await cycCacheNames();
-  const current = names[names.length - 1];
-  if (current) {
-    const cache = await caches.open(current);
+  for (let i = names.length - 1; i >= 0; i--) {
+    const cache = await caches.open(names[i]);
     const hit = (await cache.match('/index.html')) || (await cache.match('/'));
     if (hit) return hit;
   }

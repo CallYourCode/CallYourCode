@@ -84,13 +84,17 @@ export async function serveStatic(distDir: string, pathname: string): Promise<Re
    * straight back.
    *
    * The service worker is the same argument: a stale one keeps showing the old
-   * behaviour long after a deploy.
+   * behaviour long after a deploy. The boot watchdog (boot-watchdog.js) is too:
+   * a non-hashed shell script loaded by index.html, it must revalidate so an
+   * edited watchdog is never stranded behind a year-long immutable cache (its
+   * '-watchdog.js' name otherwise matches the hashed-asset pattern below).
    *
    * The hashed assets are the opposite case. Their name changes whenever their
    * content does, so they can be cached hard, and telling the browser that is
    * what makes a reload cheap rather than a full re-download. */
   const noCache = rel.endsWith(".html") || rel.endsWith("cyc-sw.js") ||
-    rel.endsWith("build.txt") || rel.endsWith(".webmanifest");
+    rel.endsWith("build.txt") || rel.endsWith(".webmanifest") ||
+    rel.endsWith("boot-watchdog.js");
   const immutable = /-[A-Za-z0-9_]{8,}\.(js|css|json|svg|png|woff2?|map)$/.test(rel);
   /* Documents get the CSP; everything gets the baseline headers. The service
    * worker script is a document-shaped trust surface too, so it rides with

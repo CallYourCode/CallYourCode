@@ -14,12 +14,42 @@
 // deferred to the load event so the first paint and its own asset fetches are
 // never in contention with the worker's initial precache addAll.
 
+import {cyclog} from '@/shared/logging';
+
 const SW_URL = '/cyc-sw.js';
+
+// Name the worker lifecycle in app.log so a stuck update (a new build that
+// installs but never finishes taking over, the black-screen suspect on iOS)
+// leaves a trail instead of a silent hole. No timers: these are edges the
+// browser already fires (register result, a found update's state changes).
+function logSwState(reg: ServiceWorkerRegistration): void {
+  const state = (w: ServiceWorker | null) => w?.state ?? 'none';
+  cyclog('sw.state', {
+    controlled: !!navigator.serviceWorker.controller,
+    installing: state(reg.installing),
+    waiting: state(reg.waiting),
+    active: state(reg.active)
+  });
+  reg.addEventListener('updatefound', () => {
+    const w = reg.installing;
+    cyclog('sw.updatefound', {state: state(w)});
+    w?.addEventListener('statechange', () => cyclog('sw.statechange', {state: state(w)}));
+  });
+}
 
 export function registerOfflineWorker(): void {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
   const register = () => {
-    navigator.serviceWorker.register(SW_URL, {scope: '/'}).catch(() => {});
+    navigator.serviceWorker.register(SW_URL, {scope: '/'}).then(
+      (reg) => {
+        try {
+          logSwState(reg);
+        } catch {
+          // logging must never break registration
+        }
+      },
+      () => {}
+    );
   };
   if (document.readyState === 'complete') register();
   else window.addEventListener('load', register, {once: true});
