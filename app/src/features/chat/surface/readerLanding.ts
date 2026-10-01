@@ -161,7 +161,24 @@ export function createReaderLanding(options: ReaderLandingOptions) {
       }
       return out;
     };
-    const candidates = idx >= 0 ? claudeFrom(idx + 1) : claudeFrom(0).slice(-unread);
+    //   - the marker aged out of the window: speak the newest `unread` claude rows
+    //     that sit AT OR AFTER the read-through INSTANT. The instant is the floor a
+    //     stale cache needs: a device that slept while the owner read on another
+    //     device opens onto a window whose newest loaded row is BEHIND the engine's
+    //     read-through, so the genuinely-unheard reply is on a NEWER unloaded page
+    //     and NOTHING loaded is unread. The old `slice(-unread)` with no floor then
+    //     spoke the newest OLD clip still in the stale window -- the owner's "it
+    //     played a very old audio" (the newest msgId-bearing claude row there was a
+    //     two-day-old finalised speak clip). Both ts are the engine's, not a client
+    //     clock, so this floor is the same AT-OR-AFTER the index gives, extended to
+    //     a marker whose row is not loaded. When the marker is on an OLDER page the
+    //     floor keeps every loaded row, so a genuine catch-up still speaks.
+    const candidates =
+      idx >= 0
+        ? claudeFrom(idx + 1)
+        : claudeFrom(0)
+            .filter((m) => !marker || m.ts >= marker.ts)
+            .slice(-unread);
     if (!candidates.length) return;
     const pending = speaker.pending();
     const queue = candidates.filter((m) => !pending.has(m.msgId!));
