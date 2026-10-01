@@ -13,10 +13,9 @@ interface ChatChromeOptions {
   nearBottomPx: number;
   closeSettleGrace(reconcile: boolean): void;
   // The go-to-bottom (W13) is a deliberate move; phase 2 step 3 routes it through
-  // the ScrollOwner's jump(). When provided, the button's scroll runs inside it,
-  // which holds the jump until the walk's promise settles; when absent (tests),
-  // the scroll runs directly, as before.
-  wrapJump?(run: () => Promise<void>): Promise<void>;
+  // the ScrollOwner's jump(). When provided, the button's scroll runs inside it;
+  // when absent (tests), the scroll runs directly, as before.
+  wrapJump?(run: () => void): void;
 }
 
 export function createChatChrome(options: ChatChromeOptions) {
@@ -98,9 +97,11 @@ export function createChatChrome(options: ChatChromeOptions) {
     // smoothScrollToBottom).
     goDownButton.addEventListener('click', () => {
       closeSettleGrace(false);
-      const run = () => smoothScrollToBottom(scroll);
-      if (wrapJump) void wrapJump(run);
-      else void run();
+      const run = (): void => {
+        void smoothScrollToBottom(scroll);
+      };
+      if (wrapJump) wrapJump(run);
+      else run();
     });
     composerBox.append(goDownButton);
 
