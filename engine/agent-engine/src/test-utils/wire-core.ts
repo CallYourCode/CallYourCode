@@ -170,7 +170,7 @@ let cid = 0;
  * A plain object, not a WebSocket: `send`, `close` and `data` are every member
  * the wire and the client dispatch touch, and a recorded object is the only way
  * to ask "what did this device receive, in what order" without a transport. */
-export function fakeClient(o: { now?: () => number; attach?: string | null; visible?: boolean } = {}): FakeClient {
+export function fakeClient(o: { now?: () => number; attach?: string | null; visible?: boolean; desktop?: boolean } = {}): FakeClient {
   const frames: Record<string, any>[] = [];
   const now = o.now ?? Date.now;
   const data: SockData = {
@@ -179,6 +179,11 @@ export function fakeClient(o: { now?: () => number; attach?: string | null; visi
     attached: o.attach ?? null,
     visible: o.visible ?? true,
     visibleAt: now(),
+    // born visible -> last looked at now; born hidden -> never looked at (0)
+    lastVisibleAt: (o.visible ?? true) ? now() : 0,
+    // a laptop by default on this harness only when the test says so; the real
+    // app stamps this off the visible frame (frames.ts). Absent -> not desktop.
+    desktop: o.desktop ?? false,
     beatMs: 0,
     gaps: [],
     lastFrame: now(),
@@ -230,9 +235,14 @@ export function fakeClient(o: { now?: () => number; attach?: string | null; visi
     },
     clear: () => { frames.length = 0; },
     setVisible(on, at) {
+      const t = at ?? now();
+      const wasVisible = sock.data.visible;
       sock.data.visible = on;
-      sock.data.visibleAt = at ?? now();
-      sock.data.lastFrame = at ?? now();
+      sock.data.visibleAt = t;
+      sock.data.lastFrame = t;
+      // mirror frames.ts: lastVisibleAt advances while visible and on the frame
+      // that takes it hidden, but not on a redundant hidden claim
+      if (on || wasVisible) sock.data.lastVisibleAt = t;
     },
     attached(id) { sock.data.attached = id; },
     close() { clients.delete(sock); },
@@ -342,7 +352,7 @@ export type WireCore = {
   /** the recorded client sockets this test made */
   clients: FakeClient[];
   /** add one more */
-  client(o?: { attach?: string | null; visible?: boolean }): FakeClient;
+  client(o?: { attach?: string | null; visible?: boolean; desktop?: boolean }): FakeClient;
   /** frames written to a given client */
   framesOf(c: FakeClient): Record<string, any>[];
   /** every ctx.log()/LOG.line() event a wired module wrote */

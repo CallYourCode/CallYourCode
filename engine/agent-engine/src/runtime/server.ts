@@ -651,7 +651,7 @@ async function routeRequest(req: Request, server: import("bun").Server): Promise
     if (!isLoopbackTrusted(req, server)) return new Response("loopback only", { status: 403 });
     const ok = server.upgrade(req, {
       data: { role: null, sessionId: null, attached: null,
-        visible: true, visibleAt: Date.now(), beatMs: 0, gaps: [], lastFrame: Date.now(),
+        visible: true, visibleAt: Date.now(), lastVisibleAt: Date.now(), beatMs: 0, gaps: [], lastFrame: Date.now(),
         pongAt: 0, probeAt: 0, probeSeq: 0, cid: nextClientCid(), openedAt: Date.now(),
         tailing: null, terms: new Map(),
         remoteAddr: server.requestIP(req)?.address ?? null,

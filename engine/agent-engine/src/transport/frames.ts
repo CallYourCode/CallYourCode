@@ -249,8 +249,19 @@ export async function dispatchClientFrame(ws: Sock, m: any): Promise<void> {
       console.log(`[notify] beat c${ws.data.cid} on=${m.on !== false} ` +
         `gap=${now - ws.data.visibleAt}ms beat=${ws.data.beatMs}ms chat=${ws.data.attached ?? "-"}`);
     }
+    /* `lastVisibleAt` is the last time he was actually looking, so it advances
+     * while the page is visible AND on the frame that takes it hidden (he was
+     * visible right up to that moment). It does NOT advance on a redundant
+     * hidden claim, so a backgrounded tab's "last looked at" time stays put. */
+    const wasVisible = ws.data.visible;
     ws.data.visible = m.on !== false;
     ws.data.visibleAt = now;
+    if (ws.data.visible || wasVisible) ws.data.lastVisibleAt = now;
+    /* The device kind, as the app tells it (a laptop sends desktop:true). Only a
+     * desktop holds a push via recentlyUsed; a phone, a tablet, or an app too
+     * old to say reads as NOT desktop (m.desktop !== true), so locking it buzzes
+     * right away. A device constant, so restamping it each beat costs nothing. */
+    ws.data.desktop = m.desktop === true;
     return;
   }
   // The answer to pokeForProof: recording the frame above proves the page alive.

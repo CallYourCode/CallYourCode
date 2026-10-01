@@ -83,7 +83,7 @@ export async function onSignalOffer(signalWs: Sock, m: { id: string; sdp: string
 export function relaySignalSock(conn: RelayConn): Sock {
   const data: SockData = {
     role: "signal", sessionId: null, attached: null,
-    visible: true, visibleAt: Date.now(), beatMs: 0, gaps: [], lastFrame: Date.now(),
+    visible: true, visibleAt: Date.now(), lastVisibleAt: Date.now(), beatMs: 0, gaps: [], lastFrame: Date.now(),
     pongAt: 0, probeAt: 0, probeSeq: 0, cid: nextClientCid(), openedAt: Date.now(),
     tailing: null, terms: new Map(), remoteAddr: null,
     rtc: conn.attempt, sec: null, signalWs: null, reachedHost: null,
@@ -103,7 +103,7 @@ export function relaySignalSock(conn: RelayConn): Sock {
 export function mintRtcClient(pipe: Pipe, signalWs: Sock): void {
   const data: SockData = {
     role: "client", sessionId: null, attached: null,
-    visible: true, visibleAt: Date.now(), beatMs: 0, gaps: [], lastFrame: Date.now(),
+    visible: true, visibleAt: Date.now(), lastVisibleAt: Date.now(), beatMs: 0, gaps: [], lastFrame: Date.now(),
     pongAt: 0, probeAt: 0, probeSeq: 0, cid: nextClientCid(), openedAt: Date.now(),
     tailing: null, terms: new Map(), remoteAddr: signalWs.data.remoteAddr,
     transport: "rtc", rtc: signalWs.data.rtc, sec: null, signalWs, reachedHost: signalWs.data.reachedHost,

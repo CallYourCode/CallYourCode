@@ -18,18 +18,20 @@ import { expect, test, beforeEach, beforeAll, afterAll } from "bun:test";
 import type { Sock } from "../transport/sock.ts";
 import { manualClock, type ManualClock } from "../runtime/clock.ts";
 import {
-  initPresence, resetForTest, isAway, present, appConnected, onPresenceChange,
-  expireGrace, clearGrace, armGrace, nextStableAt, graceMs, stableMs,
+  initPresence, resetForTest, isAway, present, appConnected, recentlyUsed, recentUseMs,
+  onPresenceChange, expireGrace, clearGrace, armGrace, nextStableAt, graceMs, stableMs,
   BEAT_ASSUMED_MS, BEAT_SLACK_MS,
 } from "./presence.ts";
 
 const priorEnv = {
   NOTIFY_GRACE_MS: process.env.NOTIFY_GRACE_MS,
   NOTIFY_STABLE_MS: process.env.NOTIFY_STABLE_MS,
+  NOTIFY_RECENT_USE_MS: process.env.NOTIFY_RECENT_USE_MS,
 };
 beforeAll(() => {
   delete process.env.NOTIFY_GRACE_MS;
   delete process.env.NOTIFY_STABLE_MS;
+  delete process.env.NOTIFY_RECENT_USE_MS;
 });
 afterAll(() => {
   for (const [k, v] of Object.entries(priorEnv)) {
@@ -140,6 +142,80 @@ test("appConnected is about THIS engine, not this chat", () => {
   // at the app, and must silence the push
   clients.add(sock({ attached: "w9:p4" }));
   expect(appConnected()).toBe(true);
+});
+
+/* ------------------------------ recentlyUsed ------------------------------ */
+
+test("the recent-use window default is the real three minutes", () => {
+  expect(recentUseMs()).toBe(3 * 60_000);
+});
+
+test("recentlyUsed: a laptop whose tab just went hidden still counts as in use", () => {
+  /* HIS COMPLAINT, 2026-10-01: the laptop was clearly open, its tab was hidden
+   * for a few seconds when the reply landed, and the phone buzzed. A connected
+   * device he was looking at moments ago is in use even with the tab hidden. */
+  const c = sock({ desktop: true, visible: false, lastVisibleAt: clock.now() });
+  clients.add(c);
+  // hidden for eight seconds: well inside the window
+  clock.setNow(clock.now() + 8_000);
+  expect(recentlyUsed()).toBe(c);
+  // and past the window it is no longer in use
+  clock.setNow(clock.now() + recentUseMs());
+  expect(recentlyUsed()).toBeNull();
+});
+
+test("recentlyUsed: a phone he just locked is NOT held -- it buzzes right away", () => {
+  /* THE SIDE EFFECT THE OWNER CUT, 2026-10-01: the first cut of this rule held
+   * a push for any connected device, so using the app on his iPhone and locking
+   * it delayed the reply buzz by minutes. A phone (desktop:false) is the device
+   * the push is FOR, so recent use never speaks for it. */
+  const c = sock({ desktop: false, visible: false, lastVisibleAt: clock.now() });
+  clients.add(c);
+  clock.setNow(clock.now() + 5_000); // locked five seconds ago, well inside the window
+  expect(recentlyUsed()).toBeNull();
+});
+
+test("recentlyUsed: an unknown device (no desktop hint) is not held", () => {
+  // an older app, or one whose kind could not be told, sends no desktop flag:
+  // it reads as not desktop, so it never delays a push
+  const c = sock({ visible: false, lastVisibleAt: clock.now() });
+  clients.add(c);
+  clock.setNow(clock.now() + 5_000);
+  expect(recentlyUsed()).toBeNull();
+});
+
+test("recentlyUsed: a visible page is appConnected's call, not this one's", () => {
+  // visible right now is answered by appConnected; recentlyUsed only speaks for
+  // the hidden-but-recent case, so it does not double-count a visible tab
+  clients.add(sock({ visible: true, lastVisibleAt: clock.now() }));
+  expect(recentlyUsed()).toBeNull();
+});
+
+test("recentlyUsed: a tab that was never visible was never in use", () => {
+  // a background tab (opened hidden, lastVisibleAt 0) is not him setting a
+  // device down -- he never looked at it, so it must not hold a push
+  clients.add(sock({ visible: false, lastVisibleAt: 0 }));
+  expect(recentlyUsed()).toBeNull();
+});
+
+test("recentlyUsed: a disconnected device does not count", () => {
+  // the laptop closed: its socket left clients(). Only the grace clock speaks
+  // for a device that is gone, not this rule.
+  const c = sock({ desktop: true, visible: false, lastVisibleAt: clock.now() });
+  clients.add(c);
+  expect(recentlyUsed()).toBe(c);
+  clients.delete(c);
+  expect(recentlyUsed()).toBeNull();
+});
+
+test("recentlyUsed: a hidden page counts for the whole window even with no heartbeat", () => {
+  /* Deliberately NOT gated on present(): a hidden page stops beating, so a
+   * present() check would cut the window to one beat. The owner asked for the
+   * full three minutes while the socket stays connected, beating or not. */
+  const c = sock({ desktop: true, visible: false, lastVisibleAt: clock.now(), lastFrame: clock.now() });
+  clients.add(c);
+  clock.setNow(clock.now() + recentUseMs() - 1); // a hair inside the window
+  expect(recentlyUsed()).toBe(c);
 });
 
 /* -------------------------------- the clock ------------------------------- */
