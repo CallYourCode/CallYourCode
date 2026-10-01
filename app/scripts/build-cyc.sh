@@ -56,9 +56,19 @@ echo "build: baked stamp $CYC_BUILD_STAMP into cyc-sw.js"
 # version, so cyc-sw.js names its cache per build and a rebuild wins cleanly.
 # Deterministic and dependency-free; only this build's own assets go in, the
 # carried previous-generation ones below stay served but are not precached.
+# The boot watchdog is a non-hashed shell file (vite copies public/ verbatim),
+# loaded by index.html before the module entry under the real CSP. It rides in
+# the manifest right next to index.html so the service worker precaches it and
+# an offline boot still has it. Fail loudly if the build did not produce it, so
+# a refactor can never silently drop it from the precache.
+if [[ ! -f "$NEXT/boot-watchdog.js" ]]; then
+  echo "build: boot-watchdog.js missing from the build output" >&2
+  exit 1
+fi
+
 precache_count=0
 {
-  printf '{"version":"%s","assets":["index.html"' "$CYC_BUILD_STAMP"
+  printf '{"version":"%s","assets":["index.html","boot-watchdog.js"' "$CYC_BUILD_STAMP"
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
     [[ "$rel" == *.map ]] && continue

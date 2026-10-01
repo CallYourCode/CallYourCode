@@ -110,6 +110,8 @@ describe('service worker precache routing', () => {
     expect(sw.cycRouteRequest(req('/?testhooks=1&v=123'))).toBe('shell');
     expect(sw.cycRouteRequest(req('/assets/index-OkBO3Qu1.js'))).toBe('asset');
     expect(sw.cycRouteRequest(req('/assets/fonts/inter-latin.woff2'))).toBe('asset');
+    // The boot watchdog is a non-hashed shell file, cached like an asset.
+    expect(sw.cycRouteRequest(req('/boot-watchdog.js'))).toBe('asset');
 
     // Straight through to the network (never touched):
     expect(sw.cycRouteRequest(req('/push/key'))).toBe('network'); // API
@@ -193,6 +195,40 @@ describe('service worker fetch handler', () => {
     expect(responded).toBe(true);
     expect(value).toEqual({shell: 'current'});
     expect(fetched).toEqual([]);
+  });
+
+  // The black-screen guard. A new build's bucket name appears the instant
+  // install calls caches.open, before addAll stores the shell (or if addAll
+  // fails). Serving the network's new index.html from that empty newest bucket
+  // would point the page at a hashed entry chunk that is not cached either, and
+  // with no network it paints nothing. The shell serve must instead fall back to
+  // the newest bucket that REALLY holds a shell (every chunk it names is cached,
+  // addAll being all-or-nothing), so the page boots, stale but alive.
+  test('an empty newest bucket is skipped for the newest bucket that holds the shell', async () => {
+    const prev = await caches.open('cyc-precache-1790000000');
+    (prev as unknown as {put: (k: string, v: unknown) => void}).put('/index.html', {
+      shell: 'prev-full'
+    });
+    // The brand-new bucket exists (name only), addAll not done: no /index.html.
+    await caches.open('cyc-precache-1790000500');
+    fetched.length = 0;
+    const {responded, value} = await fireFetch(req('/'));
+    expect(responded).toBe(true);
+    expect(value, 'served a network shell whose chunks are not cached').toEqual({
+      shell: 'prev-full'
+    });
+    expect(fetched, 'the empty newest bucket sent the navigation to the network').toEqual([]);
+  });
+
+  test('only when NO bucket holds the shell does the navigation go to the network', async () => {
+    // A fresh store with just an empty bucket name present.
+    for (const n of await caches.keys()) await caches.delete(n);
+    await caches.open('cyc-precache-1790000900'); // name only, no shell
+    fetched.length = 0;
+    const {responded, value} = await fireFetch(req('/'));
+    expect(responded).toBe(true);
+    expect((value as {from: string}).from).toBe('/');
+    expect(fetched).toEqual(['/']);
   });
 });
 

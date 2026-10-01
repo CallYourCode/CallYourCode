@@ -74,9 +74,17 @@
         }
       }
     </style>
-    <script type="module" crossorigin src="./assets/index-Dnewj6Wy.js"></script>
+    <script type="module" crossorigin src="./assets/index-CDZOqTat.js"></script>
   </head>
   <body>
+    <!-- BOOT WATCHDOG. A tiny same-origin external script (NOT inline: the
+         served CSP is script-src 'self' blob: with no 'unsafe-inline'/nonce/
+         hash, so an inline script is blocked and never runs). Loaded before the
+         module entry so window.__cycBootOk is in place when main starts; if
+         main never starts it beacons boot.watchdog to /clientlog. Precached
+         with the shell (scripts/build-cyc.sh + cyc-sw.js), so it is present on
+         an offline boot too. -->
+    <script src="./boot-watchdog.js"></script>
     <div id="cyc-app"></div>
 
     <div class="cyc-rotate" role="alert">

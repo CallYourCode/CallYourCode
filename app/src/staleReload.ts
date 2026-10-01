@@ -60,6 +60,15 @@ export type StaleReloadDeps = {
   fetchServedStamp: () => Promise<string>;
   // caches.keys() (or [] where CacheStorage is unavailable).
   cacheNames: () => Promise<string[]>;
+  // Whether the newest precache bucket ACTUALLY holds the app shell
+  // (index.html), not merely its name. A bucket name appears the instant the
+  // worker's install calls caches.open, before addAll stores anything and even
+  // if addAll later fails or hangs (offline, flaky radio); a reload fired on the
+  // name alone then lands on a shell whose hashed entry chunk is not cached and,
+  // with no network to fetch it, paints nothing (the black screen). addAll is
+  // all-or-nothing, so the shell being present means the whole build is. True
+  // when there are no buckets at all: the network serves the shell, so fresh.
+  shellCached: () => Promise<boolean>;
   // Whether a service worker currently controls this page.
   isControlled: () => boolean;
   // registration.update(): force the worker update check without a navigation.
@@ -70,7 +79,9 @@ export type StaleReloadDeps = {
   // setTimeout seam for the readiness poll.
   schedule: (fn: () => void, ms: number) => void;
   // The busy-aware reload (bundleReload's reloadSoon: toast, patience, replace).
-  reload: () => void;
+  // Given the target stamp so the departure breadcrumb can name the build it
+  // crossed to.
+  reload: (target: string) => void;
 };
 
 export function createStaleReloadController(deps: StaleReloadDeps): {
@@ -83,7 +94,10 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
 
   const ready = async (target: string): Promise<boolean> => {
     try {
-      return newestBucketDeliversTarget(await deps.cacheNames(), target);
+      if (!newestBucketDeliversTarget(await deps.cacheNames(), target)) return false;
+      // The bucket NAME is newest, but a reload only lands non-blank once that
+      // bucket really holds the shell (and so, atomically, every chunk).
+      return await deps.shellCached();
     } catch {
       return true;
     }
@@ -116,7 +130,7 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
     if (fired) return;
     if (!persistMark(target)) return;
     fired = true;
-    deps.reload();
+    deps.reload(target);
   };
 
   // Controllerchange commit: loop-safe without storage (controllerReloadUsed
@@ -129,7 +143,7 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
     } catch {
       // best effort; controllerReloadUsed already bounds this path
     }
-    deps.reload();
+    deps.reload(target);
   };
 
   // Ridden by the page's visibility/live edges (the caller keeps its own
