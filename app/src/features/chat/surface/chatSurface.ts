@@ -21,6 +21,7 @@ import {clearNotifications, reportRead} from '@/engine/pushNotify';
 import {active, allSessions, selectTabFor} from '@/sessionSelectors';
 import {createChatChrome} from './chatChrome';
 import {installHistoryPager} from './historyPager';
+import {createScrollOwner} from './scrollOwner';
 import {createReaderLanding} from './readerLanding';
 import type {PlayReason} from './audioPlayback';
 import {
@@ -1155,6 +1156,24 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     deps.render();
   };
 
+  // The ScrollOwner for this message scroller (phase 2). Step 1: it owns nothing
+  // yet. It wraps the existing writers and exposes the readers' questions
+  // (R7 isMachineScroll, R8 nearBottom, state()) so later steps can reroute them
+  // through one place; today each answer is identical to the scattered flags.
+  const scrollOwner = createScrollOwner({
+    scroll: messageListScroll,
+    silentScrollTo,
+    scrollToBottom,
+    isMachineScroll: isMachineTop,
+    nearBottomPx: () => Math.max(OVERLAY_SCROLL_NEAR_PX, messageListScroll.clientHeight / 3),
+    isPinned: () => pinnedToBottom,
+    isReaderHolding: readerHolding,
+    isReaderDriving: readerInputPlausible,
+    isLanding: () => openLanding,
+    isDividerHeld: () => holdDivider,
+    onTeardown: deps.onTeardown
+  });
+
   const historyPager = installHistoryPager({
     container: messageListScroll,
     messages: messageListInner,
@@ -1378,6 +1397,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
           readerTook: boolean;
           scrolledUp: boolean;
           pinned: boolean;
+          ownerState: string;
         };
       }
     ).__cycScrollDiag = () => ({
@@ -1386,7 +1406,10 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       landingOwed: openLanding,
       readerTook: !!openToken?.readerTook,
       scrolledUp: !!openToken?.readerTook,
-      pinned: pinnedToBottom
+      pinned: pinnedToBottom,
+      // Phase 2 step 1: the ScrollOwner's derived state (informational; nothing
+      // changes behaviour off it yet).
+      ownerState: scrollOwner.state()
     });
     // Whether the unread-divider hold is still active. The hold must end at the
     // first user interaction and after a short bounded window (fix-sync FIX 6),
