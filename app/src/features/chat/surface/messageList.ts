@@ -264,19 +264,14 @@ type RenderState = {
   // settle, and a spurious same-offset range notification all hold.
   lastScrollTop: number;
   syncScroll: boolean;
-  // The top overscan boundary the last computeWindow committed, with the row-set
-  // identity it was computed against and whether the list was pinned at the
-  // bottom then. While the list stays pinned at the bottom, a PURE re-window (no
-  // row-set change) holds this boundary instead of re-deriving it from the live
-  // scrollTop: the bottom pin's own sub-row scroll jitter would otherwise flip
-  // the boundary across a row, and when that row's cached measurement differs
-  // from its rendered height the top spacer (so scrollHeight) turns bistable and
-  // the pin chases it -- the open-bounce jitter. A reader scroll off the bottom,
-  // or any row-set change, drops the hold and recomputes.
-  winR0: number | null;
-  winRowCount: number;
-  winHeadKey: string | number | null;
-  winAtBottom: boolean;
+  // Re-measure compensation banked while the reader drives, in px. Instead of
+  // writing scrollTop under a finger or live momentum (which breaks iOS momentum
+  // and leaps: the upward-jitter report), the re-window absorbs the delta in the
+  // TOP SPACER, so the rows on screen hold still with the offset untouched. The
+  // DOM then sits `bank` px above the virtualizer's model (DOM = model - bank),
+  // so the window math reads the model offset as scrollTop + bank. The first
+  // re-window after the reader lets go releases it in a single owner write.
+  bank: number;
   // Wired by the render hub: after a scroll-driven re-window, re-run the DOM
   // sweeps (waveform hydration, sticky dates, play state) over the freshly
   // mounted rows so a row scrolled into view hydrates like a store paint.
@@ -580,6 +575,57 @@ function recoverIfUncovered(inner: HTMLElement, st: RenderState): void {
 // the bottom, so a re-window follows the end rather than holding a top anchor.
 const BOTTOM_PIN_PX = 2;
 
+// The ScrollOwner's side of the re-window (wired by chatSurface through
+// setMessageScrollOwner). `driving`: a reader owns the offset right now, so the
+// re-window writes nothing and banks its correction in the top spacer.
+// `pinned`: the reader sits at the end, so a re-window keeps the end. `write`:
+// the owner's single tagged, machine-marked scrollTop write.
+export interface MessageScrollOwner {
+  driving(): boolean;
+  pinned(): boolean;
+  write(top: number, tag: string): void;
+}
+
+// The ScrollOwner (chatSurface) for a list: the ONE writer of its scroll box's
+// scrollTop. Absent for a detached mount or a unit test, where the re-window
+// writes inline as before. Keyed by the list node, set once at surface creation.
+const scrollOwners = new WeakMap<HTMLElement, MessageScrollOwner>();
+
+function ownerWrite(inner: HTMLElement, box: HTMLElement, top: number, tag: string): void {
+  const owner = scrollOwners.get(inner);
+  if (owner) {
+    owner.write(top, tag);
+    return;
+  }
+  const from = box.scrollTop;
+  box.scrollTop = top;
+  logScrollWrite(box, tag, from, box.scrollTop);
+  markMachineTop(box);
+}
+
+// Absorb a re-measure delta in the top spacer instead of scrollTop (the reader
+// is driving). The spacer cannot go below zero, so at the very top of the list
+// only what fits is banked; the rest shows as a shift, never as a write.
+function bankDelta(inner: HTMLElement, st: RenderState, delta: number): void {
+  const pad = parseFloat(inner.style.paddingTop) || 0;
+  const take = Math.min(delta, pad);
+  if (Math.abs(take) <= 0.5) return;
+  inner.style.paddingTop = pad - take + 'px';
+  st.bank += take;
+}
+
+// The reader let go: hand the banked compensation back to scrollTop in ONE
+// owner write. The spacer returns to its model height and the offset moves by
+// the same amount, so nothing on screen moves and the window that follows is
+// computed at the same model offset the reader was looking at.
+function releaseBank(inner: HTMLElement, st: RenderState, box: HTMLElement): void {
+  const pad = parseFloat(inner.style.paddingTop) || 0;
+  const top = box.scrollTop + st.bank;
+  inner.style.paddingTop = pad + st.bank + 'px';
+  st.bank = 0;
+  ownerWrite(inner, box, top, 'rewindow.settle');
+}
+
 // A pure re-window (a scroll, or a late measurement) recomputes the spacer
 // heights from freshly measured rows. When rows above the fold measure away
 // from their estimate that changes their offset, and without this the visible
@@ -596,13 +642,27 @@ const BOTTOM_PIN_PX = 2;
 // box) is preserved, not undone -- scrollTop only moves when a measurement
 // shifted an offset. Under jsdom every rect is zero, so no anchor is found and
 // this is a plain re-window (existing window tests are unaffected).
+//
+// The scrollTop write belongs to the ScrollOwner (setMessageScrollOwner).
+// While a reader drives, NOTHING is written: the end is not followed (the
+// reader may be leaving it) and the anchor correction is banked in the top
+// spacer, so the row under the finger holds still with no programmatic scroll. The first
+// re-window after the reader lets go (the virtualizer's scroll-end tick, or the
+// owner's settle on release) releases the bank in one write (releaseBank), then
+// holds the anchor or follows the end as usual.
 function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
   const box = scrollBoxOf(inner);
   if (!box || !box.clientHeight || !st.lastPaint) {
     st.lastPaint?.();
     return;
   }
-  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_PIN_PX;
+  const owner = scrollOwners.get(inner);
+  const driving = !!owner && owner.driving();
+  if (!driving && st.bank !== 0) releaseBank(inner, st, box);
+  const atBottom =
+    !driving &&
+    (box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_PIN_PX ||
+      (!!owner && owner.pinned()));
   const boxTop = box.getBoundingClientRect().top;
   let anchorIndex: string | null = null;
   let anchorByDivider = false;
@@ -655,12 +715,7 @@ function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
   st.lastPaint();
   if (atBottom) {
     const end = box.scrollHeight - box.clientHeight;
-    if (end - box.scrollTop > 0.5) {
-      const from = box.scrollTop;
-      box.scrollTop = end;
-      logScrollWrite(box, 'rewindow.bottom', from, box.scrollTop);
-      markMachineTop(box);
-    }
+    if (end - box.scrollTop > 0.5) ownerWrite(inner, box, end, 'rewindow.bottom');
     return;
   }
   if (!anchorByDivider && anchorIndex === null) return;
@@ -670,12 +725,9 @@ function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
   if (!again) return;
   const now = again.getBoundingClientRect().top - box.getBoundingClientRect().top;
   const delta = now - screenOffset;
-  if (Math.abs(delta) > 0.5) {
-    const from = box.scrollTop;
-    box.scrollTop += delta;
-    logScrollWrite(box, 'rewindow.anchor', from, box.scrollTop);
-    markMachineTop(box);
-  }
+  if (Math.abs(delta) <= 0.5) return;
+  if (driving) bankDelta(inner, st, delta);
+  else ownerWrite(inner, box, box.scrollTop + delta, 'rewindow.anchor');
 }
 
 // The visible render-row range for the current geometry, plus the top/bottom
@@ -732,7 +784,9 @@ function syncGeom(inner: HTMLElement, st: RenderState, box: HTMLElement): MsgVir
   }
   v._willUpdate();
   v.scrollRect = {width: box.clientWidth, height: box.clientHeight};
-  v.scrollOffset = box.scrollTop;
+  // The model offset: the DOM sits `bank` px above the model while the reader
+  // drives (see RenderState.bank).
+  v.scrollOffset = box.scrollTop + st.bank;
   return v;
 }
 
@@ -894,18 +948,30 @@ function computeWindow(
   // bound to), it just recovers the instant the height lands.
   const v = syncGeom(inner, st, box);
   if (!box.clientHeight) return null;
+  const total = v.getTotalSize();
+  // The model offset the window is computed at. Sitting at the end, it is the
+  // MODEL's end (the measured/estimated total), never the live scrollTop: the
+  // live end is the bottom pin's own write, and scrollHeight there carries any
+  // gap between a row's cached measurement and its rendered height, which
+  // depends on which rows are mounted. Deriving the top boundary from it let a
+  // boundary row flip in and out, the end turn bistable and the pin chase it
+  // (the open-bounce jitter, and the cannot-reach-bottom 284 px seesaw). The
+  // model end does not move when a row mounts, so the window cannot feed back
+  // into the pin. Elsewhere the live scrollTop (plus any bank) drives it.
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_PIN_PX;
+  const off = atBottom ? Math.max(0, total - box.clientHeight) : box.scrollTop + st.bank;
+  v.scrollOffset = off;
   const vitems = v.getVirtualItems();
   if (!vitems.length) return null;
-  const total = v.getTotalSize();
   // Expand the virtualizer's tight range outward to cover the pixel overscan
   // band on each side, reading the full measurement offsets (measured where a
-  // row has mounted, estimated otherwise). The scrollTop is live, so the band
+  // row has mounted, estimated otherwise). The offset is live, so the band
   // tracks the native scroll position of THIS paint.
   const meas = v.measurementsCache;
   const last = meas.length - 1;
   const band = box.clientHeight * OVERSCAN_VIEWPORTS;
-  const topLimit = box.scrollTop - band;
-  const botLimit = box.scrollTop + box.clientHeight + band;
+  const topLimit = off - band;
+  const botLimit = off + box.clientHeight + band;
   let r0 = vitems[0].index;
   let r1 = vitems[vitems.length - 1].index;
   while (r0 > 0 && meas[r0 - 1] && meas[r0 - 1].end > topLimit) r0--;
@@ -921,46 +987,15 @@ function computeWindow(
   // re-runs this same computation. Extending until the row extents cover
   // [scrollTop, scrollTop + clientHeight] closes that gap; on a contiguous
   // window (the normal case) both loops are no-ops.
-  const viewTop = box.scrollTop;
-  const viewBottom = box.scrollTop + box.clientHeight;
+  const viewTop = off;
+  const viewBottom = off + box.clientHeight;
   while (r0 > 0 && meas[r0] && meas[r0].start > viewTop) r0--;
   while (r1 < last && meas[r1] && meas[r1].end < viewBottom) r1++;
-  // While the list stays pinned at the bottom, a PURE re-window (the row set
-  // unchanged since the last window) must not re-derive the top overscan
-  // boundary from the live scrollTop. The bottom pin writes scrollTop to the
-  // end every re-window, and that offset carries the pin's own sub-pixel jitter;
-  // when it wobbles across a row's measured extent the boundary flips that row
-  // in and out of the mounted set. If the row's cached measurement differs from
-  // its rendered height (a common estimate/measure gap for a row above the fold)
-  // the top spacer -- and so scrollHeight -- becomes bistable, the pin chases the
-  // taller state, the browser clamps the shorter, and the view oscillates every
-  // frame (the open-bounce jitter). Hold the boundary at the smaller index it
-  // last committed while pinned, so a row already mounted is never dropped by
-  // that jitter. A reader scrolling off the bottom (atBottom false) or any
-  // row-set change recomputes it cleanly. The hold is scoped to the boundary
-  // JITTER -- the newly computed r0 dropping the previous boundary row by one or
-  // two rows -- so it never fights a paint that legitimately re-derives a much
-  // smaller window (an early full-list paint committed winR0 0, and a later
-  // virtualized paint's r0 must be free to jump forward to the real bottom band).
-  const headKey = st.rows.length ? st.rows[0].key : null;
-  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_PIN_PX;
-  if (
-    atBottom &&
-    st.winAtBottom &&
-    st.winR0 !== null &&
-    st.winR0 < r0 &&
-    r0 - st.winR0 <= 2 &&
-    st.winR0 <= last &&
-    st.winRowCount === st.rows.length &&
-    st.winHeadKey === headKey
-  ) {
-    r0 = st.winR0;
-  }
-  st.winR0 = r0;
-  st.winRowCount = st.rows.length;
-  st.winHeadKey = headKey;
-  st.winAtBottom = atBottom;
-  const padTop = meas[r0] ? meas[r0].start : vitems[0].start;
+  const start = meas[r0] ? meas[r0].start : vitems[0].start;
+  // The spacer stands the bank in (DOM = model - bank). It cannot go below zero:
+  // at the very top only what fits stays banked.
+  if (st.bank > start) st.bank = start;
+  const padTop = start - st.bank;
   const padBottom = meas[r1] ? Math.max(0, total - meas[r1].end) : 0;
   return {r0, r1, padTop, padBottom};
 }
@@ -1018,6 +1053,26 @@ export function setMessageDividerHold(inner: HTMLElement, held: () => boolean): 
   if (st) st.dividerHeld = held;
 }
 
+// Register the ScrollOwner for a list (see scrollOwners): chatSurface hands the
+// list its one writer, so anchoredRewindow never writes scrollTop on its own.
+export function setMessageScrollOwner(inner: HTMLElement, owner: MessageScrollOwner): void {
+  scrollOwners.set(inner, owner);
+}
+
+// True while the virtualizer sees the box scrolling (a scroll event within its
+// reset delay, ~150 ms). The owner reads it, with who wrote the last offset, to
+// tell a reader's live scroll or momentum from a settled list.
+export function messageListScrolling(inner: HTMLElement): boolean {
+  const st = renderStates.get(inner);
+  return !!st?.virt && (st.virt as unknown as {isScrolling?: boolean}).isScrolling === true;
+}
+
+// Whether a re-measure correction is banked in the top spacer (RenderState.bank),
+// waiting for the reader to let go.
+export function messageListBanked(inner: HTMLElement): boolean {
+  return (renderStates.get(inner)?.bank ?? 0) !== 0;
+}
+
 // A scan-key fragment that changes whenever the visible window moves, so the
 // render hub re-runs its DOM sweeps for the rows a scroll just revealed.
 export function messageVisibleRangeKey(inner: HTMLElement): string {
@@ -1072,7 +1127,8 @@ export function scrollMessageIntoView(
     if (!off) break;
     const target = off[0];
     const from = box.scrollTop;
-    box.scrollTop = target;
+    // The offset is the model's; the DOM sits `bank` px above it (RenderState.bank).
+    box.scrollTop = target - st.bank;
     logScrollWrite(box, 'jump.into', from, box.scrollTop);
     markMachineTop(box);
     // Re-window at the new offset now (computeWindow reads box.scrollTop), so the
@@ -1322,10 +1378,7 @@ function paintMessages(
       lastSecondKey: null,
       lastScrollTop: -1,
       syncScroll: false,
-      winR0: null,
-      winRowCount: -1,
-      winHeadKey: null,
-      winAtBottom: false,
+      bank: 0,
       onWindowChange: null,
       dividerHeld: null,
       nodeCache: new Map()
@@ -1333,10 +1386,7 @@ function paintMessages(
     renderStates.set(inner, st);
   } else if (!sameChat) {
     st.sessionId = s.id;
-    st.winR0 = null;
-    st.winRowCount = -1;
-    st.winHeadKey = null;
-    st.winAtBottom = false;
+    st.bank = 0;
     st.frames = [];
     st.fromItem = 0;
     st.toItem = -1;
@@ -1431,7 +1481,7 @@ function paintMessages(
         const rTop = rowOfItem[fromItem];
         const rBot = rowOfItem[toItem];
         const total = st.virt.getTotalSize();
-        padTop = meas[rTop]?.start ?? padTop;
+        padTop = meas[rTop] ? Math.max(0, meas[rTop].start - st.bank) : padTop;
         padBottom = meas[rBot] ? Math.max(0, total - meas[rBot].end) : padBottom;
         startsWithDate = rows[rTop]?.kind === 'date';
       }
