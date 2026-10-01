@@ -1131,6 +1131,14 @@ export function messageListScrolling(inner: HTMLElement): boolean {
   return !!st?.virt && (st.virt as unknown as {isScrolling?: boolean}).isScrolling === true;
 }
 
+// Absorb a content shift above the reader (a top-pad change) in the spacer while
+// a reader drives, exactly like a banked re-measure (RenderState.bank). Only a
+// windowed list has a spacer to hold it.
+export function bankMessageShift(inner: HTMLElement, delta: number): void {
+  const st = renderStates.get(inner);
+  if (st?.lastPaint && inner.style.paddingTop) bankDelta(inner, st, delta);
+}
+
 // Whether a re-measure correction is banked in the top spacer (RenderState.bank),
 // waiting for the reader to let go.
 export function messageListBanked(inner: HTMLElement): boolean {

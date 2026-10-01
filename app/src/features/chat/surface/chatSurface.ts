@@ -14,7 +14,8 @@ import {
   rewindowMessages,
   setMessageScrollOwner,
   messageListScrolling,
-  messageListBanked
+  messageListBanked,
+  bankMessageShift
 } from './messageList';
 import {scrollSurface} from '@/shared/dom';
 import {cyclog} from '@/shared/logging';
@@ -36,8 +37,7 @@ import {
   isMachineTop as machineTopMatches,
   machineTopOf,
   logScrollWrite,
-  logScrollUpUser,
-  logBottomPin
+  logScrollUpUser
 } from './machineScroll';
 import {onHorizontalSwipe} from '@/features/gestures';
 
@@ -733,53 +733,37 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     const padNow = messageListPadTop.offsetHeight;
     const padDelta = padNow - padTopSeen;
     padTopSeen = padNow;
-    // A finger (or pointer) on the surface owns the offset until it lifts: never
-    // re-pin or re-seat under an active drag. `readerHolding` stays true for the
-    // whole touch even after Chrome's mid-pan pointercancel, which `pointerHeld`
-    // alone did not (the stuck-at-bottom snap-back).
-    if (readerHolding() || !messageListInner.childElementCount) return;
-    // Hold the unread divider on its landing seat through async row-height changes
-    // ABOVE the fold. A waveform/image/markdown row hydrating a beat after the
-    // open reflows its height; when that does not change the visible index range
-    // the virtualizer fires no re-window, so nothing re-seats the divider and it
-    // slides off screen (measured on the larger viewports, where more hydratable
-    // rows mount above the fold). This observer DOES see the content resize, so
-    // while the landing holds (until the reader's own scroll releases it) re-seat
-    // the divider a third of the way down and re-window so it stays mounted.
-    if (holdDivider && !pinnedToBottom) {
-      const divider = messageListInner.querySelector<HTMLElement>('[data-cyc-unread]');
-      if (divider) {
-        // A live selection means the reader is here and reading: end the hold
-        // and never scroll or re-window the row their selection lives in.
-        if (selectionInList()) {
-          endDividerHold();
-          return;
-        }
-        const seat = messageListScroll.clientHeight / 3;
-        const now =
-          divider.getBoundingClientRect().top - messageListScroll.getBoundingClientRect().top;
-        if (Math.abs(now - seat) > 1) {
-          silentScrollTo(messageListScroll.scrollTop + (now - seat), 'resize.divider');
-          rewindowMessages(messageListInner);
-        }
-        return;
-      }
+    if (!messageListInner.childElementCount) return;
+    // The owner settles every content/pad/box resize (phase 3 step 5): it
+    // re-seats a held divider, keeps a pinned end, or carries a top-pad change
+    // for a reader in history -- and while a reader drives it writes nothing.
+    scrollOwner.settleResize(padDelta);
+  };
+  // Hold the unread divider on its landing seat through async row-height changes
+  // ABOVE the fold. A waveform/image/markdown row hydrating a beat after the
+  // open reflows its height; when that does not change the visible index range
+  // the virtualizer fires no re-window, so nothing re-seats the divider and it
+  // slides off screen (measured on the larger viewports, where more hydratable
+  // rows mount above the fold). The resize observer DOES see the content resize,
+  // so while the landing holds (until the reader's own scroll releases it) the
+  // owner re-seats the divider a third of the way down and re-windows so it
+  // stays mounted. False when no divider is mounted (nothing to hold).
+  const reseatDivider = (): boolean => {
+    const divider = messageListInner.querySelector<HTMLElement>('[data-cyc-unread]');
+    if (!divider) return false;
+    // A live selection means the reader is here and reading: end the hold
+    // and never scroll or re-window the row their selection lives in.
+    if (selectionInList()) {
+      endDividerHold();
+      return true;
     }
-    if (pinnedToBottom) {
-      if (distToEnd() > 0) {
-        // The finger has lifted (readerHolding is false here) but a drag's scroll
-        // event is async and coalesced: if the reader input is still fresh, that
-        // drag may not have dropped the pin yet, so re-pinning now would snap it
-        // back to the end. Defer and NAME the write so a recurrence is not a ghost.
-        if (readerInputPlausible()) {
-          logBottomPin('toBottom', 'resize.reader-active', messageListScroll.scrollTop, messageListScroll.scrollHeight);
-        } else {
-          scrollToBottom('resize.pin');
-        }
-      }
-    } else if (padDelta) {
-      silentScrollTo(messageListScroll.scrollTop + padDelta, 'resize.pad');
+    const seat = messageListScroll.clientHeight / 3;
+    const now = divider.getBoundingClientRect().top - messageListScroll.getBoundingClientRect().top;
+    if (Math.abs(now - seat) > 1) {
+      silentScrollTo(messageListScroll.scrollTop + (now - seat), 'resize.divider');
+      rewindowMessages(messageListInner);
     }
+    return true;
   };
   if (typeof ResizeObserver !== 'undefined') {
     const listResize = new ResizeObserver(onListResize);
@@ -1206,7 +1190,9 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     isPinned: () => pinnedToBottom,
     distToEnd,
     isReaderHolding: readerHolding,
-    isReaderDriving: readerInputPlausible,
+    readerInputFresh: readerInputPlausible,
+    reseatDivider,
+    bankShift: (d) => bankMessageShift(messageListInner, d),
     isLanding: () => openLanding,
     isDividerHeld: () => holdDivider,
     onTeardown: deps.onTeardown
@@ -1500,10 +1486,9 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     bracketMessageRender,
     scrollToBottom,
     releaseBottomPin,
-    // True while a reader is plausibly driving the scroll (a finger/pointer down,
-    // or a touch/wheel within the last ~150ms). storeBindings reads this so an
-    // arrival never re-pins the view to the bottom out from under an active drag.
-    readerDriving: readerInputPlausible,
+    // A row arrived for a reader who was near the end (storeBindings, R8): the
+    // owner re-pins unless a reader is driving (phase 3 step 5).
+    followArrival: scrollOwner.followArrival,
     setNewBelow,
     updateGoDown,
     hideUnreadBanner,

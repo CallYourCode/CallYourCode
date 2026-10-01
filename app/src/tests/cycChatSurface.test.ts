@@ -35,7 +35,8 @@ vi.mock('../features/chat/surface/messageList', () => ({
   setMessageWindowHook: vi.fn(),
   setMessageScrollOwner: vi.fn(),
   messageListScrolling: () => false,
-  messageListBanked: () => false
+  messageListBanked: () => false,
+  bankMessageShift: vi.fn()
 }));
 vi.mock('../shared/smoothScroll', () => ({smoothScrollTo: vi.fn()}));
 vi.mock('../features/chat/scrolling', () => ({trackComposerHeight: () => () => {}}));

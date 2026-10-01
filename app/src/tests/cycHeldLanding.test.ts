@@ -51,7 +51,8 @@ vi.mock('../features/chat/surface/messageList', () => ({
   setMessageWindowHook: vi.fn(),
   setMessageScrollOwner: vi.fn(),
   messageListScrolling: () => false,
-  messageListBanked: () => false
+  messageListBanked: () => false,
+  bankMessageShift: vi.fn()
 }));
 vi.mock('../shared/smoothScroll', () => ({smoothScrollTo: vi.fn()}));
 // The clearance engine (scrolling.ts) is REAL here: its settle() write is the

@@ -37,6 +37,18 @@
 //   - jump()           now spans a deliberate move's WHOLE async duration (the
 //                      go-to-bottom walk), so its untagged scrolls never read as
 //                      a reader driving.
+//
+// Step 5 folds the resize observer (W3 divider re-seat, W4 pin / top-pad carry)
+// and storeBindings' arrival follow (R8) into the owner:
+//
+//   - settleResize()   every content / pad / box resize: re-seat a held divider,
+//                      keep a pinned end, or carry a top-pad change for a reader
+//                      in history. While a reader drives nothing is written; a
+//                      top-pad change is banked in the spacer like a re-measure.
+//   - followArrival()  a row arrived for a reader who was near the end: re-pin,
+//                      unless a reader is driving or their input is that fresh.
+
+import {logBottomPin} from './machineScroll';
 
 export type ScrollOwnerState =
   | 'landing'
@@ -65,9 +77,15 @@ export interface ScrollOwnerDeps {
   // How far the view sits above the true end, in px.
   distToEnd(): number;
   isReaderHolding(): boolean;
-  isReaderDriving(): boolean;
+  // A finger/pointer held, or a touch/wheel within the last breath: the evidence
+  // that a reader's (async, coalesced) scroll may not have landed yet.
+  readerInputFresh(): boolean;
   isLanding(): boolean;
   isDividerHeld(): boolean;
+  // Re-seat the held unread divider on its landing spot (false: none mounted),
+  // and absorb a top-pad change in the list's spacer while a reader drives.
+  reseatDivider(): boolean;
+  bankShift(delta: number): void;
   onTeardown(d: () => void): void;
 }
 
@@ -93,13 +111,20 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
   let jumpDepth = 0;
 
   // Whether the last scroll event was the reader's: not the offset of a machine
-  // write and not inside a deliberate move (the go-to-bottom walk scrolls
-  // untagged). Read with the list's scroll clock, it is the reader's own scroll
-  // or momentum still running, which no timer of ours has to end: the clock runs
+  // write, not inside a deliberate move (the go-to-bottom walk scrolls
+  // untagged), and backed by reader input -- a finger/pointer down or a fresh
+  // touch/wheel, or the continuation of a scroll that was (momentum keeps
+  // scrolling after the finger lifts, with no input of its own). A browser
+  // clamp or an untagged app write with no reader behind it is not the reader.
+  // Read with the list's scroll clock, it is the reader's own scroll or
+  // momentum still running, which no timer of ours has to end: the clock runs
   // out on its own once the scroll events stop.
   let lastScrollByReader = false;
   const noteScroll = () => {
-    lastScrollByReader = jumpDepth === 0 && !deps.isMachineScroll(scroll.scrollTop);
+    lastScrollByReader =
+      jumpDepth === 0 &&
+      !deps.isMachineScroll(scroll.scrollTop) &&
+      (deps.readerInputFresh() || (lastScrollByReader && deps.listScrolling()));
   };
   scroll.addEventListener('scroll', noteScroll, {passive: true});
   deps.onTeardown(() => scroll.removeEventListener('scroll', noteScroll));
@@ -152,6 +177,41 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     // same synchronous update it did locally.
     recomputeNearBottom: updateNearBottom,
     driving,
+    // A content, pad or box resize (the list's ResizeObserver, W3/W4). A reader
+    // driving owns the offset: nothing is written, a top-pad change is banked in
+    // the spacer so the rows under them hold still, and a pinned end that grew is
+    // left for the settle (the scroll-end re-window keeps the pin). Otherwise the
+    // held divider is re-seated, a pinned end re-pinned, or a top-pad change
+    // carried for a reader in history.
+    settleResize(padDelta: number): void {
+      // A pinned end that grew while the reader's input was live: the re-pin
+      // waits (their async, coalesced scroll may be about to leave the end), and
+      // is NAMED so a recurrence is not a ghost.
+      const skipPin = () => {
+        if (deps.isPinned() && deps.distToEnd() > 0) {
+          logBottomPin('toBottom', 'resize.reader-active', scroll.scrollTop, scroll.scrollHeight);
+        }
+      };
+      if (driving()) {
+        if (padDelta) deps.bankShift(padDelta);
+        skipPin();
+        return;
+      }
+      if (deps.isDividerHeld() && !deps.isPinned() && deps.reseatDivider()) return;
+      if (deps.isPinned()) {
+        if (deps.readerInputFresh()) skipPin();
+        else if (deps.distToEnd() > 0) deps.scrollToBottom('resize.pin');
+      } else if (padDelta) {
+        deps.silentScrollTo(scroll.scrollTop + padDelta, 'resize.pad');
+      }
+    },
+    // A row arrived (storeBindings' rAF, R8) for a reader who was near the end:
+    // keep them at the end, unless a reader is driving or their input is fresh
+    // enough that their own scroll may not have landed yet.
+    followArrival(): void {
+      if (driving() || deps.readerInputFresh()) return;
+      deps.scrollToBottom();
+    },
     // A deliberate move (go-to-bottom W13, unread landing W14). The owner runs the
     // existing routine verbatim and holds the jump for its WHOLE duration: a
     // routine that returns a promise (the go-to-bottom walk) stays a jump until
