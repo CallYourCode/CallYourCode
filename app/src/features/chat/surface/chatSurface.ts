@@ -8,14 +8,7 @@ import type {CycEngineSession} from '@/engine/store';
 import type {ReadMarker} from '@/engine/store/readState';
 import {sessionState, dataState} from '@/sessionState';
 import {h} from '@/components/domHelpers';
-import {
-  clearMessages,
-  attachStickyDates,
-  rewindowMessages,
-  setMessageScrollOwner,
-  messageListScrolling,
-  messageListBanked
-} from './messageList';
+import {clearMessages, attachStickyDates, rewindowMessages} from './messageList';
 import {scrollSurface} from '@/shared/dom';
 import {cyclog} from '@/shared/logging';
 import {clampNumber} from '@/shared/numbers';
@@ -557,15 +550,6 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     notePinAfterWrite();
   };
   const isMachineTop = (top: number) => machineTopMatches(messageListScroll, top);
-  // The message re-window's write (anchoredRewindow W5/W6), performed by the
-  // ScrollOwner: the same raw tagged, machine-marked write the re-window did
-  // inline. It does not re-derive the pin; the scroll listener confirms it.
-  const rewindowWrite = (v: number, tag: string) => {
-    const from = messageListScroll.scrollTop;
-    messageListScroll.scrollTop = v;
-    logScrollWrite(messageListScroll, tag, from, messageListScroll.scrollTop);
-    markMachineTop(messageListScroll);
-  };
 
   let bracketMoves = 0;
   const bracketMessageRender = (id: string, paint: () => void) => {
@@ -820,16 +804,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   window.addEventListener('touchcancel', releaseTouch, {passive: true});
   window.addEventListener('keydown', endHoldOnInput, {passive: true});
   document.addEventListener('selectionchange', endHoldOnSelection, {passive: true});
-  // A page hidden mid-drag may never deliver the touchend/pointerup: drop the
-  // hold so no finger is left "down" (and every write gated) when it returns.
-  const releaseOnHidden = () => {
-    if (document.visibilityState !== 'hidden') return;
-    pointerHeld = false;
-    touchHeld = false;
-  };
-  document.addEventListener('visibilitychange', releaseOnHidden, {passive: true});
   deps.onTeardown(() => {
-    document.removeEventListener('visibilitychange', releaseOnHidden);
     window.removeEventListener('pointerup', releasePointer);
     window.removeEventListener('pointercancel', releasePointer);
     window.removeEventListener('touchend', releaseTouch);
@@ -1196,28 +1171,14 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     scroll: messageListScroll,
     silentScrollTo,
     scrollToBottom,
-    rewindowWrite,
-    rewindow: () => rewindowMessages(messageListInner),
-    listScrolling: () => messageListScrolling(messageListInner),
-    listBanked: () => messageListBanked(messageListInner),
     isMachineScroll: isMachineTop,
     nearBottomPx: () => Math.max(OVERLAY_SCROLL_NEAR_PX, messageListScroll.clientHeight / 3),
     isPinned: () => pinnedToBottom,
-    distToEnd,
     isReaderHolding: readerHolding,
     isReaderDriving: readerInputPlausible,
     isLanding: () => openLanding,
     isDividerHeld: () => holdDivider,
     onTeardown: deps.onTeardown
-  });
-
-  // The owner is the message re-window's one writer (phase 3 step 4): the
-  // re-window asks it whether a reader is driving (then it banks, never writes),
-  // whether the end is pinned, and hands it the write.
-  setMessageScrollOwner(messageListInner, {
-    driving: scrollOwner.driving,
-    pinned: scrollOwner.pinned,
-    write: scrollOwner.rewindowWrite
   });
 
   const historyPager = installHistoryPager({
