@@ -88,6 +88,11 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     // R8 (storeBindings): the reader is near the end and a live reply should keep
     // the view pinned. Same formula, same scroll-tracked value.
     nearBottom: () => nearBottomFlag,
+    // Recompute nearBottom synchronously. storeBindings refreshes it at the end of
+    // its notify rAF (after a possible re-pin) so the next push reads the
+    // post-change position even before the async scroll event fires; this is the
+    // same synchronous update it did locally.
+    recomputeNearBottom: updateNearBottom,
     // A deliberate move (go-to-bottom W13, unread landing W14). The owner runs the
     // existing routine verbatim and only records that a jump is in flight; later
     // steps give the owner the settle itself. Returns the routine's result.

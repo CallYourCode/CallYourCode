@@ -1180,7 +1180,10 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     render: deps.render,
     ownsOpening: openOwned,
     isAnchoring: () => anchorHopPending,
-    isMachineScroll: isMachineTop
+    // R7 routed through the ScrollOwner (phase 2 step 2): the pager asks the owner
+    // "was this a machine re-seat?" instead of reading the tag directly. The owner
+    // delegates to the same machine-top tag, so the answer is identical.
+    isMachineScroll: (top) => scrollOwner.isMachineScroll(top)
   });
   deps.onTeardown(historyPager.destroy);
 
@@ -1441,6 +1444,12 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     refreshSettleGrace,
     silentScrollTo,
     isMachineTop,
+    // R8 (storeBindings): is the reader near the end so a live reply keeps the
+    // view pinned? Answered by the ScrollOwner (phase 2 step 2), tracked off the
+    // scroll event with the same formula and the same no-measure-in-notify
+    // property storeBindings had locally.
+    nearBottom: scrollOwner.nearBottom,
+    recomputeNearBottom: scrollOwner.recomputeNearBottom,
     bracketMessageRender,
     scrollToBottom,
     releaseBottomPin,
