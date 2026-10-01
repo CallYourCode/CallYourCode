@@ -57,17 +57,40 @@ function diagLog(key: string, event: string, fields: Record<string, unknown>): v
 // `from` against the PREVIOUS machine top: ctx=machine means the scroller was
 // still where the machine last left it (no reader scroll since), ctx=user means
 // a reader had moved it before this write. dir is the direction of THIS write.
-export function logScrollWrite(el: Element, tag: string, from: number, to: number): void {
+export function logScrollWrite(
+  el: Element,
+  tag: string,
+  from: number,
+  to: number,
+  reason?: string
+): void {
   if (Math.abs(to - from) < 1) return; // a no-op write says nothing about a creep
   const prev = lastTop.get(el);
   const ctx = prev !== undefined && Math.abs(from - prev) <= 1 ? 'machine' : 'user';
   const dir = to < from ? 'up' : 'down';
   diagLog(`scroll.write:${tag}`, 'scroll.write', {
     tag,
+    ...(reason ? {reason} : {}),
     from: Math.round(from),
     to: Math.round(to),
     dir,
     ctx
+  });
+}
+
+// A bottom re-pin that was SKIPPED because a reader was plausibly driving the
+// scroll (a finger down, or a touch/wheel within the last breath): the
+// stuck-at-bottom snap-back signature. Emitted UN-rate-limited (unlike
+// logScrollWrite, which collapses a per-frame storm to one line / 2s) so a future
+// recurrence names its writer and reason on the very first event instead of
+// being masked. In the healthy path a reader is not driving when content growth
+// re-pins, so this stays silent.
+export function logBottomPin(tag: string, reason: string, from: number, to: number): void {
+  cyclog('scroll.pin', {
+    tag,
+    reason,
+    from: Math.round(from),
+    to: Math.round(to)
   });
 }
 

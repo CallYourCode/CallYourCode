@@ -109,6 +109,7 @@ function mk(over: Partial<StoreBindingsDeps> = {}) {
     holdGraceGrowth: vi.fn(),
     landingOwed: () => false,
     readerTook: () => false,
+    readerDriving: () => false,
     firstUnread: (): number | undefined => undefined,
     scrollToFirstUnread: vi.fn(() => true),
     scrollToBottom: vi.fn(),

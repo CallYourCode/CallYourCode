@@ -28,7 +28,8 @@ import {
   isMachineTop as machineTopMatches,
   machineTopOf,
   logScrollWrite,
-  logScrollUpUser
+  logScrollUpUser,
+  logBottomPin
 } from './machineScroll';
 import {onHorizontalSwipe} from '@/features/gestures';
 
@@ -505,6 +506,16 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   let pinnedToBottom = false;
   let padTopSeen = 0;
   let pointerHeld = false;
+  // True from touchstart until the last finger lifts. On a touch build Chrome
+  // fires pointercancel the instant it claims a vertical pan as a native scroll,
+  // which clears `pointerHeld` while the finger is STILL dragging; a bottom re-pin
+  // (onListResize below, or the storeBindings rAF on an arrival) firing in that
+  // gap snapped the reader straight back to the end every frame content was
+  // settling -- the stuck-at-bottom report. The raw touch sequence stays down
+  // through the whole pan, so it is the reliable "a finger owns the offset" signal.
+  let touchHeld = false;
+  // A finger or pointer is physically on the surface right now.
+  const readerHolding = () => pointerHeld || touchHeld;
   const notePinAfterWrite = () => {
     pinnedToBottom = distToEnd() <= PIN_PX;
     padTopSeen = messageListPadTop.offsetHeight;
@@ -522,7 +533,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   };
 
   const SCROLL_TRACE = new URLSearchParams(location.search).get('cycscroll') === '1';
-  const silentScrollTo = (v: number, tag = 'silent') => {
+  const silentScrollTo = (v: number, tag = 'silent', reason?: string) => {
     const from = messageListScroll.scrollTop;
     if (SCROLL_TRACE) {
       const at = (new Error().stack ?? '').split('\n').slice(2, 5).join(' | ');
@@ -533,7 +544,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       );
     }
     messageListScroll.scrollTop = v;
-    logScrollWrite(messageListScroll, tag, from, messageListScroll.scrollTop);
+    logScrollWrite(messageListScroll, tag, from, messageListScroll.scrollTop, reason);
     markMachineTop(messageListScroll);
     notePinAfterWrite();
   };
@@ -692,8 +703,8 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     }
   };
 
-  const scrollToBottom = () => {
-    silentScrollTo(messageListScroll.scrollHeight, 'toBottom');
+  const scrollToBottom = (reason?: string) => {
+    silentScrollTo(messageListScroll.scrollHeight, 'toBottom', reason);
   };
 
   // Runs after layout whenever the list content, either pad, or the scroller's
@@ -704,7 +715,11 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     const padNow = messageListPadTop.offsetHeight;
     const padDelta = padNow - padTopSeen;
     padTopSeen = padNow;
-    if (pointerHeld || !messageListInner.childElementCount) return;
+    // A finger (or pointer) on the surface owns the offset until it lifts: never
+    // re-pin or re-seat under an active drag. `readerHolding` stays true for the
+    // whole touch even after Chrome's mid-pan pointercancel, which `pointerHeld`
+    // alone did not (the stuck-at-bottom snap-back).
+    if (readerHolding() || !messageListInner.childElementCount) return;
     // Hold the unread divider on its landing seat through async row-height changes
     // ABOVE the fold. A waveform/image/markdown row hydrating a beat after the
     // open reflows its height; when that does not change the visible index range
@@ -733,7 +748,17 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       }
     }
     if (pinnedToBottom) {
-      if (distToEnd() > 0) scrollToBottom();
+      if (distToEnd() > 0) {
+        // The finger has lifted (readerHolding is false here) but a drag's scroll
+        // event is async and coalesced: if the reader input is still fresh, that
+        // drag may not have dropped the pin yet, so re-pinning now would snap it
+        // back to the end. Defer and NAME the write so a recurrence is not a ghost.
+        if (readerInputPlausible()) {
+          logBottomPin('toBottom', 'resize.reader-active', messageListScroll.scrollTop, messageListScroll.scrollHeight);
+        } else {
+          scrollToBottom('resize.pin');
+        }
+      }
     } else if (padDelta) {
       silentScrollTo(messageListScroll.scrollTop + padDelta, 'resize.pad');
     }
@@ -754,6 +779,15 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   const releasePointer = () => {
     pointerHeld = false;
   };
+  const holdTouch = () => {
+    touchHeld = true;
+    endDividerHold();
+  };
+  // The finger owns the offset until the LAST touch lifts (a multi-touch release
+  // leaves one finger still down).
+  const releaseTouch = (e: TouchEvent) => {
+    if (!e.touches || e.touches.length === 0) touchHeld = false;
+  };
   // Any user interaction ends the divider hold at once, so it can never re-seat
   // (and wipe a selection) once the reader is doing anything in the chat.
   const endHoldOnInput = () => endDividerHold();
@@ -762,14 +796,18 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   };
   messageListScroll.addEventListener('pointerdown', holdPointer, {passive: true});
   messageListScroll.addEventListener('wheel', endHoldOnInput, {passive: true});
-  messageListScroll.addEventListener('touchstart', endHoldOnInput, {passive: true});
+  messageListScroll.addEventListener('touchstart', holdTouch, {passive: true});
   window.addEventListener('pointerup', releasePointer, {passive: true});
   window.addEventListener('pointercancel', releasePointer, {passive: true});
+  window.addEventListener('touchend', releaseTouch, {passive: true});
+  window.addEventListener('touchcancel', releaseTouch, {passive: true});
   window.addEventListener('keydown', endHoldOnInput, {passive: true});
   document.addEventListener('selectionchange', endHoldOnSelection, {passive: true});
   deps.onTeardown(() => {
     window.removeEventListener('pointerup', releasePointer);
     window.removeEventListener('pointercancel', releasePointer);
+    window.removeEventListener('touchend', releaseTouch);
+    window.removeEventListener('touchcancel', releaseTouch);
     window.removeEventListener('keydown', endHoldOnInput);
     document.removeEventListener('selectionchange', endHoldOnSelection);
   });
@@ -788,7 +826,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   messageListScroll.addEventListener('touchmove', noteReaderInput, {passive: true});
   messageListScroll.addEventListener('wheel', noteReaderInput, {passive: true});
   const readerInputPlausible = () =>
-    pointerHeld || Date.now() - lastReaderInputAt <= READER_INPUT_MS;
+    readerHolding() || Date.now() - lastReaderInputAt <= READER_INPUT_MS;
 
   const chrome = createChatChrome({
     chat: deps.chatEl,
@@ -904,7 +942,8 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
 
       // An upward scroll not attributed to a machine write: a real reader scroll
       // (or an untagged writer). readerTrackTop still holds the PREVIOUS offset.
-      if (!machine && top < readerTrackTop - 1) logScrollUpUser(readerTrackTop, top);
+      const readerUp = !machine && top < readerTrackTop - 1;
+      if (readerUp) logScrollUpUser(readerTrackTop, top);
 
       // The reader's own scroll ends the divider hold: a real gesture owns the
       // offset from here on. Machine writes (the hold's own re-seat, the landing)
@@ -931,8 +970,11 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       // The reader's own scroll (or a browser clamp) decides whether the view
       // is still pinned. A machine write already recorded where it landed and
       // its event may arrive after a growth the observer is about to absorb,
-      // so it can only confirm a pin, never drop one.
-      if (!machine) pinnedToBottom = distToEnd() <= PIN_PX;
+      // so it can only confirm a pin, never drop one. A reader's UPWARD drag
+      // leaves the bottom AT ONCE -- even a few px, before it clears PIN_PX --
+      // so a re-pin cannot race its (async, coalesced) scroll event back to the end.
+      if (readerUp) pinnedToBottom = false;
+      else if (!machine) pinnedToBottom = distToEnd() <= PIN_PX;
       else if (distToEnd() <= PIN_PX) pinnedToBottom = true;
       readerTrackTop = top;
       readerTrackHeight = height;
@@ -1379,6 +1421,10 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     bracketMessageRender,
     scrollToBottom,
     releaseBottomPin,
+    // True while a reader is plausibly driving the scroll (a finger/pointer down,
+    // or a touch/wheel within the last ~150ms). storeBindings reads this so an
+    // arrival never re-pins the view to the bottom out from under an active drag.
+    readerDriving: readerInputPlausible,
     setNewBelow,
     updateGoDown,
     hideUnreadBanner,
