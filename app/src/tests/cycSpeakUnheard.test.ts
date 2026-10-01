@@ -287,3 +287,30 @@ describe('an aged-out read-through row speaks the newest N, never silence and ne
     expect(played.map((p) => p.msgId)).toEqual(['mr-3', 'mr-4']);
   });
 });
+
+describe('the stale cache (read-through newer than the loaded window) speaks nothing', () => {
+  test('the old-clip field defect: a window entirely behind the read-through plays nothing', () => {
+    // The exact field shape (app.log, four replays of the 2-day-old FINALISED
+    // speak clip ba4e8abb). The device slept while the owner read on the laptop,
+    // so the cached window's NEWEST loaded row is behind the engine's read-through.
+    // The genuinely-unheard reply (engine unread 1) is on a NEWER, unloaded page.
+    // The marker's row is therefore not in the window, and -- the defect -- it is
+    // newer than everything loaded, not older. The old fallback spoke the newest
+    // loaded clip (an old one); the floor on the marker's instant speaks nothing.
+    const session: EngineSession = {
+      id: 's1',
+      name: 's1',
+      messages: [claude(1, 1000), claude(2, 2000), claude(3, 3000)],
+      unread: 0,
+      engineUnread: 1
+    } as EngineSession;
+    setSession(session);
+    setMarker({mid: 'mr-readthrough-unloaded', ts: 9000});
+    const played: {sessionId: string; msgId: string}[] = [];
+    const reader = makeReader(played);
+
+    reader.speakUnheard('s1');
+
+    expect(played).toEqual([]);
+  });
+});

@@ -137,4 +137,42 @@ describe('the arrival path only autoplays a genuinely-unheard row', () => {
     // is always loaded; an unloaded msgId is an old backfilled row, never played.
     expect(mayAutoplayArrival(SID, 'mr-not-loaded')).toBe(false);
   });
+
+  /* THE STALE-CACHE FIELD DEFECT (fix-old-clip-attach), the exact shape proven in
+   * app.log (dev=ynmi0/726ju, four replays of msg ba4e8abb, a 2-day-old FINALISED
+   * speak clip -- not a stranded growing one): a device that slept while the owner
+   * read on the laptop opens onto a cached window whose NEWEST loaded row is BEHIND
+   * the engine's read-through. The read-through row is on a NEWER, unloaded page,
+   * so its marker does not resolve in the window. The old guard returned true for
+   * every loaded row then ("marker on an older page"), so the newest OLD spoken
+   * clip in the stale window autoplayed as a fresh arrival. */
+  test('the stale cache (read-through newer than the loaded window) never autoplays an old clip', () => {
+    // The loaded window: an old spoken clip and a few later ones, every loaded row
+    // BEHIND the read-through. ba4e8abb-shaped: `old` is the newest spoken clip here.
+    const old = claude(0, 1000, 'mr-old-speak');
+    const mid = claude(1, 2000, 'mr-mid-speak');
+    const newestLoaded = claude(2, 3000, 'mr-newest-loaded');
+    const s = plant([old, mid, newestLoaded]);
+    // The engine's read-through names a row NEWER than anything loaded (the owner
+    // read past the whole cached window elsewhere) and absent from the window.
+    applyBroadcastReadThrough(s, {mid: 'mr-readthrough-unloaded', ts: 9000});
+    noteReadStateFresh(SID);
+    // Before the fix each of these returned true (markerIdx < 0 -> true). Nothing
+    // in a window that sits entirely behind the read-through is unheard.
+    expect(mayAutoplayArrival(SID, 'mr-old-speak')).toBe(false);
+    expect(mayAutoplayArrival(SID, 'mr-mid-speak')).toBe(false);
+    expect(mayAutoplayArrival(SID, 'mr-newest-loaded')).toBe(false);
+  });
+
+  test('the read-through aged out to an OLDER page: a genuinely newer loaded reply still speaks', () => {
+    // The marker is older than every loaded row and not in the window (it scrolled
+    // off the top). A live arrival past it must still autoplay -- the inclusive,
+    // at-or-after-the-marker-instant branch, extended to an unloaded older marker.
+    const read = claude(1, 5000, 'mr-read');
+    const arrival = claude(2, 8000, 'mr-arrival');
+    const s = plant([read, arrival]);
+    applyBroadcastReadThrough(s, {mid: 'mr-older-unloaded', ts: 1000});
+    noteReadStateFresh(SID);
+    expect(mayAutoplayArrival(SID, 'mr-arrival')).toBe(true);
+  });
 });

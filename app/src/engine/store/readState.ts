@@ -108,7 +108,11 @@ export function effectiveMarkerOf(s: CycEngineSession): ReadMarker | undefined {
  *   - AT OR AFTER the marker: a live reply, once auto-sighted on arrival, sits
  *     exactly AT the read-through, so the boundary is inclusive -- a genuine live
  *     arrival still speaks; a row strictly BEFORE the marker (heard, read past)
- *     never does. No `ts` scan: identity alone, like the divider. */
+ *     never does. The marker's LOADED row anchors this by identity (its index),
+ *     like the divider; when the marker's row has aged out of the window its own
+ *     engine instant anchors it instead (never a client clock), so a stale cached
+ *     window whose tail sits behind the read-through no longer autoplays an old
+ *     clip as an arrival (fix-old-clip-attach). */
 export function mayAutoplayArrival(sessionId: string, msgId: string): boolean {
   if (!readStateFreshOnConn(sessionId)) return false;
   const s = sessions.get(sessionId);
@@ -119,8 +123,28 @@ export function mayAutoplayArrival(sessionId: string, msgId: string): boolean {
   const marker = effectiveMarkerOf(s);
   if (!marker) return true; // the engine reports nothing read here: genuinely unheard
   const markerIdx = markerIndexIn(msgs, marker);
-  if (markerIdx < 0) return true; // marker on an older page: every loaded row is past it
-  return rowIdx >= markerIdx;
+  if (markerIdx >= 0) return rowIdx >= markerIdx;
+  /* The read-through row is NOT in the loaded window, so its page is not loaded.
+   * The old code returned true here -- "marker on an older page, every loaded row
+   * is past it" -- but that is only ONE of the two reasons a marker aged out, and
+   * it is the wrong one for the field defect (fix-old-clip-attach). A device that
+   * slept while the owner read on another device opens onto a STALE cached window
+   * whose NEWEST loaded row is BEHIND the engine's read-through: the genuinely
+   * unheard reply is on a page NEWER than everything loaded, not older. Returning
+   * true then autoplayed the newest OLD clip still in the stale window as a fresh
+   * arrival (the owner's "it played a very old audio", clip.play reason=
+   * autoplay-arrival on a 2-day-old finalised speak clip). PROVEN in the logs: the
+   * cache paint range top sat below the engine heardTs at every one of the four
+   * replays, so the marker row was never loaded.
+   *
+   * Decide by the marker's OWN engine instant instead. Both the row ts and the
+   * read-through ts are the engine's, never a client clock, so this is NOT the ts
+   * reconcile that identity was chosen over (that was a CLIENT clock vs the
+   * engine): it is the same AT-OR-AFTER test the index gives, extended to a marker
+   * whose row aged out of the window. A row strictly before the read-through
+   * instant is read and must not autoplay; a genuine live arrival (ts at or after
+   * the marker, and its row is always loaded by its own `chat` frame) still does. */
+  return msgs[rowIdx].ts >= marker.ts;
 }
 
 /* Adopt the engine's broadcast onto the session. The overlay is left to the
