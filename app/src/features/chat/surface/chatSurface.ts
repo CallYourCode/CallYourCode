@@ -586,7 +586,6 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     const firstRowMid = firstRow?.dataset.mid ?? null;
     const firstRowScreenTop = firstRow ? firstRow.getBoundingClientRect().top - boxTop : 0;
     let anchorMid: string | null = null;
-    let anchorDelta = 0;
     let anchorScreenTop = 0;
     // Prefer the unread DIVIDER as the store-paint anchor when it is on screen:
     // a landing holds it a third down, and a message arriving (or older history
@@ -599,16 +598,21 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       const dr = dividerRow.getBoundingClientRect();
       if (dr.bottom > boxTop && dr.top < boxTop + messageListScroll.clientHeight) {
         anchorMid = dividerRow.dataset.mid ?? null;
-        anchorDelta = dividerRow.offsetTop - before;
         anchorScreenTop = dr.top - boxTop;
       }
     }
+    // Found and held by SCREEN rect, never by row.offsetTop: offsetTop is
+    // measured against the row's positioned GROUP, not the scroll content, so
+    // comparing it to scrollTop picked an arbitrary row, and re-seating by it
+    // put the reader's row wherever its group happened to sit -- a reply
+    // arriving while the reader was up in history (a front-trim paint that
+    // slid the window by a row) moved their row 140-220 px (arrival-held).
     if (anchorMid === null) {
       for (const row of messageListScroll.querySelectorAll<HTMLElement>('.cyc-message[data-mid]')) {
-        if (row.offsetTop >= before) {
+        const top = row.getBoundingClientRect().top;
+        if (top >= boxTop) {
           anchorMid = row.dataset.mid ?? null;
-          anchorDelta = row.offsetTop - before;
-          anchorScreenTop = row.getBoundingClientRect().top - boxTop;
+          anchorScreenTop = top - boxTop;
           break;
         }
       }
@@ -620,19 +624,16 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
         : null;
     const reseated = findAnchor();
     // The paint already re-seated the scroll itself (messageList's front-prepend
-    // hold, which rides the virtualizer's measured offsets): defer to it. The
-    // offsetTop math below cannot preserve a prepend anyway -- row.offsetTop is
-    // measured against the row's positioned GROUP, not the scroll content, so a
-    // prepend that pushes the whole group down leaves offsetTop unchanged and
-    // this computes a zero move, snapping the view back to the top. When the
-    // paint left scrollTop where it was (an append, an edit, a growing reply),
-    // this holds the anchor as before.
+    // hold, which rides the virtualizer's measured offsets): defer to it. When
+    // the paint left scrollTop where it was (an append, an edit, a growing
+    // reply), this holds the anchor at its pre-paint screen top.
     if (messageListScroll.scrollTop !== before) {
       // paint moved it: keep the paint's re-seat.
     } else if (reseated) {
       // The anchor survived (possibly as a fresh node): re-seat so it keeps the
       // same offset from the top.
-      messageListScroll.scrollTop = reseated.offsetTop - anchorDelta;
+      const drift = reseated.getBoundingClientRect().top - boxTop - anchorScreenTop;
+      if (Math.abs(drift) > 0.5) messageListScroll.scrollTop += drift;
     } else if (firstRowMid) {
       // No fold anchor survived. Decide top-growth vs bottom-growth from the
       // topmost mounted row's SCREEN position: older history prepended shifts it
