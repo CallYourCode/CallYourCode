@@ -291,6 +291,13 @@ type RenderState = {
   // own scroll got clawed back toward the divider: the owner's "can't scroll up
   // or down until I leave the chat" freeze. Wired by chatSurface.
   dividerHeld: (() => boolean) | null;
+  // True while a reader is plausibly driving the scroll (a finger/pointer down,
+  // or a touch/wheel within the last ~150ms). anchoredRewindow's bottom pin reads
+  // this (via setMessageReaderDriving) so it never writes scrollTop to follow the
+  // end under the reader's own gesture -- the first flick up from the bottom
+  // interrupting iOS momentum. Null when no getter is wired (a detached mount,
+  // unit tests), so the pin keeps its pre-gate behavior there.
+  readerDriving: (() => boolean) | null;
   // A bounded LRU of DETACHED row nodes, keyed by row identity + content
   // version (rowCacheKey). A scroll that slides the window drops the rows
   // leaving it into here and re-attaches the rows entering it from here, so a
@@ -464,22 +471,36 @@ function ensureVirt(inner: HTMLElement, st: RenderState): MsgVirtualizer {
     // collapse the list's offsets and defeat the window bound.
     measureElement: (el: HTMLElement, entry: ResizeObserverEntry | undefined, instance: MsgVirtualizer) => {
       const idx = instance.indexFromElement(el);
-      // Hold an already-measured row's committed height while the list is
-      // actively scrolling (isScrolling spans the scroll event AND the rAF
-      // settle re-window that follows each event, where syncScroll is already
-      // back to false). Re-measuring mounted rows mid-fling is what made
-      // anchoredRewindow bounce scrollTop by ~200px per frame and interrupt iOS
-      // momentum (the owner's jitter); it is also the cascade virtual-core
-      // guards against by not compensating a re-measurement during a backward
-      // scroll. Only a row's FIRST measurement (estimate->actual) is integrated
-      // while scrolling -- the one-step compensation for rows entering from
-      // above; a row that already carries a real height keeps it until the
-      // scroll settles (isScrolling clears after its reset delay), when a plain
-      // re-window re-measures it cleanly.
+      // Hold an already-measured row's committed height ONLY once the reader is
+      // scrolling AWAY from the bottom (isScrolling AND not pinned at the end).
+      // Re-measuring mounted rows mid-fling is what made anchoredRewindow bounce
+      // scrollTop by ~200px per frame and interrupt iOS momentum (the owner's
+      // jitter); it is also the cascade virtual-core guards against by not
+      // compensating a re-measurement during a backward scroll. Only a row's
+      // FIRST measurement (estimate->actual) is integrated while scrolling away
+      // -- the one-step compensation for rows entering from above; a row that
+      // already carries a real height keeps it until the scroll settles
+      // (isScrolling clears after its reset delay), when a plain re-window
+      // re-measures it cleanly.
+      //
+      // The hold must NOT apply during the open LANDING or while pinned at the
+      // bottom. There the landing scroll keeps isScrolling true while the rows
+      // above the fold first mount; holding them at EST_MSG then cached that
+      // estimate as their size, so the settled open UNDER-measured total height
+      // (a row's real height never committing, because the DOM height did not
+      // change so no ResizeObserver re-measure followed the settle). The ungated
+      // bottom pin then chased the healing height under the reader's first flick
+      // up from the bottom -- the regression this gate removes. At the bottom we
+      // let real heights commit, so the settled open measures its full height.
       if (instance.isScrolling && idx >= 0) {
-        const key = st.rows[idx]?.key;
-        const held = key !== undefined ? instance.itemSizeCache.get(key) : undefined;
-        return held ?? st.rows[idx]?.estimate ?? EST_MSG;
+        const box = scrollBoxOf(inner);
+        const atBottom =
+          !!box && box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_PIN_PX;
+        if (!atBottom) {
+          const key = st.rows[idx]?.key;
+          const held = key !== undefined ? instance.itemSizeCache.get(key) : undefined;
+          return held ?? st.rows[idx]?.estimate ?? EST_MSG;
+        }
       }
       const size = measureElement(el, entry, instance);
       if (size > 0) return size;
@@ -672,7 +693,16 @@ function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
   st.lastPaint();
   if (atBottom) {
     const end = box.scrollHeight - box.clientHeight;
-    if (end - box.scrollTop > 0.5) {
+    // Do NOT write scrollTop to follow the end while a reader is driving the
+    // scroll (a finger/pointer down, or a touch/wheel within the last ~150ms).
+    // The first flick UP from the bottom starts within BOTTOM_PIN_PX of the end,
+    // so this atBottom branch runs for its first frames; writing scrollTop there
+    // lands under the reader's finger and, on iOS WebKit, interrupts the momentum
+    // and jumps (the owner's jitter). A pinned ARRIVAL (no reader input) still
+    // follows the end, so new lines land -- the pinned-reader contract. This
+    // mirrors storeBindings, which only follows the bottom when !readerDriving.
+    const readerDrives = st.readerDriving ? st.readerDriving() : false;
+    if (!readerDrives && end - box.scrollTop > 0.5) {
       const from = box.scrollTop;
       box.scrollTop = end;
       logScrollWrite(box, 'rewindow.bottom', from, box.scrollTop);
@@ -697,8 +727,8 @@ function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
   // keeps mounted rows at a stable height while isScrolling, so the anchor does
   // not drift during the gesture and there is nothing to write; the scroll-end
   // re-window (isScrolling cleared) re-measures and compensates once, cleanly.
-  // The bottom pin above is NOT gated: following the end as the tail grows is
-  // the pinned-reader contract, not an anchor hold a reader is fighting.
+  // The bottom pin above gates on readerDriving (not isScrolling): a pinned
+  // arrival while no reader is touching still follows the end as the tail grows.
   if ((st.virt as unknown as {isScrolling?: boolean}).isScrolling) return;
   if (Math.abs(delta) > 0.5) {
     const from = box.scrollTop;
@@ -1048,6 +1078,15 @@ export function setMessageDividerHold(inner: HTMLElement, held: () => boolean): 
   if (st) st.dividerHeld = held;
 }
 
+// Register the reader-driving getter (see RenderState.readerDriving). chatSurface
+// passes a closure over its readerInputPlausible flag so anchoredRewindow's
+// bottom pin never writes scrollTop to follow the end under a reader's own
+// gesture (the first flick up from the bottom).
+export function setMessageReaderDriving(inner: HTMLElement, driving: () => boolean): void {
+  const st = renderStates.get(inner);
+  if (st) st.readerDriving = driving;
+}
+
 // A scan-key fragment that changes whenever the visible window moves, so the
 // render hub re-runs its DOM sweeps for the rows a scroll just revealed.
 export function messageVisibleRangeKey(inner: HTMLElement): string {
@@ -1358,6 +1397,7 @@ function paintMessages(
       winAtBottom: false,
       onWindowChange: null,
       dividerHeld: null,
+      readerDriving: null,
       nodeCache: new Map()
     };
     renderStates.set(inner, st);
