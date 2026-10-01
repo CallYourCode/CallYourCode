@@ -962,6 +962,13 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       // (or an untagged writer). readerTrackTop still holds the PREVIOUS offset.
       const readerUp = !machine && top < readerTrackTop - 1;
       if (readerUp) logScrollUpUser(readerTrackTop, top);
+      // A CLAMP is not the reader: the content shrank under a view at its end
+      // and the browser pulled the offset up to the new end, so it lands AT the
+      // end. It must never drop the pin. It did at nearly every open (rows that
+      // measure shorter than their estimate shrink the list right after the
+      // landing), so a pinned reader was left unpinned and the next resize (the
+      // phone keyboard opening, a late image) no longer kept the end.
+      const clamp = readerUp && height < readerTrackHeight - 1 && distToEnd() <= 1;
 
       // The reader's own scroll ends the divider hold: a real gesture owns the
       // offset from here on. Machine writes (the hold's own re-seat, the landing)
@@ -991,7 +998,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       // so it can only confirm a pin, never drop one. A reader's UPWARD drag
       // leaves the bottom AT ONCE -- even a few px, before it clears PIN_PX --
       // so a re-pin cannot race its (async, coalesced) scroll event back to the end.
-      if (readerUp) pinnedToBottom = false;
+      if (readerUp && !clamp) pinnedToBottom = false;
       else if (!machine) pinnedToBottom = distToEnd() <= PIN_PX;
       else if (distToEnd() <= PIN_PX) pinnedToBottom = true;
       readerTrackTop = top;
