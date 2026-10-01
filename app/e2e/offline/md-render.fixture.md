@@ -61,6 +61,12 @@ a fenced block without a language
 - [ ] an open task
 - [x] a done task
 
+- A list item with more paragraphs
+
+    Its second paragraph, indented under the item.
+
+    Its third paragraph, still part of the item.
+
 | Column one | Column two | Column three | Column four | Column five | Column six | Column seven |
 |:-----------|:----------:|-------------:|-------------|-------------|------------|--------------|
 | left | center | right | a cell with quite a lot of text in it | `code` | **bold** | the last column |

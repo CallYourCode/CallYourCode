@@ -1,11 +1,35 @@
 import type {MarkdownInline, MarkdownBlock} from '@/features/content/markdown';
+
+type MarkdownImage = Extract<MarkdownInline, {kind: 'image'}>;
 import {codeBlockElement} from '@/features/chat/content';
 import {h} from '../../components/domHelpers';
 import {renderSyntaxBlocks, paintCodeBlocks} from '@/features/code/viewer';
-import {MEDIA_PRIMARY_TEXT, MEDIA_PRIMARY_ACCENT, paintOnTheme} from './mediaPaint';
+import {MEDIA_PRIMARY_TEXT, paintOnTheme} from './mediaPaint';
+import type {PresentationTheme} from '../../components/presentation';
 
 const ALL_MD_PRIMARY_TEXT = Object.values(MEDIA_PRIMARY_TEXT);
-const ALL_MD_PRIMARY_ACCENT = Object.values(MEDIA_PRIMARY_ACCENT);
+
+// Whether `![alt](https://...)` loads the remote image. Off, it renders as a link
+// labelled with the alt text and nothing is fetched until the reader taps it.
+export const REMOTE_IMAGES = false;
+
+// The read-only task box is drawn, not a native checkbox: index.html declares
+// `color-scheme: dark`, so a native box paints dark on the day page (a solid grey
+// square in Chromium, a borderless white one in WebKit). A done box fills with
+// the primary copper and its tick takes the surface ink.
+const MD_TASK_BOX =
+  'cyc-md-checkbox inline-grid place-items-center size-[1.0625rem] me-[0.4375rem] align-[-0.1875rem] rounded-[0.25rem] border-[1.5px] border-solid';
+const MD_TASK_OPEN: Record<PresentationTheme, string[]> = {
+  day: ['border-[#6b6b70]', 'bg-[#ffffff]'],
+  night: ['border-[#a0a0a6]', 'bg-[#17171a]']
+};
+const MD_TASK_DONE: Record<PresentationTheme, string[]> = {
+  day: ['border-[#96602f]', 'bg-[#96602f]', 'text-[#ffffff]'],
+  night: ['border-[#c98652]', 'bg-[#c98652]', 'text-[#17171a]']
+};
+const MD_TASK_TICK =
+  '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ALL_MD_TASK = [...Object.values(MD_TASK_OPEN), ...Object.values(MD_TASK_DONE)].flat();
 
 const MD_CODE_UTILS =
   'cyc-md-code font-[family-name:JetBrains_Mono,monospace] text-[0.875em] text-[color:var(--cyc-text)] bg-[var(--cyc-text-muted-tint)] rounded px-[0.3125rem] py-[0.0625rem]';
@@ -26,6 +50,31 @@ const MD_RULE_BORDER = 'border-[color:color-mix(in_srgb,var(--cyc-text-muted)_45
 // user can see the block scrolls. `!` beats the un-layered chat.css hide rules.
 const MD_CODE_SCROLLBAR =
   '[scrollbar-width:thin]! [&::-webkit-scrollbar]:block! [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-thumb]:rounded [&::-webkit-scrollbar-thumb]:bg-[var(--cyc-text-muted)]';
+
+function imageLink(image: MarkdownImage): HTMLAnchorElement {
+  const link = h('a', 'cyc-md-link cyc-md-image-link no-underline hover:underline!', {
+    href: image.src,
+    target: '_blank',
+    rel: 'noopener'
+  });
+  paintOnTheme(link, ALL_MD_PRIMARY_TEXT, (t) => MEDIA_PRIMARY_TEXT[t]);
+  link.textContent = image.alt || image.src;
+  return link;
+}
+
+// `remote` is REMOTE_IMAGES; the tests pass it to cover both settings.
+export function markdownImage(image: MarkdownImage, remote = REMOTE_IMAGES): HTMLElement {
+  if (!remote) return imageLink(image);
+  const img = h('img', 'cyc-md-image inline-block max-w-full h-auto rounded-lg align-top', {
+    src: image.src,
+    alt: image.alt,
+    loading: 'lazy',
+    referrerpolicy: 'no-referrer'
+  });
+  // An image that cannot load becomes a link to it, never a broken-image icon.
+  img.addEventListener('error', () => img.replaceWith(imageLink(image)), {once: true});
+  return img;
+}
 
 function renderMarks(marks: MarkdownInline[], parent: Node) {
   for (const node of marks) {
@@ -51,28 +100,7 @@ function renderMarks(marks: MarkdownInline[], parent: Node) {
       continue;
     }
     if (node.kind === 'image') {
-      const img = h('img', 'cyc-md-image inline-block max-w-full h-auto rounded-lg align-top', {
-        src: node.src,
-        alt: node.alt,
-        loading: 'lazy',
-        referrerpolicy: 'no-referrer'
-      });
-      // An image that cannot load becomes a link to it, never a broken-image icon.
-      img.addEventListener(
-        'error',
-        () => {
-          const link = h('a', 'cyc-md-link no-underline hover:underline!', {
-            href: node.src,
-            target: '_blank',
-            rel: 'noopener'
-          });
-          paintOnTheme(link, ALL_MD_PRIMARY_TEXT, (t) => MEDIA_PRIMARY_TEXT[t]);
-          link.textContent = node.alt || node.src;
-          img.replaceWith(link);
-        },
-        {once: true}
-      );
-      parent.appendChild(img);
+      parent.appendChild(markdownImage(node));
       continue;
     }
     if (node.kind === 'anchor') {
@@ -179,20 +207,14 @@ function renderNode(block: MarkdownBlock): HTMLElement | null {
       const li = h('li', 'my-1 whitespace-pre-wrap');
       if (item.checked !== undefined) {
         li.classList.add('cyc-md-task', 'list-none', 'ms-[-1.25rem]');
-        // Read-only by pointer-events and tabindex, not `disabled`: a disabled box
-        // drops the accent and all but vanishes in WebKit. `appearance-auto!` beats
-        // the un-layered chrome.css input reset.
-        const box = h(
-          'input',
-          'cyc-md-checkbox me-[0.4375rem] align-[-0.125rem] pointer-events-none appearance-auto!',
-          {
-            type: 'checkbox',
-            tabindex: '-1',
-            'aria-readonly': 'true'
-          }
-        ) as HTMLInputElement;
-        paintOnTheme(box, ALL_MD_PRIMARY_ACCENT, (t) => MEDIA_PRIMARY_ACCENT[t]);
-        box.checked = item.checked;
+        const done = item.checked;
+        const box = h('span', MD_TASK_BOX, {
+          role: 'checkbox',
+          'aria-checked': String(done),
+          'aria-readonly': 'true'
+        });
+        paintOnTheme(box, ALL_MD_TASK, (t) => (done ? MD_TASK_DONE : MD_TASK_OPEN)[t]);
+        if (done) box.innerHTML = MD_TASK_TICK;
         li.append(box);
       }
       if (block.ordered && item.number) li.value = item.number;
@@ -205,11 +227,15 @@ function renderNode(block: MarkdownBlock): HTMLElement | null {
     }
     return list;
   }
+  // The table sizes to its content and wraps cells to fit the column; it only
+  // scrolls in its own container when the cells' minimum widths cannot fit (a
+  // phone, or very many columns). The minimum, wider on a phone, keeps a narrow
+  // column from squeezing its text to one word per line.
   const wrap = h('div', 'cyc-md-table-wrap overflow-x-auto my-3');
-  const table = h('table', 'cyc-md-table w-max min-w-full border-collapse text-[0.9375rem]');
+  const table = h('table', 'cyc-md-table border-collapse text-[0.9375rem]');
   const head = h('thead', '');
   const body = h('tbody', '');
-  const CELL_UTILS = `max-w-[20rem] border ${MD_RULE_BORDER} px-2.5 py-1.5 text-left align-top`;
+  const CELL_UTILS = `min-w-[5.5rem] max-[550px]:min-w-[7.5rem] border ${MD_RULE_BORDER} px-2.5 py-1.5 text-left align-top`;
   for (const [rowIndex, row] of block.rows.entries()) {
     const tr = h('tr', '');
     for (const cell of row) {

@@ -105,8 +105,38 @@ describe('markdown article parser', () => {
         value: 'one\n\ntwo',
         language: ''
       });
-      const nodes = parseMarkdownDocument('- a\n\n    - b').nodes;
-      expect(nodes.map((n) => n.kind)).toEqual(['list', 'list']);
+      const nested = only('- a\n\n    - b');
+      expect(nested.kind === 'list' && nested.items[0].nodes?.map((n) => n.kind)).toEqual(['list']);
+    });
+
+    test('indented paragraphs after blank lines stay inside their list item', () => {
+      const node = only('- item\n\n    para1\n\n    para2\n- next');
+      expect(node.kind).toBe('list');
+      const items = node.kind === 'list' ? node.items : [];
+      expect(items).toHaveLength(2);
+      expect(items[0].nodes).toEqual([
+        {kind: 'paragraph', content: [{kind: 'text', value: 'para1'}]},
+        {kind: 'paragraph', content: [{kind: 'text', value: 'para2'}]}
+      ]);
+    });
+
+    test('an item keeps code indented past its text, and lazy lines join its text', () => {
+      const node = only('1. run\n   this too\n\n       npm test');
+      const item = node.kind === 'list' ? node.items[0] : undefined;
+      expect(item?.content).toEqual([{kind: 'text', value: 'run\nthis too'}]);
+      expect(item?.nodes).toEqual([{kind: 'code', value: 'npm test', language: ''}]);
+    });
+
+    test('deep quote nesting stops at a cap and renders the rest as text', () => {
+      let node = only('>'.repeat(5000) + ' deep');
+      let depth = 0;
+      while (node.kind === 'quote') {
+        node = node.nodes[0];
+        depth++;
+      }
+      expect(depth).toBeLessThan(40);
+      expect(node.kind).toBe('paragraph');
+      expect(JSON.stringify(node)).toContain('> deep');
     });
 
     test('ordered lists keep their explicit start numbers', () => {
@@ -211,9 +241,21 @@ describe('markdown article parser', () => {
       expect(marksOf('![pic](./local.png)')).toEqual([{kind: 'text', value: 'pic'}]);
     });
 
+    test('image alt text is plain, entity-decoded text', () => {
+      expect(marksOf('![Tom &amp; **Jerry**](https://img.test/a.png)')).toEqual([
+        {kind: 'image', src: 'https://img.test/a.png', alt: 'Tom & Jerry'}
+      ]);
+    });
+
     test('html entities decode, unknown ones stay literal', () => {
       expect(marksOf('&amp; &lt;b&gt; &#8364; &#x2713; &bogus;')).toEqual([
         {kind: 'text', value: '& <b> \u20ac \u2713 &bogus;'}
+      ]);
+    });
+
+    test('numeric entities naming no character become the replacement character', () => {
+      expect(marksOf('a&#55296;b&#xDFFF;c&#0;d&#9999999;')).toEqual([
+        {kind: 'text', value: 'a\ufffdb\ufffdc\ufffdd\ufffd'}
       ]);
     });
 

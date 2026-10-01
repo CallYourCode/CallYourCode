@@ -124,11 +124,32 @@ const NAMED_ENTITIES: Readonly<Record<string, string>> = {
   para: '\u00b6'
 };
 
-// An HTML entity reference, decoded; undefined leaves it as literal text.
+// Quotes nest by recursion; deeper than this the rest renders as plain text.
+const MAX_NESTING = 32;
+
+// An HTML entity reference, decoded; undefined leaves it as literal text. A
+// numeric one naming no character (NUL, a lone surrogate, past U+10FFFF) is
+// the replacement character.
 function entity(ref: string): string | undefined {
   if (ref[0] !== '#') return NAMED_ENTITIES[ref];
   const code = ref[1] === 'x' || ref[1] === 'X' ? parseInt(ref.slice(2), 16) : Number(ref.slice(1));
-  return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : undefined;
+  const named = code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff);
+  return named ? String.fromCodePoint(code) : '\ufffd';
+}
+
+// The plain text a reader sees for some marks (an image's alt text).
+function plain(marks: MarkdownInline[]): string {
+  return marks
+    .map((mark) =>
+      mark.kind === 'text'
+        ? mark.value
+        : mark.kind === 'math'
+          ? mark.source
+          : mark.kind === 'image'
+            ? mark.alt
+            : plain(mark.marks)
+    )
+    .join('');
 }
 
 const text = (value: string): MarkdownInline[] => (value ? [{kind: 'text', value}] : []);
@@ -203,8 +224,9 @@ function inline(raw: string, defs: Definitions): MarkdownInline[] {
     const image = /^!\[([^\]\n]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/.exec(rest);
     if (image) {
       const src = /^https?:\/\//i.test(image[2]) ? image[2] : undefined;
-      if (src) append(out, {kind: 'image', src, alt: image[1]});
-      else addText(image[1]);
+      const alt = plain(inline(image[1], defs));
+      if (src) append(out, {kind: 'image', src, alt});
+      else addText(alt);
       cursor += image[0].length;
       continue;
     }
@@ -313,17 +335,30 @@ function heading(line: string): {level: number; label: string} | undefined {
   return {level: found[1].length, label: label || '#'};
 }
 
-type ListStart = {indent: number; ordered: boolean; number?: number; body: string};
+// `content` is the column the item's text starts at: its continuation lines
+// and nested blocks are indented to (at most) there.
+type ListStart = {
+  indent: number;
+  content: number;
+  ordered: boolean;
+  number?: number;
+  body: string;
+};
 
 function listStart(line: string): ListStart | undefined {
   const found = /^(\s*)(\S+)\s+(\S.*)$/.exec(line);
   if (!found) return undefined;
   const indent = found[1].length;
+  const content = line.length - found[3].length;
   const marker = found[2];
-  if (BULLETS.has(marker)) return {indent, ordered: false, body: found[3]};
+  if (BULLETS.has(marker)) return {indent, content, ordered: false, body: found[3]};
   const ordered = /^(\d+)[.)]$/.exec(marker);
   if (!ordered) return undefined;
-  return {indent, ordered: true, number: Number(ordered[1]), body: found[3]};
+  return {indent, content, ordered: true, number: Number(ordered[1]), body: found[3]};
+}
+
+function indentOf(line: string): number {
+  return /^\s*/.exec(line)![0].length;
 }
 
 function taskAt(body: string): {checked: boolean; rest: string} | undefined {
@@ -451,7 +486,8 @@ function startsBlock(lines: string[], index: number): boolean {
 function parseList(
   lines: string[],
   start: number,
-  defs: Definitions
+  defs: Definitions,
+  depth: number
 ): {node: MarkdownBlock; next: number} {
   const first = listStart(lines[start])!;
   const items: MarkdownListItem[] = [];
@@ -460,18 +496,39 @@ function parseList(
   while (i < lines.length) {
     const current = listStart(lines[i]);
     if (!current || current.indent !== first.indent || current.ordered !== first.ordered) break;
-
-    const task = taskAt(current.body);
-    const item: MarkdownListItem = {content: inline(task ? task.rest : current.body, defs)};
-    if (first.ordered) item.number = current.number;
-    if (task) item.checked = task.checked;
     i++;
 
-    if (i < lines.length && (listStart(lines[i])?.indent ?? -1) > first.indent) {
-      const nested = parseList(lines, i, defs);
-      item.nodes = [nested.node];
-      i = nested.next;
+    // The item owns every following line indented past its marker, blank lines
+    // between them included, so an indented paragraph after a blank line stays
+    // in the item instead of turning into a code block.
+    const owned: string[] = [];
+    while (i < lines.length) {
+      let next = i;
+      while (next < lines.length && !lines[next].trim()) next++;
+      if (next === lines.length || indentOf(lines[next]) <= first.indent) break;
+      while (i <= next) owned.push(lines[i++]);
     }
+    // Its blocks start at the first owned line's column when that sits within a
+    // code indent of the text (`- item` then a 4-space paragraph), else at the text.
+    const firstOwned = owned.find((line) => line.trim());
+    const column =
+      firstOwned && indentOf(firstOwned) < current.content + 4
+        ? indentOf(firstOwned)
+        : current.content;
+    const body = owned.map((line) => line.slice(Math.min(indentOf(line), column)));
+
+    // Lines straight after the marker line that start no block continue its text.
+    let lead = 0;
+    while (lead < body.length && !startsBlock(body, lead)) lead++;
+    const task = taskAt(current.body);
+    const prose = [task ? task.rest : current.body, ...body.slice(0, lead)]
+      .map((l) => l.replace(/^[ \t]+/, ''))
+      .join('\n');
+    const item: MarkdownListItem = {content: inline(prose, defs)};
+    if (first.ordered) item.number = current.number;
+    if (task) item.checked = task.checked;
+    const nodes = parseLines(body.slice(lead), defs, depth + 1);
+    if (nodes.length) item.nodes = nodes;
     items.push(item);
   }
   return {node: {kind: 'list', ordered: first.ordered, items}, next: i};
@@ -491,7 +548,11 @@ function readUntil(
   return {body, next: i < lines.length ? i + 1 : i};
 }
 
-function parseLines(lines: string[], defs: Definitions): MarkdownBlock[] {
+function parseLines(lines: string[], defs: Definitions, depth = 0): MarkdownBlock[] {
+  if (depth > MAX_NESTING) {
+    const rest = lines.join('\n').trim();
+    return rest ? [{kind: 'paragraph', content: text(rest)}] : [];
+  }
   const nodes: MarkdownBlock[] = [];
 
   for (let i = 0; i < lines.length;) {
@@ -501,7 +562,7 @@ function parseLines(lines: string[], defs: Definitions): MarkdownBlock[] {
       continue;
     }
 
-    if (/^(?: {4}|\t)/.test(line) && nodes[nodes.length - 1]?.kind !== 'list') {
+    if (/^(?: {4}|\t)/.test(line)) {
       const body: string[] = [];
       while (i < lines.length && (/^(?: {4}|\t)/.test(lines[i]) || !lines[i].trim()))
         body.push(lines[i++].replace(/^(?: {4}|\t)/, ''));
@@ -550,7 +611,7 @@ function parseLines(lines: string[], defs: Definitions): MarkdownBlock[] {
         kind: 'details',
         title: inline(summary, defs),
         open: details.open,
-        nodes: parseLines(rest.split('\n'), defs)
+        nodes: parseLines(rest.split('\n'), defs, depth + 1)
       });
       i = next;
       continue;
@@ -560,7 +621,7 @@ function parseLines(lines: string[], defs: Definitions): MarkdownBlock[] {
       const quote: string[] = [];
       while (i < lines.length && lines[i].startsWith('>'))
         quote.push(lines[i++].replace(/^> ?/, ''));
-      nodes.push({kind: 'quote', nodes: parseLines(quote, defs)});
+      nodes.push({kind: 'quote', nodes: parseLines(quote, defs, depth + 1)});
       continue;
     }
 
@@ -591,7 +652,7 @@ function parseLines(lines: string[], defs: Definitions): MarkdownBlock[] {
     }
 
     if (listStart(line)) {
-      const parsed = parseList(lines, i, defs);
+      const parsed = parseList(lines, i, defs, depth);
       nodes.push(parsed.node);
       i = parsed.next;
       continue;

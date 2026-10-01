@@ -14,13 +14,19 @@ import {bootIsolated, evidenceShot} from './rig';
 // the viewer background; and the parser kept quotes inline-only (nested `>` and
 // lists printed literally), had no indented code, left `***x***` asterisks,
 // rendered `![alt](src)` as "!" plus a link and left HTML entities raw.
+// Review follow-ups: the native task checkbox drew dark on the day page (index.html
+// declares `color-scheme: dark`), `w-max` tables scrolled sideways on a laptop
+// where they fit, and an indented second paragraph in a list item became code.
 //
 // The contract this pins: md-render.fixture.md (every element) opened through
 // the real openFileViewer (testhooks), on laptop and phone, checked by computed
 // style: code blocks are monospace, scroll inside themselves and never widen the
 // page; blockquotes carry a left rule, muted text and real nested blocks;
 // headings step down in size from an H1 well above body text; bullet lists keep
-// markers and indent; the wide table scrolls in its own container.
+// markers and indent, and indented paragraphs stay in their item; task boxes,
+// open and done, stand out from the page by day and by night; the wide table
+// fits the laptop column and scrolls in its own container on a phone without
+// squeezing its cells; a remote image is a link (REMOTE_IMAGES is off).
 // grep token: `md render`.
 
 const MD = readFileSync(resolve(__dirname, 'md-render.fixture.md'), 'utf8');
@@ -50,7 +56,29 @@ function probe(page: Page) {
     const quote = md.querySelector<HTMLElement>(':scope > blockquote')!;
     const ul = md.querySelector<HTMLElement>(':scope > ul')!;
     const wrap = md.querySelector<HTMLElement>('.cyc-md-table-wrap')!;
-    const box = md.querySelector<HTMLElement>('input[type="checkbox"]');
+    // The fixture's open task comes first, its done one second. Missing boxes
+    // probe as zero so the soft checks below still name every failure.
+    const [open, done] = [...md.querySelectorAll<HTMLElement>('.cyc-md-checkbox')];
+    const rgb = (c: string) => (c.match(/[\d.]+/g) ?? []).slice(0, 4).map(Number);
+    const lum = (c: string) => {
+      const [r, g, b] = rgb(c).map((v) => {
+        const s = v / 255;
+        return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const contrast = (a: string, b: string) => {
+      const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+      return (hi + 0.05) / (lo + 0.05);
+    };
+    // The colour the box sits on: the nearest ancestor with an opaque background.
+    let under = open?.parentElement ?? null;
+    while (under && (rgb(getComputedStyle(under).backgroundColor)[3] ?? 1) === 0)
+      under = under.parentElement;
+    const page = getComputedStyle(under ?? document.body).backgroundColor;
+    const openStyle = getComputedStyle(open ?? md);
+    const doneFill = done ? getComputedStyle(done).backgroundColor : page;
+    const cells = [...md.querySelectorAll<HTMLElement>('.cyc-md-table td')];
     return {
       body: px(md),
       headings: [1, 2, 3, 4, 5, 6].map((n) => px(md.querySelector('h' + n))),
@@ -67,7 +95,16 @@ function probe(page: Page) {
       ulIndent: parseFloat(getComputedStyle(ul).paddingInlineStart),
       wrapOverflowX: getComputedStyle(wrap).overflowX,
       tableScrolls: wrap.scrollWidth > wrap.clientWidth,
-      checkboxWidth: box ? box.getBoundingClientRect().width : 0,
+      checkboxWidth: open?.getBoundingClientRect().width ?? 0,
+      openBorder: parseFloat(openStyle.borderTopWidth),
+      openBorderOnPage: contrast(openStyle.borderTopColor, page),
+      openBorderOnFill: contrast(openStyle.borderTopColor, openStyle.backgroundColor),
+      doneFillOnPage: contrast(doneFill, page),
+      doneTick: !!done?.querySelector('svg'),
+      narrowestCell: Math.min(...cells.map((c) => c.getBoundingClientRect().width)),
+      images: md.querySelectorAll('img').length,
+      imageLink: md.querySelector('.cyc-md-image-link')?.textContent ?? '',
+      itemParas: [...md.querySelectorAll('li > p')].map((el) => el.textContent ?? ''),
       pageOverflow: scroll.scrollWidth - scroll.clientWidth,
       text: md.innerText
     };
@@ -94,26 +131,49 @@ function expectReadable(p: Probe, phone: boolean): void {
 
   expect.soft(p.ulStyle).toBe('disc');
   expect.soft(p.ulIndent).toBeGreaterThan(10);
+  expect
+    .soft(p.itemParas, 'indented paragraphs stay in their list item')
+    .toEqual([
+      'Its second paragraph, indented under the item.',
+      'Its third paragraph, still part of the item.'
+    ]);
+
   expect.soft(p.checkboxWidth, 'task boxes are visible').toBeGreaterThan(8);
+  expect.soft(p.openBorder, 'the open box has a border').toBeGreaterThanOrEqual(1);
+  expect
+    .soft(p.openBorderOnPage, 'the open box border stands out from the page')
+    .toBeGreaterThan(3);
+  expect.soft(p.openBorderOnFill, 'the open box is not a solid square').toBeGreaterThan(3);
+  expect.soft(p.doneFillOnPage, 'the done box fill stands out').toBeGreaterThan(3);
+  expect.soft(p.doneTick, 'the done box carries a tick').toBe(true);
 
   expect.soft(p.wrapOverflowX).toBe('auto');
-  if (phone) expect.soft(p.tableScrolls, 'the wide table scrolls in its own container').toBe(true);
+  if (phone) {
+    expect.soft(p.tableScrolls, 'the wide table scrolls in its own container').toBe(true);
+    expect.soft(p.narrowestCell, 'cells keep a readable width').toBeGreaterThanOrEqual(115);
+  } else expect.soft(p.tableScrolls, 'the table fits the laptop column').toBe(false);
   expect.soft(p.pageOverflow, 'nothing widens the page').toBeLessThanOrEqual(0);
+
+  expect.soft(p.images, 'remote images are not fetched').toBe(0);
+  expect.soft(p.imageLink, 'the image is a link named by its alt text').toBe('an image alt text');
 
   for (const raw of ['*bold italic', '&amp;', '&copy;', '!an image', '> A nested', '- a list'])
     expect.soft(p.text, `no raw markdown/entity ${raw}`).not.toContain(raw);
 }
 
-for (const [name, w, hgt] of [
-  ['laptop', 1440, 900],
-  ['phone', 390, 844]
-] as const) {
-  test(`md render: every markdown block reads right in the file viewer (${name})`, async ({
-    page
-  }) => {
-    await bootIsolated(page, w, hgt);
-    await openFixture(page);
-    expectReadable(await probe(page), name === 'phone');
-    await evidenceShot(page, 'md-render', `${name}-day`);
-  });
+for (const theme of ['day', 'night'] as const) {
+  for (const [name, w, hgt] of [
+    ['laptop', 1440, 900],
+    ['phone', 390, 844]
+  ] as const) {
+    test(`md render: every markdown block reads right in the file viewer (${name}, ${theme})`, async ({
+      page
+    }) => {
+      await page.addInitScript((t) => localStorage.setItem('cyc-skin', t), theme);
+      await bootIsolated(page, w, hgt);
+      await openFixture(page);
+      expectReadable(await probe(page), name === 'phone');
+      await evidenceShot(page, 'md-render', `${name}-${theme}`);
+    });
+  }
 }
