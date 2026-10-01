@@ -19,7 +19,7 @@ import {
   setTunnelSrc
 } from '../features/media/mediaBox';
 import {createProfileAttachments} from '../features/profile/attachments';
-import {renderMarkdown} from '../features/media/pageRenderer';
+import {markdownImage, REMOTE_IMAGES, renderMarkdown} from '../features/media/pageRenderer';
 import {openImageViewer} from '../features/media/imageViewer';
 import {openFileViewer} from '../features/media/fileViewer';
 import {downloadMessage} from '../features/chat/messages/fileMessages';
@@ -317,15 +317,67 @@ describe('rendered markdown paint (was .cyc-md .cyc-md-list/-checkbox/-link)', (
     expect(cls(task)).toContain('list-none');
     expect(cls(task)).toContain('ms-[-1.25rem]');
     const box = article.querySelector<HTMLElement>('.cyc-md-checkbox')!;
-    expect(cls(box)).toContain('accent-[#96602f]');
-    expect(cls(box)).toContain('pointer-events-none');
+    expect(box.getAttribute('role')).toBe('checkbox');
+    expect(box.getAttribute('aria-checked')).toBe('false');
+    expect(cls(box)).toContain('border-[#6b6b70]');
+    expect(cls(box)).toContain('bg-[#ffffff]');
     const link = article.querySelector<HTMLElement>('.cyc-md-link')!;
     expect(cls(link)).toContain('no-underline');
     expect(cls(link)).toContain('text-[#96602f]');
 
     setPresentationTheme('night');
-    expect(cls(box)).toContain('accent-[#c98652]');
+    expect(cls(box)).toContain('border-[#a0a0a6]');
+    expect(cls(box)).toContain('bg-[#17171a]');
+    expect(cls(box)).not.toContain('bg-[#ffffff]');
     expect(cls(link)).toContain('text-[#c98652]');
+  });
+});
+
+describe('rendered markdown task boxes and images', () => {
+  test('a done box fills copper with a surface-ink tick, per theme', () => {
+    const article = renderMarkdown([
+      {
+        kind: 'list',
+        ordered: false,
+        items: [{content: [{kind: 'text', value: 'done'}], checked: true}]
+      }
+    ]);
+    document.body.append(article);
+    const box = article.querySelector<HTMLElement>('.cyc-md-checkbox')!;
+    expect(box.getAttribute('aria-checked')).toBe('true');
+    expect(box.querySelector('svg path')).not.toBeNull();
+    expect(cls(box)).toContain('bg-[#96602f]');
+    expect(cls(box)).toContain('text-[#ffffff]');
+    setPresentationTheme('night');
+    expect(cls(box)).toContain('bg-[#c98652]');
+    expect(cls(box)).toContain('text-[#17171a]');
+    expect(cls(box)).not.toContain('bg-[#96602f]');
+  });
+
+  const image = {kind: 'image', src: 'https://img.test/a.png', alt: 'a chart'} as const;
+
+  test('remote images are off by default: a link labelled with the alt text, no fetch', () => {
+    expect(REMOTE_IMAGES).toBe(false);
+    const article = renderMarkdown([{kind: 'paragraph', content: [image]}]);
+    expect(article.querySelector('img')).toBeNull();
+    const link = article.querySelector<HTMLAnchorElement>('a.cyc-md-image-link')!;
+    expect(link.href).toBe(image.src);
+    expect(link.textContent).toBe('a chart');
+    expect(link.target).toBe('_blank');
+  });
+
+  test('flipped on, an image loads lazily without a referrer and falls back to the link', () => {
+    const holder = document.createElement('p');
+    const img = markdownImage(image, true) as HTMLImageElement;
+    holder.append(img);
+    expect(img.tagName).toBe('IMG');
+    expect(img.getAttribute('src')).toBe(image.src);
+    expect(img.alt).toBe('a chart');
+    expect(img.getAttribute('loading')).toBe('lazy');
+    expect(img.getAttribute('referrerpolicy')).toBe('no-referrer');
+    img.dispatchEvent(new Event('error'));
+    expect(holder.querySelector('img')).toBeNull();
+    expect(holder.querySelector('a.cyc-md-image-link')?.textContent).toBe('a chart');
   });
 });
 
