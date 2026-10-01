@@ -90,6 +90,25 @@ describe('markdown article parser', () => {
       expect(kinds(node)).toContain('text');
     });
 
+    test('a quote holds real blocks: nested quotes and lists', () => {
+      const node = only('> para\n>\n> > deeper\n>\n> - item\n> - item two');
+      expect(node.kind === 'quote' && node.nodes.map((n) => n.kind)).toEqual([
+        'paragraph',
+        'quote',
+        'list'
+      ]);
+    });
+
+    test('four-space indented lines are a code block, but not under a list', () => {
+      expect(only('    one\n\n    two\n')).toEqual({
+        kind: 'code',
+        value: 'one\n\ntwo',
+        language: ''
+      });
+      const nodes = parseMarkdownDocument('- a\n\n    - b').nodes;
+      expect(nodes.map((n) => n.kind)).toEqual(['list', 'list']);
+    });
+
     test('ordered lists keep their explicit start numbers', () => {
       const node = only('3. third\n4. fourth');
       expect(node).toMatchObject({kind: 'list', ordered: true});
@@ -177,6 +196,25 @@ describe('markdown article parser', () => {
 
     test('inline code preserves its delimiter content as parsed marks', () => {
       expect(kinds(marksOf('run `npm test` please'))).toContain('code');
+    });
+
+    test('triple stars are bold italic with no stray asterisks', () => {
+      expect(marksOf('***both***')).toEqual([
+        {kind: 'strong', marks: [{kind: 'emphasis', marks: [{kind: 'text', value: 'both'}]}]}
+      ]);
+    });
+
+    test('images take http(s) sources; others fall back to their alt text', () => {
+      expect(marksOf('![pic](https://img.test/a.png)')).toEqual([
+        {kind: 'image', src: 'https://img.test/a.png', alt: 'pic'}
+      ]);
+      expect(marksOf('![pic](./local.png)')).toEqual([{kind: 'text', value: 'pic'}]);
+    });
+
+    test('html entities decode, unknown ones stay literal', () => {
+      expect(marksOf('&amp; &lt;b&gt; &#8364; &#x2713; &bogus;')).toEqual([
+        {kind: 'text', value: '& <b> \u20ac \u2713 &bogus;'}
+      ]);
     });
 
     test('unterminated emphasis stays literal', () => {

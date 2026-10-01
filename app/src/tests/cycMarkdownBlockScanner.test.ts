@@ -178,8 +178,9 @@ describe('CYC block scanner edges', () => {
     test('definitions tolerate up to three leading spaces but not four', () => {
       const three = parseMarkdownDocument('use [x][r]\n\n   [r]: https://ok.test');
       expect(JSON.stringify(three)).toContain('https://ok.test');
+      // Four spaces make it indented code, so the definition never registers.
       const four = parseMarkdownDocument('    [r]: https://nope.test\n\nuse [x][r]');
-      expect(four.nodes[0].kind).toBe('paragraph');
+      expect(four.nodes[0].kind).toBe('code');
       expect(JSON.stringify(four)).toContain('[x][r]');
     });
   });

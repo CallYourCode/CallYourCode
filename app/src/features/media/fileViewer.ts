@@ -30,18 +30,6 @@ function renderDiff(content: string, format: DiffFormat): HTMLElement {
   return el;
 }
 
-const TASK_BOX_STATES = new Map([
-  [' ', '\u2610'],
-  ['x', '\u2611']
-]);
-
-function taskBoxes(content: string): string {
-  return content.replace(/^(\s*)[-+*]\s+\[(.)\]\s+/gm, (all, indent: string, mark: string) => {
-    const box = TASK_BOX_STATES.get(mark.toLowerCase());
-    return box ? `${indent}${box} ` : all;
-  });
-}
-
 let openViewer: (() => void) | null = null;
 
 export function openFileViewer(
@@ -155,7 +143,7 @@ export function openFileViewer(
     const kind =
       doc.fileKind === 'markdown' || doc.fileKind === 'diff' ? doc.fileKind : file.fileKind;
     if (kind === 'markdown') {
-      body.append(renderMarkdown(parseMarkdownDocument(taskBoxes(content)).nodes));
+      body.append(renderMarkdown(parseMarkdownDocument(content).nodes));
     } else if (kind === 'diff') {
       let format: DiffFormat = 'line-by-line';
       let diffEl = renderDiff(content, format);

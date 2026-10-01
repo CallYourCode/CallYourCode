@@ -13,6 +13,7 @@ export type MarkdownInline =
   | {kind: 'math'; source: string}
   | {kind: WrapKind; marks: MarkdownInline[]}
   | {kind: 'link'; href: string; marks: MarkdownInline[]}
+  | {kind: 'image'; src: string; alt: string}
   | {kind: 'anchor'; name: string; marks: MarkdownInline[]};
 
 export type MarkdownTableCell = {
@@ -35,7 +36,7 @@ export type MarkdownBlock =
   | {kind: 'mathBlock'; value: string}
   | {kind: 'divider'}
   | {kind: 'anchor'; name: string}
-  | {kind: 'quote'; content: MarkdownInline[]}
+  | {kind: 'quote'; nodes: MarkdownBlock[]}
   | {kind: 'list'; ordered: boolean; items: MarkdownListItem[]}
   | {kind: 'table'; rows: MarkdownTableCell[][]}
   | {kind: 'details'; title: MarkdownInline[]; open: boolean; nodes: MarkdownBlock[]};
@@ -84,6 +85,52 @@ const TASK_STATES = new Map([
   ['x', true]
 ]);
 
+const NAMED_ENTITIES: Readonly<Record<string, string>> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: '\u00a0',
+  copy: '\u00a9',
+  reg: '\u00ae',
+  trade: '\u2122',
+  // Built from the code point: the source tripwire bans the em-dash literal.
+  mdash: String.fromCodePoint(0x2014),
+  ndash: '\u2013',
+  hellip: '\u2026',
+  laquo: '\u00ab',
+  raquo: '\u00bb',
+  lsquo: '\u2018',
+  rsquo: '\u2019',
+  ldquo: '\u201c',
+  rdquo: '\u201d',
+  bull: '\u2022',
+  middot: '\u00b7',
+  times: '\u00d7',
+  divide: '\u00f7',
+  deg: '\u00b0',
+  plusmn: '\u00b1',
+  larr: '\u2190',
+  rarr: '\u2192',
+  uarr: '\u2191',
+  darr: '\u2193',
+  harr: '\u2194',
+  euro: '\u20ac',
+  pound: '\u00a3',
+  yen: '\u00a5',
+  cent: '\u00a2',
+  sect: '\u00a7',
+  para: '\u00b6'
+};
+
+// An HTML entity reference, decoded; undefined leaves it as literal text.
+function entity(ref: string): string | undefined {
+  if (ref[0] !== '#') return NAMED_ENTITIES[ref];
+  const code = ref[1] === 'x' || ref[1] === 'X' ? parseInt(ref.slice(2), 16) : Number(ref.slice(1));
+  return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : undefined;
+}
+
 const text = (value: string): MarkdownInline[] => (value ? [{kind: 'text', value}] : []);
 
 function append(out: MarkdownInline[], mark: MarkdownInline): void {
@@ -111,6 +158,14 @@ function inline(raw: string, defs: Definitions): MarkdownInline[] {
       continue;
     }
 
+    const ref = /^&(#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z]+);/.exec(rest);
+    const decoded = ref && entity(ref[1]);
+    if (ref && decoded) {
+      addText(decoded);
+      cursor += ref[0].length;
+      continue;
+    }
+
     const html = HTML_INLINE_RE.exec(rest);
     if (html) {
       append(out, {
@@ -119,6 +174,16 @@ function inline(raw: string, defs: Definitions): MarkdownInline[] {
       });
       cursor += html[0].length;
       continue;
+    }
+
+    if (rest.startsWith('***')) {
+      const end = rest.indexOf('***', 3);
+      const body = end > 3 ? rest.slice(3, end) : '';
+      if (body.trim()) {
+        append(out, {kind: 'strong', marks: [{kind: 'emphasis', marks: inline(body, defs)}]});
+        cursor += end + 3;
+        continue;
+      }
     }
 
     let wrapped = false;
@@ -134,6 +199,15 @@ function inline(raw: string, defs: Definitions): MarkdownInline[] {
       break;
     }
     if (wrapped) continue;
+
+    const image = /^!\[([^\]\n]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/.exec(rest);
+    if (image) {
+      const src = /^https?:\/\//i.test(image[2]) ? image[2] : undefined;
+      if (src) append(out, {kind: 'image', src, alt: image[1]});
+      else addText(image[1]);
+      cursor += image[0].length;
+      continue;
+    }
 
     const direct = /^\[([^\]\n]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/.exec(rest);
     if (direct) {
@@ -427,6 +501,15 @@ function parseLines(lines: string[], defs: Definitions): MarkdownBlock[] {
       continue;
     }
 
+    if (/^(?: {4}|\t)/.test(line) && nodes[nodes.length - 1]?.kind !== 'list') {
+      const body: string[] = [];
+      while (i < lines.length && (/^(?: {4}|\t)/.test(lines[i]) || !lines[i].trim()))
+        body.push(lines[i++].replace(/^(?: {4}|\t)/, ''));
+      while (!body[body.length - 1].trim()) body.pop();
+      nodes.push({kind: 'code', value: body.join('\n'), language: ''});
+      continue;
+    }
+
     const open = fenceAt(line);
     if (open) {
       const {body, next} = readUntil(lines, i + 1, (l) => closesFence(l, open));
@@ -477,7 +560,7 @@ function parseLines(lines: string[], defs: Definitions): MarkdownBlock[] {
       const quote: string[] = [];
       while (i < lines.length && lines[i].startsWith('>'))
         quote.push(lines[i++].replace(/^> ?/, ''));
-      nodes.push({kind: 'quote', content: inline(quote.join('\n'), defs)});
+      nodes.push({kind: 'quote', nodes: parseLines(quote, defs)});
       continue;
     }
 

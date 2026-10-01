@@ -9,14 +9,23 @@ const ALL_MD_PRIMARY_ACCENT = Object.values(MEDIA_PRIMARY_ACCENT);
 
 const MD_CODE_UTILS =
   'cyc-md-code font-[family-name:JetBrains_Mono,monospace] text-[0.875em] text-[color:var(--cyc-text)] bg-[var(--cyc-text-muted-tint)] rounded px-[0.3125rem] py-[0.0625rem]';
-const MD_HEADING_UTILS = 'font-medium leading-[1.3] mt-[1.375rem] mb-2.5';
+// `!` beats the un-layered chrome.css heading rules (h4 there is 1.5rem).
+const MD_HEADING_UTILS = 'leading-[1.3]! mt-[1.375rem]! mb-2.5!';
 const MD_HEADING_SIZE: Record<number, string> = {
-  2: 'text-[1.375rem]',
-  3: 'text-[1.1875rem]',
-  4: 'text-[1.0625rem]',
-  5: 'text-[1rem]',
-  6: 'text-[1rem]'
+  1: 'text-[1.75rem]!',
+  2: 'text-[1.375rem]!',
+  3: 'text-[1.1875rem]!',
+  4: 'text-[1.0625rem]!',
+  5: 'text-[1rem]!',
+  6: 'text-[0.875rem]! text-[color:var(--cyc-text-muted)]'
 };
+// Rules and cell borders use the muted ink: --cyc-border-color all but vanishes
+// on the viewer background (#e6e6e8 on #ece9e3 by day, #000 on #0d0d0e by night).
+const MD_RULE_BORDER = 'border-[color:color-mix(in_srgb,var(--cyc-text-muted)_45%,transparent)]';
+// Pan-flow code hides its scrollbar in chat; the page shows a thin one so a mouse
+// user can see the block scrolls. `!` beats the un-layered chat.css hide rules.
+const MD_CODE_SCROLLBAR =
+  '[scrollbar-width:thin]! [&::-webkit-scrollbar]:block! [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-thumb]:rounded [&::-webkit-scrollbar-thumb]:bg-[var(--cyc-text-muted)]';
 
 function renderMarks(marks: MarkdownInline[], parent: Node) {
   for (const node of marks) {
@@ -39,6 +48,31 @@ function renderMarks(marks: MarkdownInline[], parent: Node) {
       }
       renderMarks(node.marks, link);
       parent.appendChild(link);
+      continue;
+    }
+    if (node.kind === 'image') {
+      const img = h('img', 'cyc-md-image inline-block max-w-full h-auto rounded-lg align-top', {
+        src: node.src,
+        alt: node.alt,
+        loading: 'lazy',
+        referrerpolicy: 'no-referrer'
+      });
+      // An image that cannot load becomes a link to it, never a broken-image icon.
+      img.addEventListener(
+        'error',
+        () => {
+          const link = h('a', 'cyc-md-link no-underline hover:underline!', {
+            href: node.src,
+            target: '_blank',
+            rel: 'noopener'
+          });
+          paintOnTheme(link, ALL_MD_PRIMARY_TEXT, (t) => MEDIA_PRIMARY_TEXT[t]);
+          link.textContent = node.alt || node.src;
+          img.replaceWith(link);
+        },
+        {once: true}
+      );
+      parent.appendChild(img);
       continue;
     }
     if (node.kind === 'anchor') {
@@ -81,9 +115,7 @@ function renderNode(block: MarkdownBlock): HTMLElement | null {
     const level = Math.min(6, Math.max(1, block.level));
     const el = h(
       ('h' + level) as 'h1',
-      'cyc-md-h' +
-        block.level +
-        (MD_HEADING_SIZE[level] ? ` ${MD_HEADING_UTILS} ${MD_HEADING_SIZE[level]}` : '')
+      `cyc-md-h${level} ${MD_HEADING_UTILS} ${MD_HEADING_SIZE[level]}`
     );
     renderMarks(block.content, el);
     return el;
@@ -96,19 +128,29 @@ function renderNode(block: MarkdownBlock): HTMLElement | null {
   if (block.kind === 'code' || block.kind === 'mathBlock') {
     // Markdown code spacing; `!` beats the shared code-block defaults.
     const pre = codeBlockElement(block.value, block.kind === 'mathBlock' ? 'math' : block.language);
-    pre.classList.add('my-3!');
-    pre.querySelector('.cyc-src-body')?.classList.add('[overflow-wrap:normal]!');
+    // The day surface lifts the block off the page; night paint's `!` keeps its own.
+    pre.classList.add(
+      'my-3!',
+      'bg-[var(--cyc-surface)]',
+      'border-[color:color-mix(in_srgb,var(--cyc-text-muted)_45%,transparent)]!'
+    );
+    pre
+      .querySelector('.cyc-src-body')
+      ?.classList.add('[overflow-wrap:normal]!', ...MD_CODE_SCROLLBAR.split(' '));
     return pre;
   }
   if (block.kind === 'divider')
-    return h('hr', 'cyc-md-hr my-5 border-0 border-t border-[color:var(--cyc-border-color)]');
+    return h('hr', `cyc-md-hr my-6 border-0 border-t ${MD_RULE_BORDER}`);
   if (block.kind === 'anchor') return h('span', 'cyc-md-anchor', {'data-anchor': block.name});
   if (block.kind === 'quote') {
     const el = h(
       'blockquote',
-      'cyc-md-quote [border-inline-start:3px_solid_var(--cyc-accent)] my-3 py-0.5 pl-3 pr-0 whitespace-pre-wrap'
+      'cyc-md-quote [border-inline-start:3px_solid_var(--cyc-accent)] my-3 py-0.5 ps-3.5 pe-0 text-[color:var(--cyc-text-muted)] [&>:first-child]:mt-0! [&>:last-child]:mb-0!'
     );
-    renderMarks(block.content, el);
+    for (const child of block.nodes) {
+      const rendered = renderNode(child);
+      if (rendered) el.append(rendered);
+    }
     return el;
   }
   if (block.kind === 'details') {
@@ -127,20 +169,26 @@ function renderNode(block: MarkdownBlock): HTMLElement | null {
     return el;
   }
   if (block.kind === 'list') {
+    // `!` beats the un-layered reset.css `:where(ul)` list-style/padding reset.
     const list = h(
       block.ordered ? 'ol' : 'ul',
-      'cyc-md-list my-2.5 ps-6 ' + (block.ordered ? 'list-decimal' : 'list-disc')
+      'cyc-md-list my-2.5 ps-6! [li>&]:my-1! ' +
+        (block.ordered ? 'list-decimal!' : 'list-disc! [li>&]:list-[circle]!')
     ) as HTMLOListElement;
     for (const item of block.items) {
       const li = h('li', 'my-1 whitespace-pre-wrap');
       if (item.checked !== undefined) {
         li.classList.add('cyc-md-task', 'list-none', 'ms-[-1.25rem]');
+        // Read-only by pointer-events and tabindex, not `disabled`: a disabled box
+        // drops the accent and all but vanishes in WebKit. `appearance-auto!` beats
+        // the un-layered chrome.css input reset.
         const box = h(
           'input',
-          'cyc-md-checkbox me-[0.4375rem] align-[-0.125rem] pointer-events-none',
+          'cyc-md-checkbox me-[0.4375rem] align-[-0.125rem] pointer-events-none appearance-auto!',
           {
             type: 'checkbox',
-            disabled: ''
+            tabindex: '-1',
+            'aria-readonly': 'true'
           }
         ) as HTMLInputElement;
         paintOnTheme(box, ALL_MD_PRIMARY_ACCENT, (t) => MEDIA_PRIMARY_ACCENT[t]);
@@ -158,10 +206,10 @@ function renderNode(block: MarkdownBlock): HTMLElement | null {
     return list;
   }
   const wrap = h('div', 'cyc-md-table-wrap overflow-x-auto my-3');
-  const table = h('table', 'cyc-md-table border-collapse text-[0.9375rem]');
+  const table = h('table', 'cyc-md-table w-max min-w-full border-collapse text-[0.9375rem]');
   const head = h('thead', '');
   const body = h('tbody', '');
-  const CELL_UTILS = 'border border-[color:var(--cyc-border-color)] px-2.5 py-1.5 text-left';
+  const CELL_UTILS = `max-w-[20rem] border ${MD_RULE_BORDER} px-2.5 py-1.5 text-left align-top`;
   for (const [rowIndex, row] of block.rows.entries()) {
     const tr = h('tr', '');
     for (const cell of row) {
@@ -183,7 +231,7 @@ function renderNode(block: MarkdownBlock): HTMLElement | null {
 export function renderMarkdown(nodes: MarkdownBlock[]): HTMLElement {
   const article = h(
     'article',
-    'cyc-md text-[color:var(--cyc-text)] text-[1rem] leading-[1.6] break-words'
+    'cyc-md text-[color:var(--cyc-text)] text-[1rem] leading-[1.6] break-words [&>h1:first-child]:mt-0!'
   );
   for (const node of nodes) {
     const rendered = renderNode(node);
