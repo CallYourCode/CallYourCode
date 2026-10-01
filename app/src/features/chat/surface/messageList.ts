@@ -276,16 +276,6 @@ type RenderState = {
   // sweeps (waveform hydration, sticky dates, play state) over the freshly
   // mounted rows so a row scrolled into view hydrates like a store paint.
   onWindowChange: (() => void) | null;
-  // True ONLY while the open landing is actively holding the unread divider on
-  // screen (chatSurface.holdDivider). anchoredRewindow anchors on the divider
-  // instead of the topmost visible row ONLY during this window; once the hold
-  // ends (the reader's first interaction, or the bounded timeout), it reverts to
-  // the topmost-row anchor. Without this gate the divider anchor re-seated the
-  // view toward the divider on EVERY re-window while the marker stayed mounted --
-  // long after the landing -- so a store repaint (a push catchup) or the reader's
-  // own scroll got clawed back toward the divider: the owner's "can't scroll up
-  // or down until I leave the chat" freeze. Wired by chatSurface.
-  dividerHeld: (() => boolean) | null;
   // A bounded LRU of DETACHED row nodes, keyed by row identity + content
   // version (rowCacheKey). A scroll that slides the window drops the rows
   // leaving it into here and re-attaches the rows entering it from here, so a
@@ -583,11 +573,17 @@ function cssEscape(id: string): string {
 // The ScrollOwner's side of the re-window (wired by chatSurface through
 // setMessageScrollOwner). `driving`: a reader owns the offset right now, so the
 // re-window writes nothing and banks its correction in the top spacer.
-// `pinned`: the reader sits at the end, so a re-window keeps the end. `write`:
-// the owner's single tagged, machine-marked scrollTop write.
+// `pinned`: the reader sits at the end, so a re-window keeps the end.
+// `dividerHeld`: the open landing is ACTIVELY holding the unread divider on
+// screen, so the re-window anchors on the divider instead of the reader's row
+// (only then: anchoring on a merely mounted divider long after the landing
+// clawed every repaint and the reader's own scroll back toward it, the "can't
+// scroll up or down until I leave the chat" freeze). `write`: the owner's single
+// tagged, machine-marked scrollTop write.
 export interface MessageScrollOwner {
   driving(): boolean;
   pinned(): boolean;
+  dividerHeld(): boolean;
   write(top: number, tag: string): void;
 }
 
@@ -687,17 +683,17 @@ function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
     // (measured: the divider slid out of view while a stale index was held in
     // its place).
     //
-    // GATED on the active hold: once the hold ends (the reader's first
-    // interaction, or the bounded timeout), the divider marker stays MOUNTED but
-    // must no longer capture the anchor -- otherwise every later re-window (a
-    // push-catchup repaint, the reader's own scroll) re-seats the view back
-    // toward the divider, which the owner felt as a chat that "can't scroll up or
-    // down until I leave it" and as go-to-bottom fighting its way to the end.
-    // When no hold getter is wired (a detached mount, unit tests driving the
-    // landing directly) the state is unknown, so default to anchoring on the
-    // divider -- the pre-gate behavior -- which is correct for the landing the
-    // getter-less callers exercise; the app always wires the getter (renderHub).
-    const holdActive = st.dividerHeld ? st.dividerHeld() : true;
+    // GATED on the active hold (the owner's dividerHeld): once the hold ends
+    // (the reader's first interaction, or the bounded timeout), the divider
+    // marker stays MOUNTED but must no longer capture the anchor -- otherwise
+    // every later re-window (a push-catchup repaint, the reader's own scroll)
+    // re-seats the view back toward the divider, which the owner felt as a chat
+    // that "can't scroll up or down until I leave it" and as go-to-bottom
+    // fighting its way to the end. With no owner (a detached mount, unit tests
+    // driving the landing directly) the state is unknown, so default to
+    // anchoring on the divider -- the pre-gate behavior -- which is correct for
+    // the landing those callers exercise; the app always has an owner.
+    const holdActive = owner ? owner.dividerHeld() : true;
     const divider = holdActive ? inner.querySelector<HTMLElement>('[data-cyc-unread]') : null;
     if (divider) {
       const dr = divider.getBoundingClientRect();
@@ -1109,14 +1105,6 @@ export function setMessageWindowHook(inner: HTMLElement, cb: () => void): void {
   if (st) st.onWindowChange = cb;
 }
 
-// Register the divider-hold getter (see RenderState.dividerHeld). chatSurface
-// passes a closure over its holdDivider flag so anchoredRewindow anchors on the
-// unread divider ONLY while the landing is actively holding it.
-export function setMessageDividerHold(inner: HTMLElement, held: () => boolean): void {
-  const st = renderStates.get(inner);
-  if (st) st.dividerHeld = held;
-}
-
 // Register the ScrollOwner for a list (see scrollOwners): chatSurface hands the
 // list its one writer, so anchoredRewindow never writes scrollTop on its own.
 export function setMessageScrollOwner(inner: HTMLElement, owner: MessageScrollOwner): void {
@@ -1452,7 +1440,6 @@ function paintMessages(
       syncScroll: false,
       bank: 0,
       onWindowChange: null,
-      dividerHeld: null,
       nodeCache: new Map()
     };
     renderStates.set(inner, st);

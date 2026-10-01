@@ -61,7 +61,6 @@ vi.mock('../features/chat/surface/messageList', () => ({
   clearMessages: vi.fn(),
   messageVisibleRangeKey: () => fake.rangeKey,
   setMessageWindowHook: vi.fn(),
-  setMessageDividerHold: vi.fn(),
   messageDomEpoch: () => fake.domEpoch
 }));
 vi.mock('../features/settings/preferences', () => ({

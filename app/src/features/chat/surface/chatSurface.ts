@@ -513,17 +513,6 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   const PIN_PX = 4;
   let pinnedToBottom = false;
   let padTopSeen = 0;
-  let pointerHeld = false;
-  // True from touchstart until the last finger lifts. On a touch build Chrome
-  // fires pointercancel the instant it claims a vertical pan as a native scroll,
-  // which clears `pointerHeld` while the finger is STILL dragging; a bottom re-pin
-  // (onListResize below, or the storeBindings rAF on an arrival) firing in that
-  // gap snapped the reader straight back to the end every frame content was
-  // settling -- the stuck-at-bottom report. The raw touch sequence stays down
-  // through the whole pan, so it is the reliable "a finger owns the offset" signal.
-  let touchHeld = false;
-  // A finger or pointer is physically on the surface right now.
-  const readerHolding = () => pointerHeld || touchHeld;
   const notePinAfterWrite = () => {
     pinnedToBottom = distToEnd() <= PIN_PX;
     padTopSeen = messageListPadTop.offsetHeight;
@@ -714,70 +703,23 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     deps.onTeardown(() => listResize.disconnect());
   }
 
-  const holdPointer = () => {
-    pointerHeld = true;
-    endDividerHold();
-  };
-  const releasePointer = () => {
-    pointerHeld = false;
-  };
-  const holdTouch = () => {
-    touchHeld = true;
-    endDividerHold();
-  };
-  // The finger owns the offset until the LAST touch lifts (a multi-touch release
-  // leaves one finger still down).
-  const releaseTouch = (e: TouchEvent) => {
-    if (!e.touches || e.touches.length === 0) touchHeld = false;
-  };
   // Any user interaction ends the divider hold at once, so it can never re-seat
-  // (and wipe a selection) once the reader is doing anything in the chat.
+  // (and wipe a selection) once the reader is doing anything in the chat. The
+  // reader's hands themselves (finger/pointer down, fresh input) are tracked by
+  // the ScrollOwner.
   const endHoldOnInput = () => endDividerHold();
   const endHoldOnSelection = () => {
     if (selectionInList()) endDividerHold();
   };
-  messageListScroll.addEventListener('pointerdown', holdPointer, {passive: true});
+  messageListScroll.addEventListener('pointerdown', endHoldOnInput, {passive: true});
   messageListScroll.addEventListener('wheel', endHoldOnInput, {passive: true});
-  messageListScroll.addEventListener('touchstart', holdTouch, {passive: true});
-  window.addEventListener('pointerup', releasePointer, {passive: true});
-  window.addEventListener('pointercancel', releasePointer, {passive: true});
-  window.addEventListener('touchend', releaseTouch, {passive: true});
-  window.addEventListener('touchcancel', releaseTouch, {passive: true});
+  messageListScroll.addEventListener('touchstart', endHoldOnInput, {passive: true});
   window.addEventListener('keydown', endHoldOnInput, {passive: true});
   document.addEventListener('selectionchange', endHoldOnSelection, {passive: true});
-  // A page hidden mid-drag may never deliver the touchend/pointerup: drop the
-  // hold so no finger is left "down" (and every write gated) when it returns.
-  const releaseOnHidden = () => {
-    if (document.visibilityState !== 'hidden') return;
-    pointerHeld = false;
-    touchHeld = false;
-  };
-  document.addEventListener('visibilitychange', releaseOnHidden, {passive: true});
   deps.onTeardown(() => {
-    document.removeEventListener('visibilitychange', releaseOnHidden);
-    window.removeEventListener('pointerup', releasePointer);
-    window.removeEventListener('pointercancel', releasePointer);
-    window.removeEventListener('touchend', releaseTouch);
-    window.removeEventListener('touchcancel', releaseTouch);
     window.removeEventListener('keydown', endHoldOnInput);
     document.removeEventListener('selectionchange', endHoldOnSelection);
   });
-
-  // The last time a real reader input (a finger drag or a wheel) touched the
-  // scroller. The readerTook guard uses it as evidence that a reader is
-  // plausibly driving a scroll: a touchmove/wheel within ~150ms, or a pointer
-  // still held. Without evidence, an untagged app write (a keyboard-inset
-  // clearance step) or a browser adjustment (clamp, scroll anchoring) can look
-  // exactly like a reader taking the open landing, and must not.
-  const READER_INPUT_MS = 150;
-  let lastReaderInputAt = 0;
-  const noteReaderInput = () => {
-    lastReaderInputAt = Date.now();
-  };
-  messageListScroll.addEventListener('touchmove', noteReaderInput, {passive: true});
-  messageListScroll.addEventListener('wheel', noteReaderInput, {passive: true});
-  const readerInputPlausible = () =>
-    readerHolding() || Date.now() - lastReaderInputAt <= READER_INPUT_MS;
 
   const chrome = createChatChrome({
     chat: deps.chatEl,
@@ -920,7 +862,10 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
         openToken &&
         !openToken.readerTook &&
         !machine &&
-        readerInputPlausible() &&
+        // Evidence a reader drove it (a finger/pointer down, or a touch/wheel
+        // within the last breath): an untagged app write or a browser clamp
+        // can look exactly like a reader taking the open landing, and must not.
+        scrollOwner.readerInputFresh() &&
         top < readerTrackTop - 1 &&
         height >= readerTrackHeight - 1 &&
         clientH <= readerTrackClientH + 1
@@ -1136,8 +1081,6 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     nearBottomPx: () => Math.max(OVERLAY_SCROLL_NEAR_PX, messageListScroll.clientHeight / 3),
     isPinned: () => pinnedToBottom,
     distToEnd,
-    isReaderHolding: readerHolding,
-    readerInputFresh: readerInputPlausible,
     reseatDivider,
     bankShift: (d) => bankMessageShift(messageListInner, d),
     isLanding: () => openLanding,
@@ -1151,6 +1094,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   setMessageScrollOwner(messageListInner, {
     driving: scrollOwner.driving,
     pinned: scrollOwner.pinned,
+    dividerHeld: () => holdDivider,
     write: scrollOwner.rewindowWrite
   });
 
@@ -1453,10 +1397,6 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     readerTook,
     graceOpen,
     holdGraceGrowth,
-    // Whether the unread-divider landing is still actively holding the divider
-    // on screen. anchoredRewindow reads this (via setMessageDividerHold) so it
-    // anchors on the divider only during the hold, never after.
-    holdDividerActive: () => holdDivider,
     firstUnread,
     newBelowCount,
     openPaintIsPending,

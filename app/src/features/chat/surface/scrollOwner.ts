@@ -47,6 +47,13 @@
 //                      top-pad change is banked in the spacer like a re-measure.
 //   - followArrival()  a row arrived for a reader who was near the end: re-pin,
 //                      unless a reader is driving or their input is that fresh.
+//
+// Step 6 makes the render bracket (W2) one owner settle (settlePaint: bank while
+// driving, else one write and one re-window) and has a jump yield the moment a
+// finger lands. Step 7 moves the reader's hands (finger/pointer holds, input
+// freshness) here, replacing the scattered pointerHeld / touchHeld /
+// readerInputPlausible gates, and answers the re-window's divider-hold question
+// (dividerHeld) instead of a separate plumbing hook.
 
 import {logBottomPin} from './machineScroll';
 
@@ -76,10 +83,6 @@ export interface ScrollOwnerDeps {
   isPinned(): boolean;
   // How far the view sits above the true end, in px.
   distToEnd(): number;
-  isReaderHolding(): boolean;
-  // A finger/pointer held, or a touch/wheel within the last breath: the evidence
-  // that a reader's (async, coalesced) scroll may not have landed yet.
-  readerInputFresh(): boolean;
   isLanding(): boolean;
   isDividerHeld(): boolean;
   // Re-seat the held unread divider on its landing spot (false: none mounted),
@@ -91,6 +94,39 @@ export interface ScrollOwnerDeps {
 
 export function createScrollOwner(deps: ScrollOwnerDeps) {
   const {scroll} = deps;
+
+  // THE READER'S HANDS (step 7: one place instead of the scattered pointerHeld /
+  // touchHeld / readerInputPlausible gates). A finger or pointer down on the list
+  // owns the offset until it lifts. On a touch build Chrome fires pointercancel
+  // the instant it claims a vertical pan as a native scroll, which clears the
+  // pointer while the finger is STILL dragging (a re-pin firing in that gap
+  // snapped the reader back to the end every frame: the stuck-at-bottom
+  // report), so the raw touch sequence, down through the whole pan, is held too.
+  // Released by the last lifted finger, the pointer's up/cancel, the window
+  // losing focus or the page going hidden mid-drag (either can swallow the
+  // up), so no hold is left stuck down.
+  let pointerHeld = false;
+  let touchHeld = false;
+  const holding = () => pointerHeld || touchHeld;
+  // The last real reader input (a finger drag or a wheel): with a hold, the
+  // evidence that a scroll is the reader's. Without it an untagged app write or
+  // a browser clamp can look exactly like a reader.
+  const READER_INPUT_MS = 150;
+  let lastInputAt = 0;
+  const readerInputFresh = () => holding() || Date.now() - lastInputAt <= READER_INPUT_MS;
+  const notePointer = () => {
+    pointerHeld = true;
+  };
+  const noteTouch = () => {
+    touchHeld = true;
+  };
+  const noteInput = () => {
+    lastInputAt = Date.now();
+  };
+  scroll.addEventListener('pointerdown', notePointer, {passive: true});
+  scroll.addEventListener('touchstart', noteTouch, {passive: true});
+  scroll.addEventListener('touchmove', noteInput, {passive: true});
+  scroll.addEventListener('wheel', noteInput, {passive: true});
 
   // storeBindings tracked "near the bottom" off the scroll event rather than
   // measuring in the notify path (reading scrollTop/scrollHeight while the store
@@ -124,15 +160,14 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     lastScrollByReader =
       jumpDepth === 0 &&
       !deps.isMachineScroll(scroll.scrollTop) &&
-      (deps.readerInputFresh() || (lastScrollByReader && deps.listScrolling()));
+      (readerInputFresh() || (lastScrollByReader && deps.listScrolling()));
   };
   scroll.addEventListener('scroll', noteScroll, {passive: true});
   deps.onTeardown(() => scroll.removeEventListener('scroll', noteScroll));
 
   // A reader owns the offset: a finger or pointer down, or their own scroll
   // (drag, wheel, momentum) still live. No programmatic scrollTop while true.
-  const driving = (): boolean =>
-    deps.isReaderHolding() || (lastScrollByReader && deps.listScrolling());
+  const driving = (): boolean => holding() || (lastScrollByReader && deps.listScrolling());
 
   // The reader let go. If the list is already still, release the banked
   // correction (or re-pin a pinned end that content grew past) in one re-window
@@ -141,15 +176,38 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     if (driving()) return;
     if (deps.listBanked() || (deps.isPinned() && deps.distToEnd() > 0.5)) deps.rewindow();
   };
-  window.addEventListener('touchend', settle, {passive: true});
-  window.addEventListener('touchcancel', settle, {passive: true});
-  window.addEventListener('pointerup', settle, {passive: true});
-  window.addEventListener('pointercancel', settle, {passive: true});
+  // The finger owns the offset until the LAST touch lifts (a multi-touch
+  // release leaves one finger still down).
+  const releaseTouch = (e: Event) => {
+    const touches = (e as TouchEvent).touches;
+    if (!touches || touches.length === 0) touchHeld = false;
+    settle();
+  };
+  const releasePointer = () => {
+    pointerHeld = false;
+    settle();
+  };
+  const releaseAll = () => {
+    pointerHeld = false;
+    touchHeld = false;
+    settle();
+  };
+  const releaseOnHidden = () => {
+    if (document.visibilityState === 'hidden') releaseAll();
+  };
+  window.addEventListener('touchend', releaseTouch, {passive: true});
+  window.addEventListener('touchcancel', releaseTouch, {passive: true});
+  window.addEventListener('pointerup', releasePointer, {passive: true});
+  window.addEventListener('pointercancel', releasePointer, {passive: true});
+  window.addEventListener('blur', releaseAll, {passive: true});
+  document.addEventListener('visibilitychange', releaseOnHidden, {passive: true});
   deps.onTeardown(() => {
-    window.removeEventListener('touchend', settle);
-    window.removeEventListener('touchcancel', settle);
-    window.removeEventListener('pointerup', settle);
-    window.removeEventListener('pointercancel', settle);
+    window.removeEventListener('touchend', releaseTouch);
+    window.removeEventListener('touchcancel', releaseTouch);
+    window.removeEventListener('pointerup', releasePointer);
+    window.removeEventListener('pointercancel', releasePointer);
+    window.removeEventListener('blur', releaseAll);
+    document.removeEventListener('visibilitychange', releaseOnHidden);
   });
 
   const state = (): ScrollOwnerState => {
@@ -177,6 +235,7 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     // same synchronous update it did locally.
     recomputeNearBottom: updateNearBottom,
     driving,
+    readerInputFresh,
     // A content, pad or box resize (the list's ResizeObserver, W3/W4). A reader
     // driving owns the offset: nothing is written, a top-pad change is banked in
     // the spacer so the rows under them hold still, and a pinned end that grew is
@@ -196,12 +255,12 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
         if (padDelta) deps.bankShift(padDelta);
         // Silent under a held finger (it plainly owns the offset); named when
         // only the reader's scroll or momentum is live.
-        if (!deps.isReaderHolding()) skipPin();
+        if (!holding()) skipPin();
         return;
       }
       if (deps.isDividerHeld() && !deps.isPinned() && deps.reseatDivider()) return;
       if (deps.isPinned()) {
-        if (deps.readerInputFresh()) skipPin();
+        if (readerInputFresh()) skipPin();
         else if (deps.distToEnd() > 0) deps.scrollToBottom('resize.pin');
       } else if (padDelta) {
         deps.silentScrollTo(scroll.scrollTop + padDelta, 'resize.pad');
@@ -224,7 +283,7 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     // keep them at the end, unless a reader is driving or their input is fresh
     // enough that their own scroll may not have landed yet.
     followArrival(): void {
-      if (driving() || deps.readerInputFresh()) return;
+      if (driving() || readerInputFresh()) return;
       deps.scrollToBottom();
     },
     // A deliberate move (go-to-bottom W13, unread landing W14). The owner runs the
@@ -241,7 +300,7 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
       };
       let result: T;
       try {
-        result = run(deps.isReaderHolding);
+        result = run(holding);
       } catch (e) {
         end();
         throw e;
