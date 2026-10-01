@@ -833,7 +833,11 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     chat: deps.chatEl,
     scroll: messageListScroll,
     nearBottomPx: OVERLAY_SCROLL_NEAR_PX,
-    closeSettleGrace
+    closeSettleGrace,
+    // W13 go-to-bottom behind the owner's jump (phase 2 step 3). The handler only
+    // fires at click time, long after the owner is created, so the reference is
+    // safe. The owner runs the existing smooth-scroll routine verbatim.
+    wrapJump: (run) => scrollOwner.jump('to-bottom', run)
   });
   const {setNewBelow, updateGoDown, hideUnreadBanner, showUnreadBanner} = chrome;
 
@@ -905,7 +909,10 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   // Pass the current anchor id so the landing can mount the divider row when it
   // sits outside the virtual window (see readerLanding.scrollToFirstUnread).
   const scrollToFirstUnread = (): boolean => {
-    const ok = scrollToFirstUnreadRaw(firstUnreadId);
+    // W14 unread landing behind the owner's jump (phase 2 step 3). This runs only
+    // at settle/open time, after the owner is created; the owner runs the existing
+    // landing routine verbatim and returns its result.
+    const ok = scrollOwner.jump('unread-landing', () => scrollToFirstUnreadRaw(firstUnreadId));
     if (ok && firstUnreadId !== undefined) {
       holdDivider = true;
       if (holdDividerTimer !== null) clearTimeout(holdDividerTimer);
