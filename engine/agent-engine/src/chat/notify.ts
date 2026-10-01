@@ -15,7 +15,7 @@
 import { unreadOf, markRead, filedAndQuiet } from "../sessions/readstate.ts";
 import { scheduleHeardSave, settingsOf, type Session } from "../sessions/session-state.ts";
 import { send } from "../transport/wire.ts";
-import { appConnected, isAway, BEAT_ASSUMED_MS, BEAT_SLACK_MS, graceMs } from "../sessions/presence.ts";
+import { appConnected, recentlyUsed, isAway, BEAT_ASSUMED_MS, BEAT_SLACK_MS, graceMs } from "../sessions/presence.ts";
 import { realClock, type Clock } from "../runtime/clock.ts";
 import type { Sock } from "../transport/sock.ts";
 
@@ -216,6 +216,24 @@ export async function notifyUnlessWatched(
       const silent = startSilence(s, at);
       console.log(`[notify] present ${key} ${msg} why=${why} ` +
         `(${C().clients().size} app socket(s) on this engine, so no new-message push; ` +
+        `unread ${secs(silent)}, ceiling ${secs(ceilingMs())})`);
+      return;
+    }
+    /* IN USE RECENTLY, tab hidden right now (owner decision, 2026-10-01). No app
+     * is visible this instant, but a still-connected device was being looked at
+     * moments ago -- the laptop whose tab went hidden for a few seconds when the
+     * reply landed. Pushing to his phone for that is the exact complaint. Hold it
+     * on the SAME terms as a visible app: startSilence arms the ceiling, so a
+     * reply he never comes back to still pushes once the ceiling passes, and a
+     * device that disconnects stops counting (it leaves clients()) and takes the
+     * grace-then-push path instead. The marker is untouched: recent use is not
+     * proof he read THIS chat. */
+    const recent = recentlyUsed();
+    if (recent) {
+      const silent = startSilence(s, at);
+      const hidden = at - recent.data.lastVisibleAt;
+      console.log(`[notify] present ${key} ${msg} why=${why} ` +
+        `recently used c${recent.data.cid} (hidden ${secs(hidden)}, so no new-message push; ` +
         `unread ${secs(silent)}, ceiling ${secs(ceilingMs())})`);
       return;
     }

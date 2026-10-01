@@ -24,6 +24,7 @@ import {DcSttStream} from './sttStream';
 import {dispatchFrame} from './frames';
 import type {FrameContext} from './frames/types';
 import {cyclog} from '@/shared/logging';
+import {desktopDevice} from '@/shared/capabilities';
 import {deleteKey, getByUserHost, pinEngineIdentity, storeGenerations} from './keyring';
 import {
   b64encode,
@@ -247,10 +248,13 @@ export class WsEngineClient implements EngineClient {
   // the phone was in a pocket is found now, not on the next 5 s tick.
   public setVisible(on: boolean) {
     this.visible = on;
+    // `desktop` rides the beat so the engine can tell a laptop apart from a
+    // phone: only a laptop holds a push via recent use (owner, 2026-10-01). A
+    // device constant, sent on every beat since the frame carries it anyway.
     // The beat rides the pipe sealed, so the idle probe cannot read it off the
     // wire; count it here the instant it actually leaves (a no-op unless the
     // probe is installed, i.e. under ?testhooks=1).
-    if (this.send({t: 'visible', on})) {
+    if (this.send({t: 'visible', on, desktop: desktopDevice})) {
       (
         window as unknown as {__cycIdle?: {notePresenceFrame?(): void}}
       ).__cycIdle?.notePresenceFrame?.();

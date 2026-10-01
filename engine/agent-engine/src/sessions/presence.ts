@@ -159,6 +159,53 @@ export function appConnected(): boolean {
   return false;
 }
 
+/* NO PUSH WHILE A DEVICE WAS IN USE RECENTLY, even if its tab is hidden right
+ * now (owner decision, 2026-10-01): "why are push notifications sent to my phone
+ * when the app is clearly open on my laptop?". The log had it exactly -- the
+ * laptop's tab was hidden for a few seconds when each reply arrived
+ * (socket.probe "foreground return", sync.catchup "visible" moments later), and
+ * appConnected read that momentary hidden as "nobody here" and pushed.
+ *
+ * So a hidden-but-recently-visible page is its own answer, separate from
+ * appConnected's "visible right now". recentUseMs() is the window; the same
+ * env/config style as graceMs/stableMs/ceilingMs, read per call so production is
+ * byte-identical and a manual-clock test can prove the real three minutes. */
+export const recentUseMs = (): number => Number(process.env.NOTIFY_RECENT_USE_MS) || 3 * 60_000;
+
+/* A client still connected whose tab is hidden now but that he was LOOKING AT
+ * within recentUseMs(): the laptop he set down seconds ago. Returns the socket
+ * (the notify log names it) or null.
+ *
+ * Deliberately does NOT require present(): a hidden page stops heartbeating, so
+ * present() would go false within one beat and cut the window to ~12s instead of
+ * the three minutes the owner asked for. The thing that must be true is that the
+ * socket is still CONNECTED -- iterating clients() is that test, and a laptop
+ * that closed or dropped its socket is simply not here, which is the grace
+ * clock's job, not this one's. A client that is visible NOW is appConnected's
+ * question, and one that has never been visible (lastVisibleAt 0: a tab opened
+ * in the background) was never in use, so neither counts here.
+ *
+ * AND ONLY A LAPTOP/DESKTOP (owner decision, 2026-10-01, refining the first
+ * cut of this rule). The first version counted any connected client, so the
+ * PHONE counted too: he used the app on his iPhone, locked it, and a reply
+ * buzzed up to ~2.5 min late while recent use held it. A phone or tablet he set
+ * down is the device the push is FOR, so it never holds one -- locking it buzzes
+ * right away as it did before this branch. A device whose kind the app did not
+ * say (desktop falsy) reads as not desktop, so an unknown client never delays a
+ * push. */
+export function recentlyUsed(): Sock | null {
+  const now = clk.now();
+  let best: Sock | null = null;
+  for (const c of C().clients()) {
+    if (!c.data.desktop) continue;       // a phone/tablet/unknown never holds a push
+    if (c.data.visible) continue;        // visible now: appConnected answers that
+    if (!c.data.lastVisibleAt) continue; // never visible: nothing was in use
+    if (now - c.data.lastVisibleAt >= recentUseMs()) continue;
+    if (!best || c.data.lastVisibleAt > best.data.lastVisibleAt) best = c;
+  }
+  return best;
+}
+
 export function clearGrace() {
   if (!graceTimer) return;
   clk.clearTimeout(graceTimer);

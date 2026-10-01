@@ -32,7 +32,7 @@ import { PANE } from "../test-utils/fake-herdr.ts";
 import { until, settle } from "../test-utils/wait.ts";
 import { onChat } from "./reply.ts";
 import { batchMs, ceilingMs, ceilingTickMs, sendDismissal } from "./notify.ts";
-import { onPresenceChange, graceMs, stableMs } from "../sessions/presence.ts";
+import { onPresenceChange, graceMs, stableMs, recentUseMs } from "../sessions/presence.ts";
 import { unreadOf } from "../sessions/readstate.ts";
 import { deriveSessionKey, openPush } from "../../../shared/e2e";
 import { newestGen } from "../security/sec";
@@ -50,6 +50,7 @@ const priorEnv = {
   NOTIFY_CEILING_TICK_MS: process.env.NOTIFY_CEILING_TICK_MS,
   NOTIFY_GRACE_MS: process.env.NOTIFY_GRACE_MS,
   NOTIFY_STABLE_MS: process.env.NOTIFY_STABLE_MS,
+  NOTIFY_RECENT_USE_MS: process.env.NOTIFY_RECENT_USE_MS,
 };
 for (const k of Object.keys(priorEnv)) delete process.env[k];
 afterAll(() => {
@@ -236,7 +237,7 @@ test("a page that comes back DURING the wait is not notified", async () => {
   expect(hits()).toHaveLength(0);
 });
 
-test("a page that says it is backgrounded does not silence his phone, and waits for nothing", async () => {
+test("a page that says it is backgrounded, and was not in use recently, does not silence his phone", async () => {
   /* HIS BUG, 2026-08-03: "not getting any notifications now". The engine log said
    * it in one line -- "why=1 client(s) on this chat, all say backgrounded ... so
    * no new-message push". The decision had already concluded nobody was watching,
@@ -245,10 +246,16 @@ test("a page that says it is backgrounded does not silence his phone, and waits 
    * And it goes out AT ONCE, with no grace and no proof dance. The thirty seconds
    * exist for the ambiguous case, where every socket dropped together and the
    * engine cannot tell a screen going off from a network blip. This is not that:
-   * the page is connected and has told us in words that he cannot see it. */
+   * the page is connected and has told us in words that he cannot see it.
+   *
+   * REFINED 2026-10-01 (recent use): "backgrounded" only pushes at once when the
+   * device was NOT in use recently. Here the page has been hidden well past the
+   * recent-use window, so he has genuinely left it and the 2026-08-03 rule stands.
+   * The recently-hidden case holds instead -- see the in-use-recently block. */
   const c = core.client({ attach: wireId(PANE), visible: false });
   await holdOpen(c);
   c.setVisible(false, core.clock.now());
+  await core.clock.advance(recentUseMs() + 1_000); // no longer in use on this device
   await say("you left");
 
   expect(decision()).toContain("all say backgrounded");
@@ -367,6 +374,151 @@ test("a reconnect that holds is him coming back, and it cancels the grace with n
   await settle();
   expect(saidSomething("[notify] flush")).toBe(false);
   expect(hits()).toHaveLength(0);
+});
+
+/* ------------------------------------------------------ in use recently ---- */
+
+test("a device in use a moment ago holds the push though its tab is hidden now", async () => {
+  /* HIS COMPLAINT, 2026-10-01: "why are push notifications sent to my phone when
+   * the app is clearly open on my laptop?". The laptop's tab was hidden for a few
+   * seconds when the reply landed (its log: foreground-return then catch-up a
+   * breath later), and the old rule -- push unless a client is visible RIGHT NOW
+   * -- read that momentary hidden as nobody-here and buzzed the phone. */
+  const c = core.client({ attach: wireId(PANE), visible: true, desktop: true });
+  await holdOpen(c);                        // he was here, tab in front
+  c.setVisible(false, core.clock.now());    // the tab slips to the background
+  await core.clock.advance(5_000);          // the reply lands five seconds later
+  await say("while your eyes were elsewhere");
+
+  // no push: the laptop is clearly in use, hidden tab or not, and the line says why
+  expect(said().some((l) => l.includes("[notify] present") && l.includes("recently used")))
+    .toBe(true);
+  await quietWindow();
+  expect(hits()).toHaveLength(0);
+  // held, not settled: the ceiling clock runs so the reply is never lost
+  expect(session().silentSince).toBeDefined();
+  // and recent use does NOT move the marker -- it is no proof he read THIS chat
+  expect(unreadOf(session())).toBe(1);
+});
+
+test("a device hidden longer than the recent-use window pushes as normal", async () => {
+  // past the window he has genuinely put it down: the rule stops holding and the
+  // push goes out exactly as it would for a chat he never had open
+  const c = core.client({ attach: wireId(PANE), visible: true, desktop: true });
+  await holdOpen(c);
+  c.setVisible(false, core.clock.now());
+  await core.clock.advance(recentUseMs() + 60_000); // four-plus minutes hidden
+  await say("you really did leave");
+
+  expect(saidSomething("recently used")).toBe(false);
+  expect(decision()).toContain("[notify] send");
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+});
+
+test("a recently-used laptop that then disconnects falls to the grace, then pushes", async () => {
+  /* The lid closes. A device that is GONE is not in use -- its socket left
+   * clients() -- so recent use stops speaking for it and the ordinary
+   * grace-then-push path takes over, which is the one case the owner kept. */
+  const c = core.client({ attach: wireId(PANE), visible: true, desktop: true });
+  await holdOpen(c);
+  c.setVisible(false, core.clock.now());
+  await say("held while the lid was still open");
+  expect(saidSomething("recently used")).toBe(true);
+  await quietWindow();
+  expect(hits()).toHaveLength(0);
+
+  c.close();
+  onPresenceChange(); // what the socket close handler does
+  await core.clock.advance(graceMs() - 1);
+  await settle();
+  expect(hits()).toHaveLength(0); // still inside the grace
+
+  await core.clock.advance(2);
+  expect(saidSomething("[notify] grace expired")).toBe(true);
+  expect(saidSomething("[notify] flush")).toBe(true);
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+});
+
+test("a client that was never visible pushes exactly as today", async () => {
+  // a tab opened in the background: he never looked at it, so it was never in
+  // use and holds nothing. This is the behaviour before the recent-use rule.
+  core.client({ attach: wireId(PANE), visible: false });
+  await say("into a background tab");
+
+  expect(saidSomething("recently used")).toBe(false);
+  expect(decision()).toContain("[notify] send");
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+});
+
+test("a phone in use a moment ago still buzzes right away when he locks it", async () => {
+  /* THE SIDE EFFECT THE OWNER CUT, 2026-10-01: the first cut of this rule held a
+   * push for ANY connected device in use, so the PHONE counted too. He used the
+   * app on his iPhone, locked it, and the reply buzzed up to ~2.5 min late. A
+   * phone (desktop:false) is the device the push is FOR, so recent use never
+   * speaks for it -- locking it buzzes right away as before this branch. */
+  const c = core.client({ attach: wireId(PANE), visible: true, desktop: false });
+  await holdOpen(c);
+  c.setVisible(false, core.clock.now());    // he locks the phone a moment later
+  await core.clock.advance(5_000);
+  await say("while the phone was in your pocket");
+
+  expect(saidSomething("recently used")).toBe(false);
+  expect(decision()).toContain("[notify] send");
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+});
+
+test("a tablet (a touch device) in use a moment ago also buzzes right away", async () => {
+  // a tablet is a touch-primary device like a phone (desktop:false): he set it
+  // down, the push is for it, so recent use holds nothing
+  const c = core.client({ attach: wireId(PANE), visible: true, desktop: false });
+  await holdOpen(c);
+  c.setVisible(false, core.clock.now());
+  await core.clock.advance(5_000);
+  await say("while the tablet was asleep");
+
+  expect(saidSomething("recently used")).toBe(false);
+  expect(decision()).toContain("[notify] send");
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+});
+
+test("an unknown device that never said its kind does not delay a push", async () => {
+  // an older app, or one whose kind could not be told, sends no desktop flag. It
+  // reads as not desktop (the fail-safe default), so it never holds a push.
+  const c = core.client({ attach: wireId(PANE), visible: true });
+  c.sock.data.desktop = undefined;          // no hint ever arrived
+  await holdOpen(c);
+  c.setVisible(false, core.clock.now());
+  await core.clock.advance(5_000);
+  await say("from a client that never said what it is");
+
+  expect(saidSomething("recently used")).toBe(false);
+  expect(decision()).toContain("[notify] send");
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+});
+
+test("a reply held for a recently-used device still pushes once the ceiling passes", async () => {
+  // the backstop is unchanged: a held reply he never comes back to is announced
+  // when its ceiling arrives, recent use or not
+  const c = core.client({ attach: wireId(PANE), visible: true, desktop: true });
+  await holdOpen(c);
+  c.setVisible(false, core.clock.now());
+  await say("held by recent use");
+  expect(saidSomething("recently used")).toBe(true);
+  await quietWindow();
+  expect(hits()).toHaveLength(0);
+
+  // the socket stays connected and hidden the whole time; only the ceiling fires
+  await core.clock.advance(ceilingMs() + ceilingTickMs());
+  await until(() => sink().batches.length > 0, { what: "the ceiling's window" });
+  expect(hits()).toHaveLength(1);
+  const line = said().find((l) => l.includes("[notify] ceiling")) ?? "";
+  expect(line).toContain("unread=1");
 });
 
 /* ------------------------------------------------------------- the window -- */

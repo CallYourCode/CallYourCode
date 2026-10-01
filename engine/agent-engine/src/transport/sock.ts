@@ -34,6 +34,23 @@ export type SockData = {
    * the property wanted here. What it CANNOT do on its own is answer the
    * question quickly, which is what notifyUnlessWatched's probe is for. */
   visibleAt: number;
+  /* The last time this page was actually VISIBLE: `now` while it says it is
+   * visible, and the moment it went hidden otherwise. Unlike `visibleAt` (which
+   * stamps every visibility claim, hidden ones included) this never moves while
+   * a tab stays backgrounded, so "how long ago was he last looking at this
+   * device" is `now - lastVisibleAt`. 0 until the page has been visible once,
+   * which is how a never-visible socket (a tab opened in the background) is told
+   * from one he set down a moment ago. Read by presence.recentlyUsed. */
+  lastVisibleAt: number;
+  /* Whether this is a laptop/desktop, as the app reports it in the visible
+   * frame (a fine pointer, not a mobile OS). ONLY a desktop holds a push via
+   * recentlyUsed (owner decision, 2026-10-01): a phone or tablet he locked a
+   * moment ago buzzes right away as before, because the device he set down is
+   * the one he might come back to without a nudge. Absent or false on an older
+   * app or a device whose kind could not be told, which recentlyUsed reads as
+   * NOT desktop, so an unknown client never delays a push. Read by
+   * recentlyUsed; stamped in frames.ts off the visible frame. */
+  desktop?: boolean;
   /* How long this page can go quiet and still be alive: the largest of its last
    * few gaps between visibility claims, so the engine waits on the cadence the
    * client actually has rather than a constant that has to be kept in step with
