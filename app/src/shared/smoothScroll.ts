@@ -115,13 +115,20 @@ export function smoothScrollTo(request: ScrollRequest): Promise<void> {
 // and the animation never lands (and thousands of nodes churn). A jump mounts
 // only the tail, so the end settles after one small correction, which -- being
 // near now -- keeps the smooth finish motion users expect.
-export async function smoothScrollToBottom(container: HTMLElement): Promise<void> {
+//
+// `readerTook` (optional): the moment it answers true -- a finger or pointer
+// landed on the list -- the reader owns the offset and the walk stops writing.
+export async function smoothScrollToBottom(
+  container: HTMLElement,
+  readerTook?: () => boolean
+): Promise<void> {
   const target = () => container.scrollHeight - container.clientHeight;
   const smooth = prefersMotion();
   const MAX_STEPS = 40; // hard ceiling, never spins forever
   const STABLE_FRAMES = 4;
   let stable = 0;
   for (let i = 0; i < MAX_STEPS; i++) {
+    if (readerTook?.()) return;
     const top = target();
     if (top - container.scrollTop <= 1) {
       if (++stable >= STABLE_FRAMES) return;
@@ -142,6 +149,7 @@ export async function smoothScrollToBottom(container: HTMLElement): Promise<void
   }
   // Ceiling reached: land exactly on the end so a slow-settling list is never
   // left short.
+  if (readerTook?.()) return;
   logScrollWrite(container, 'smooth.bottom', container.scrollTop, target());
   container.scrollTo({top: target(), behavior: 'auto'});
 }

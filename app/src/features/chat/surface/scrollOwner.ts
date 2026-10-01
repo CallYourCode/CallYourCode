@@ -207,6 +207,19 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
         deps.silentScrollTo(scroll.scrollTop + padDelta, 'resize.pad');
       }
     },
+    // A store paint of the open chat moved the reader's held anchor by `drift`
+    // px on screen (the render bracket, W2): bank it in the spacer while a
+    // reader drives, otherwise write it once and re-window once so the window
+    // and spacer match the held offset.
+    settlePaint(drift: number): void {
+      if (Math.abs(drift) <= 0.5) return;
+      if (driving()) {
+        deps.bankShift(drift);
+        return;
+      }
+      deps.rewindowWrite(scroll.scrollTop + drift, 'bracket');
+      deps.rewindow();
+    },
     // A row arrived (storeBindings' rAF, R8) for a reader who was near the end:
     // keep them at the end, unless a reader is driving or their input is fresh
     // enough that their own scroll may not have landed yet.
@@ -217,9 +230,10 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     // A deliberate move (go-to-bottom W13, unread landing W14). The owner runs the
     // existing routine verbatim and holds the jump for its WHOLE duration: a
     // routine that returns a promise (the go-to-bottom walk) stays a jump until
-    // it settles, so its untagged scrolls never read as a reader driving.
-    // Returns the routine's result.
-    jump<T>(_kind: string, run: () => T): T {
+    // it settles, so its untagged scrolls never read as a reader driving. The
+    // routine is handed `readerTook`: the moment a finger or pointer lands, the
+    // reader owns the offset and the move stops writing. Returns its result.
+    jump<T>(_kind: string, run: (readerTook: () => boolean) => T): T {
       jumpDepth++;
       const end = () => {
         jumpDepth--;
@@ -227,7 +241,7 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
       };
       let result: T;
       try {
-        result = run();
+        result = run(deps.isReaderHolding);
       } catch (e) {
         end();
         throw e;

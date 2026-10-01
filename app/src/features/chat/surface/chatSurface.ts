@@ -567,6 +567,51 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     markMachineTop(messageListScroll);
   };
 
+  // Run a paint holding the reader's seat: capture on-screen anchors (by mid,
+  // rect based) just before it, and return how far the first one that survives
+  // drifted on screen across it. In order: the unread DIVIDER when on screen (a
+  // landing holds it a third down; a message arriving or older history loading
+  // reindexes the rows, so the generic anchor can miss and slide it off its
+  // seat); the first message row at or below the fold; the topmost mounted row
+  // (older history prepended shifts it DOWN by the height carried before, a tail
+  // append leaves it PUT). Null when none survived (a trim, a chat switch).
+  //
+  // Found and held by SCREEN rect, never by row.offsetTop: offsetTop is measured
+  // against the row's positioned GROUP, not the scroll content, so comparing it
+  // to scrollTop picked an arbitrary row, and re-seating by it put the reader's
+  // row wherever its group happened to sit (arrival-held: 140-220 px).
+  const holdAcrossPaint = (paint: () => void): number | null => {
+    const boxTop = messageListScroll.getBoundingClientRect().top;
+    const held: {mid: string; top: number}[] = [];
+    const note = (row: HTMLElement | null | undefined) => {
+      const mid = row?.dataset.mid;
+      if (row && mid) held.push({mid, top: row.getBoundingClientRect().top - boxTop});
+    };
+    const dividerRow = messageListScroll.querySelector<HTMLElement>(
+      '.cyc-message[data-cyc-unread][data-mid]'
+    );
+    if (dividerRow) {
+      const dr = dividerRow.getBoundingClientRect();
+      if (dr.bottom > boxTop && dr.top < boxTop + messageListScroll.clientHeight) note(dividerRow);
+    }
+    const rows = messageListScroll.querySelectorAll<HTMLElement>('.cyc-message[data-mid]');
+    for (const row of rows) {
+      if (row.getBoundingClientRect().top >= boxTop) {
+        note(row);
+        break;
+      }
+    }
+    note(rows[0]);
+    paint();
+    for (const a of held) {
+      const el = messageListInner.querySelector<HTMLElement>(
+        `.cyc-message[data-mid="${CSS.escape(a.mid)}"]`
+      );
+      if (el) return el.getBoundingClientRect().top - boxTop - a.top;
+    }
+    return null;
+  };
+
   let bracketMoves = 0;
   const bracketMessageRender = (id: string, paint: () => void) => {
     const keep = messageListInner.dataset.cycChat === id && messageListInner.childElementCount > 0;
@@ -577,133 +622,28 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       paint();
       return;
     }
-    // A pinned reader takes the SAME on-screen-anchor hold as a reader in
-    // history: hold the topmost mounted row's seat across the paint, then let the
-    // post-layout pin (the storeBindings rAF and the onListResize re-pin) settle
-    // the view at the true bottom, once, exactly as the live build does. An
-    // earlier revision pinned to the bottom HERE, synchronously, off the
-    // paint-time scrollHeight; on a sliding window that height is a from-estimate
-    // rebuild, so the pin overshot and the later measured-height settle fired a
-    // SECOND re-pin -- two scrolls per message, worse than live's one (D1).
-    // Deferring the pin to after layout lands it once at the settled height.
-    //
-    // Pin the on-screen position across the render: anchor to the first message
-    // whose top sits at or below the fold, captured immediately before the paint.
+    // Paint, then ONE owner settle (phase 3 step 6). The reader's seat is held
+    // by an on-screen anchor captured just before the paint and re-found by mid
+    // after it; the drift it shows is handed to the owner, which banks it in the
+    // spacer while a reader drives and otherwise writes it once and re-windows
+    // once. A pinned reader takes the SAME hold: the post-layout pin (the arrival
+    // follow, the resize settle) then lands the end once at the settled height.
+    // An earlier revision pinned to the bottom HERE, off the paint-time
+    // scrollHeight; on a sliding window that height is a from-estimate rebuild, so
+    // the pin overshot and the measured-height settle re-pinned a SECOND time --
+    // two scrolls per message (D1).
     const before = messageListScroll.scrollTop;
     const hBefore = messageListScroll.scrollHeight;
-    // The anchor: the first message row at or below the fold, by data-mid (a
-    // prepend re-window can recreate its node, so it is re-found by mid, not
-    // trusted by reference) and its on-screen top BEFORE the paint (rect based).
-    const boxTop = messageListScroll.getBoundingClientRect().top;
-    // The topmost mounted message row and its on-screen top, to tell a PREPEND
-    // (older history above the fold shifts it down) apart from a TAIL append (a
-    // message below the fold leaves it exactly where it is) in the fallback below.
-    const firstRow = messageListScroll.querySelector<HTMLElement>('.cyc-message[data-mid]');
-    const firstRowMid = firstRow?.dataset.mid ?? null;
-    const firstRowScreenTop = firstRow ? firstRow.getBoundingClientRect().top - boxTop : 0;
-    let anchorMid: string | null = null;
-    let anchorScreenTop = 0;
-    // Prefer the unread DIVIDER as the store-paint anchor when it is on screen:
-    // a landing holds it a third down, and a message arriving (or older history
-    // loading) reindexes the rows, so the generic first-below-the-fold anchor can
-    // miss and fall back to carrying the raw height change, sliding the divider
-    // off its seat and out of view. Anchoring on the divider by its stable mid
-    // keeps its seat across the paint.
-    const dividerRow = messageListScroll.querySelector<HTMLElement>('.cyc-message[data-cyc-unread][data-mid]');
-    if (dividerRow) {
-      const dr = dividerRow.getBoundingClientRect();
-      if (dr.bottom > boxTop && dr.top < boxTop + messageListScroll.clientHeight) {
-        anchorMid = dividerRow.dataset.mid ?? null;
-        anchorScreenTop = dr.top - boxTop;
-      }
-    }
-    // Found and held by SCREEN rect, never by row.offsetTop: offsetTop is
-    // measured against the row's positioned GROUP, not the scroll content, so
-    // comparing it to scrollTop picked an arbitrary row, and re-seating by it
-    // put the reader's row wherever its group happened to sit -- a reply
-    // arriving while the reader was up in history (a front-trim paint that
-    // slid the window by a row) moved their row 140-220 px (arrival-held).
-    if (anchorMid === null) {
-      for (const row of messageListScroll.querySelectorAll<HTMLElement>('.cyc-message[data-mid]')) {
-        const top = row.getBoundingClientRect().top;
-        if (top >= boxTop) {
-          anchorMid = row.dataset.mid ?? null;
-          anchorScreenTop = top - boxTop;
-          break;
-        }
-      }
-    }
-    paint();
-    const findAnchor = (): HTMLElement | null =>
-      anchorMid
-        ? messageListInner.querySelector<HTMLElement>(`.cyc-message[data-mid="${CSS.escape(anchorMid)}"]`)
-        : null;
-    const reseated = findAnchor();
+    const drift = holdAcrossPaint(paint);
     // The paint already re-seated the scroll itself (messageList's front-prepend
-    // hold, which rides the virtualizer's measured offsets): defer to it. When
-    // the paint left scrollTop where it was (an append, an edit, a growing
-    // reply), this holds the anchor at its pre-paint screen top.
-    if (messageListScroll.scrollTop !== before) {
-      // paint moved it: keep the paint's re-seat.
-    } else if (reseated) {
-      // The anchor survived (possibly as a fresh node): re-seat so it keeps the
-      // same offset from the top.
-      const drift = reseated.getBoundingClientRect().top - boxTop - anchorScreenTop;
-      if (Math.abs(drift) > 0.5) messageListScroll.scrollTop += drift;
-    } else if (firstRowMid) {
-      // No fold anchor survived. Decide top-growth vs bottom-growth from the
-      // topmost mounted row's SCREEN position: older history prepended shifts it
-      // DOWN (hold it -- the rect delta equals the height carried before), a
-      // tail append leaves it PUT (delta ~0, no move), so a message arriving
-      // while the reader sits in history never shoves the view down a row. When
-      // that row is gone (a trim, a chat switch), fall back to carrying the
-      // scrollHeight growth as before.
-      const fa = messageListInner.querySelector<HTMLElement>(
-        `.cyc-message[data-mid="${CSS.escape(firstRowMid)}"]`
-      );
-      if (fa) {
-        const delta = fa.getBoundingClientRect().top - boxTop - firstRowScreenTop;
-        if (Math.abs(delta) > 0.5) messageListScroll.scrollTop += delta;
-      } else {
-        const grew = messageListScroll.scrollHeight - hBefore;
-        if (grew) messageListScroll.scrollTop = messageListScroll.scrollTop + grew;
-      }
+    // hold under a live selection, which rides the virtualizer's offsets): defer.
+    if (messageListScroll.scrollTop === before) {
+      scrollOwner.settlePaint(drift ?? messageListScroll.scrollHeight - hBefore);
     } else {
-      // The anchor is gone -- an upward-growing list shifted its history down by
-      // the height added at the top, so carry that growth into the offset.
-      const grew = messageListScroll.scrollHeight - hBefore;
-      if (grew) messageListScroll.scrollTop = messageListScroll.scrollTop + grew;
-    }
-    // The re-seat above moved the view to hold the anchor, but the paint sized
-    // the virtual window (and the top spacer) at the PRE-re-seat offset, so for a
-    // frame the reader's rows sit against a stale spacer -- they shift by the
-    // re-seat delta, or the viewport meets an unmounted row that never recovers
-    // (the row-shift/unmount while older history loads, on a store prepend).
-    // Only when the re-seat actually moved the view.
-    if (Math.abs(messageListScroll.scrollTop - before) > 1) {
-      // Recompute the window at the re-seated offset so the coverage net mounts
-      // the viewport and the top spacer catches up.
-      rewindowMessages(messageListInner);
-      // The offsetTop re-seat and rewindowMessages each key off a possibly
-      // different topmost row, and a sticky date/pad above the fold can change
-      // height as older rows arrive, so the reader's anchor lands a few tens of
-      // px off its pre-paint screen top (the row-shift-while-older-loads
-      // residual). Pin it back to that exact top -- rect based, re-found by mid,
-      // a single deterministic correction so it cannot oscillate -- then
-      // re-window once more so the window covers the corrected offset (a moved
-      // scrollTop against a stale window meets an unmounted row).
-      const held = pinnedToBottom ? null : findAnchor();
-      if (held) {
-        const drift = held.getBoundingClientRect().top - boxTop - anchorScreenTop;
-        if (Math.abs(drift) > 0.5) {
-          messageListScroll.scrollTop += drift;
-          rewindowMessages(messageListInner);
-        }
-      }
+      logScrollWrite(messageListScroll, 'bracket', before, messageListScroll.scrollTop);
+      markMachineTop(messageListScroll);
     }
     const after = messageListScroll.scrollTop;
-    logScrollWrite(messageListScroll, keep ? 'bracket' : 'bracket.fresh', before, after);
-    markMachineTop(messageListScroll);
     // A paint never speaks for the reader: it can confirm a pin (a shrink
     // clamped the view to the end) but not drop one. The top pad may already
     // have grown earlier in this same render (the agents bar), which leaves the

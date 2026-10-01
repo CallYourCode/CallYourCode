@@ -16,7 +16,7 @@ interface ChatChromeOptions {
   // the ScrollOwner's jump(). When provided, the button's scroll runs inside it,
   // which holds the jump until the walk's promise settles; when absent (tests),
   // the scroll runs directly, as before.
-  wrapJump?(run: () => Promise<void>): Promise<void>;
+  wrapJump?(run: (readerTook: () => boolean) => Promise<void>): Promise<void>;
 }
 
 export function createChatChrome(options: ChatChromeOptions) {
@@ -98,7 +98,7 @@ export function createChatChrome(options: ChatChromeOptions) {
     // smoothScrollToBottom).
     goDownButton.addEventListener('click', () => {
       closeSettleGrace(false);
-      const run = () => smoothScrollToBottom(scroll);
+      const run = (readerTook?: () => boolean) => smoothScrollToBottom(scroll, readerTook);
       if (wrapJump) void wrapJump(run);
       else void run();
     });
