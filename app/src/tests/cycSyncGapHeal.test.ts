@@ -131,19 +131,23 @@ class FakeEngine {
       let top = this.tailPage();
       for (const p of pages) if (p.page - 1 < top) top = p.page - 1;
       const from = Math.max(verifyFrom, top - 99, 0);
-      if (top >= from) {
-        const fp = {from, n: [] as number[], m: [] as number[], h: [] as number[]};
-        for (let p = from; p <= top; p++) {
-          const on = this.on(p);
-          fp.n.push(on.length);
-          fp.m.push(on.filter((r) => r.msg).length);
-          fp.h.push(on.reduce((acc, r) => acc + printTerm(r.seq - p * PS, r.rev ?? 0), 0));
-        }
-        a.fp = fp;
-      }
+      if (top >= from) a.fp = this.prints(from, top);
     }
     if (!pages.length) delete a.pages;
     return a;
+  }
+  // the engine's fingerprints over [from, to], at most 100 pages, clamped to
+  // the tail (attach.ts pagePrints / wirePrints)
+  prints(from: number, to: number) {
+    const top = Math.min(to, this.tailPage(), from + 99);
+    const fp = {from, n: [] as number[], m: [] as number[], h: [] as number[]};
+    for (let p = from; p <= top; p++) {
+      const on = this.on(p);
+      fp.n.push(on.length);
+      fp.m.push(on.filter((r) => r.msg).length);
+      fp.h.push(on.reduce((acc, r) => acc + printTerm(r.seq - p * PS, r.rev ?? 0), 0));
+    }
+    return fp;
   }
 }
 
@@ -151,11 +155,17 @@ type Attached = {frontier: number; verifyFrom?: number};
 
 function stand(engine: FakeEngine): {
   attaches: Attached[];
+  printed: Array<[number, number]>;
   fire: (ev: string, ...a: unknown[]) => void;
 } {
   const handlers: Record<string, (...a: unknown[]) => void> = {};
   const attaches: Attached[] = [];
+  const printed: Array<[number, number]> = [];
   const client = {
+    fetchPrints: async (_pane: string, from: number, to: number) => {
+      printed.push([from, to]);
+      return {...engine.prints(from, to), tailPage: engine.tailPage()};
+    },
     on: (ev: string, fn: (...a: unknown[]) => void) => {
       handlers[ev] = fn;
     },
@@ -183,7 +193,7 @@ function stand(engine: FakeEngine): {
   } as unknown as HandlerCtx;
   wireChat(conn, ctx);
   wireEvents(conn, ctx);
-  return {attaches, fire: (ev, ...a) => handlers[ev](...a)};
+  return {attaches, printed, fire: (ev, ...a) => handlers[ev](...a)};
 }
 
 function plantSession(): CycEngineSession {
@@ -533,7 +543,7 @@ describe('self-heal: the shown pages are fingerprinted on every attach', () => {
     expect(engine.fetched.filter((p) => p === 1).length).toBe(1);
   });
 
-  test('scrolling below the fingerprinted pages asks the engine again from the new floor', async () => {
+  test('scrolling below the fingerprinted pages checks just those pages: no attach, the window stays', async () => {
     // 1000 messages: the 300-message window shows pages 70..99 at first
     const engine = new FakeEngine(9999);
     await seedDevice(
@@ -545,16 +555,72 @@ describe('self-heal: the shown pages are fingerprinted on every attach', () => {
         coveredFrom: 0
       }
     );
-    const {attaches} = stand(engine);
+    const {attaches, printed} = stand(engine);
     attach(SID);
     await settle(150);
     const first = attaches[0].verifyFrom!;
     expect(first).toBeGreaterThan(0);
+    const asked = attaches.length;
+
     await loadOlder(SID);
     await settle(80);
-    const again = attaches[attaches.length - 1];
-    expect(attaches.length).toBeGreaterThan(1);
-    expect(again.verifyFrom!).toBeLessThan(first);
+    const low1 = Math.floor(rowStore.shownLowSeq(SID) / PS);
+    expect(low1).toBeLessThan(first);
+    // the check is a prints request for the newly shown pages alone; an attach
+    // here re-snapped the window to the newest 300 and threw the reader back
+    expect(attaches.length).toBe(asked);
+    expect(printed).toEqual([[low1, first - 1]]);
+    expect(Math.floor(rowStore.shownLowSeq(SID) / PS)).toBe(low1);
+
+    // the next page of history asks only for what it newly shows; the pages
+    // already compared are never asked again
+    await loadOlder(SID);
+    await settle(80);
+    const low2 = Math.floor(rowStore.shownLowSeq(SID) / PS);
+    expect(printed).toEqual([
+      [low1, first - 1],
+      [low2, low1 - 1]
+    ]);
+    await loadOlder(SID).then(() => settle(20));
+    printed.length = 0;
+    await settle(80);
+    expect(printed).toEqual([]);
+    expect(attaches.length).toBe(asked);
     expect(engine.fetched).toEqual([]); // everything matched: nothing refetched
+  });
+
+  test('a hole more than 100 pages below the tail is found when scrolled to and filled in place', async () => {
+    // the tablet's hole #8 shape, far down: pages 60..61 were never held, and
+    // the attach fingerprints only the newest pages (cap 100 below the tail)
+    const engine = new FakeEngine(19999);
+    const held = Array.from({length: 20000}, (_, i) => i).filter((q) => q < 6000 || q >= 6200);
+    await seedDevice(engine, held, {tailVersion: 20000, tailPage: 199, coveredFrom: 0});
+    const {attaches, printed} = stand(engine);
+    attach(SID);
+    await settle(150);
+    hidePage(true); // hold the refetch so the found hole can be looked at
+    for (let i = 0; i < 60 && rowStore.shownLowSeq(SID) >= 5900; i++) {
+      await loadOlder(SID);
+      await settle(10);
+    }
+    await settle(80);
+    const low = rowStore.shownLowSeq(SID);
+    expect(low).toBeLessThan(6000);
+    expect(attaches.length).toBe(1);
+    for (const [a, b] of printed) expect(b - a).toBeLessThan(100);
+    const detected = events('gap.detected').find((l) => l.fields.pages === '60-61');
+    expect(detected, JSON.stringify(events('gap.detected'))).toBeTruthy();
+    expect(detected!.fields.missingMsgs).toBe(20);
+    const s = sessions.get(SID)!;
+    expect(s.gaps?.length).toBe(1);
+    expect(s.gaps![0].ts).toBe(tsOf(5999));
+
+    hidePage(false);
+    await drain();
+    expect(engine.fetched.sort((a, b) => a - b)).toEqual([60, 61]);
+    expect(heldMessageSeqs()).toEqual(engineMessageSeqs(engine));
+    expect(rowStore.shownLowSeq(SID), 'the window never moved').toBe(low);
+    expect(attaches.length).toBe(1);
+    expect(sessions.get(SID)!.gaps).toBeUndefined();
   });
 });

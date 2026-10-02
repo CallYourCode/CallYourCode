@@ -145,6 +145,16 @@ export function pagePrints(rows: readonly WireRow[], from: number, to: number): 
   return out;
 }
 
+/** The same check outside an attach (GET /session/<id>/prints/<from>/<to>): the
+ *  device scrolled or jumped to shown pages the last attach did not fingerprint.
+ *  At most FP_PAGES_MAX pages per request, clamped to the tail; the tail page
+ *  rides along because it may still be growing. */
+export function wirePrints(s: AttachSession, from: number, to: number): PagePrints & { tailPage: number } {
+  const rows = wireRows(s);
+  const tail = tailPage(rows);
+  return { ...pagePrints(rows, from, Math.min(to, tail, from + FP_PAGES_MAX - 1)), tailPage: tail };
+}
+
 function readVerifyFrom(m: any): number | null {
   if (m.verifyFrom === undefined || m.verifyFrom === null || m.verifyFrom === "") return null;
   const v = Math.floor(Number(m.verifyFrom));

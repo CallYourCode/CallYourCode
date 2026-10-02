@@ -201,6 +201,7 @@ const PROBES: Probe[] = [
   { name: "doc/:id", method: "GET", path: `/doc/${uuid()}` },
   // chat.ts
   { name: "session/:id/page/:n", method: "GET", path: "/session/sess1/page/0" },
+  { name: "session/:id/prints/:from/:to", method: "GET", path: "/session/sess1/prints/0/1" },
   { name: "session/:id/trim-log", method: "POST", path: "/session/sess1/trim-log" },
   { name: "chat-search/:id", method: "GET", path: "/chat-search/sess1" },
   // session-ops.ts

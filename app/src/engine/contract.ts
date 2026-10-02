@@ -402,6 +402,16 @@ export interface EngineClient {
 
   fetchPage(sessionId: string, n: number): Promise<EnginePage | null>;
 
+  /* Fingerprints of pages [from, to] (at most 100 per answer), the same numbers
+   * an attach-ok's `fp` carries: the shown-page check for a window that reached
+   * pages the last attach did not fingerprint. null when the engine has no such
+   * route (older engine) or no such session. */
+  fetchPrints?(
+    sessionId: string,
+    from: number,
+    to: number
+  ): Promise<(EnginePagePrints & {tailPage: number}) | null>;
+
   // True when the frame was written to a sealed pipe.
   progress(sessionId: string, seq: number, explicit?: boolean): boolean;
   heard(sessionId: string, row: {mid?: string; msgId?: string; ts?: number}): boolean;

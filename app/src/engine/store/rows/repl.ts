@@ -26,6 +26,9 @@ import type {EnginePage, EnginePagePrints} from '../../contract';
 import type {CycSessionEvent} from '../../../types';
 
 const repls = new Map<string, Replicator>();
+// The engine and pane each session's replicator talks to, for the shown-page
+// check outside an attach (verifyShown).
+const wires = new Map<string, {engineKey: string; paneId: string}>();
 
 // The OPEN chat backfills at the full rate; every other session fills its whole
 // offline history at a slow background trickle, so a dozen live sessions never
@@ -71,6 +74,7 @@ function persist(sessionId: string, st: CursorState): void {
 }
 
 export function replicatorFor(sessionId: string, engineKey: string, paneId: string): Replicator {
+  wires.set(sessionId, {engineKey, paneId});
   let r = repls.get(sessionId);
   if (!r) {
     r = createReplicator(sessionId, {
@@ -205,7 +209,14 @@ async function runAttachOk(
   // background backfill runs, so every older page the replicator pulls falls
   // below the window and paints nothing.
   await resnapOpenWindow(sessionId);
-  if (a.fp) await verifyPages(sessionId, r, a.fp, a.tailPage ?? -1);
+  if (a.fp) {
+    // Checked now: the fingerprinted pages and the ones served inline above them.
+    const done = new Set<number>();
+    const top = Math.max(a.tailPage ?? -1, a.fp.from + a.fp.n.length - 1);
+    for (let p = a.fp.from; p <= top; p++) done.add(p);
+    verified.set(sessionId, done);
+    await verifyPages(sessionId, r, a.fp, a.tailPage ?? -1);
+  }
   r.start();
 }
 
@@ -392,16 +403,24 @@ const printKey = (p: Print) => `${p.n}/${p.m}/${p.h}`;
 
 // Pages flagged by a fingerprint and not yet refetched: the engine's print and
 // how many messages the device lacked there (the gap row's count).
-const wanted = new Map<string, Map<number, {print: Print; missingMsgs: number}>>();
+type Want = {print: Print; missingMsgs: number};
+const wanted = new Map<string, Map<number, Want>>();
 // The loop guard: a page refetched once that STILL differs (a row the store
 // refuses or folds) is remembered at the engine print it had, and not refetched
 // again until that print changes or the app reloads.
 const unreconciled = new Map<string, Map<number, string>>();
-// The lowest page the last fingerprints covered, so a window that scrolls below
-// it asks the engine again (needsVerify).
-const verifiedFrom = new Map<string, number>();
+// The pages compared with the engine since the last attach-ok that carried
+// fingerprints: its range, the pages it served inline, and every range a prints
+// request answered since. Absent until an engine answered fingerprints at all
+// (an older engine is never asked). A shown page outside it is asked for once
+// (verifyShown), so the check never re-fires on pages already compared.
+const verified = new Map<string, Set<number>>();
+// One prints request in flight per session.
+const printsInFlight = new Set<string>();
+// The most pages one prints request names (the engine caps its answer the same).
+const PRINTS_PAGES_MAX = 100;
 
-function wantOf(sessionId: string): Map<number, {print: Print; missingMsgs: number}> {
+function wantOf(sessionId: string): Map<number, Want> {
   let w = wanted.get(sessionId);
   if (!w) wanted.set(sessionId, (w = new Map()));
   return w;
@@ -433,7 +452,6 @@ async function verifyPages(
   const ps = r.cursor.pageSize;
   const to = fp.from + fp.n.length - 1;
   if (to < fp.from || ps <= 0) return;
-  verifiedFrom.set(sessionId, fp.from);
   const held = await rowStore.pagePrints(sessionId, fp.from, to, ps);
   const want = wantOf(sessionId);
   const odd = oddOf(sessionId);
@@ -590,14 +608,55 @@ function gapMarkers(sessionId: string): CycSessionEvent[] {
 
 setGapSource(gapMarkers);
 
-// A window that now reaches below the pages the last fingerprints covered: the
-// store asks the engine again (one catch-up attach) so the newly shown pages are
-// checked too.
-export function needsVerify(sessionId: string, shownLowSeq: number): boolean {
+// THE SHOWN-PAGE CHECK OUTSIDE AN ATTACH. The window now shows pages no
+// fingerprint has covered since the last attach (the reader loaded older history
+// or jumped to an old message): ask the engine for those pages' prints alone
+// (client.fetchPrints, at most PRINTS_PAGES_MAX per request, any depth) and
+// compare them as the attach-ok's are compared. Unlike an attach, the answer
+// never touches the window: a page that differs only joins the holes, and its
+// refetch lands in place. Each page is asked for once until the next attach; a
+// request that fails is retried by the next scroll, never by a loop.
+export function verifyShown(sessionId: string): void {
   const r = repls.get(sessionId);
-  const from = verifiedFrom.get(sessionId);
-  if (!r || from === undefined || shownLowSeq < 0) return false;
-  return Math.floor(shownLowSeq / r.cursor.pageSize) < from;
+  const done = verified.get(sessionId);
+  const wire = wires.get(sessionId);
+  if (!r || !done || !wire || printsInFlight.has(sessionId)) return;
+  const ps = r.cursor.pageSize;
+  const low = rowStore.shownLowSeq(sessionId);
+  const top = r.cursor.tailPage;
+  if (low < 0 || ps <= 0 || top < 0) return;
+  let from = -1;
+  for (let p = Math.floor(low / ps); p <= top; p++)
+    if (!done.has(p)) {
+      from = p;
+      break;
+    }
+  if (from < 0) return;
+  let to = from;
+  while (to < top && to + 1 - from < PRINTS_PAGES_MAX && !done.has(to + 1)) to++;
+  const owner = connOf(wire.engineKey);
+  const fetchPrints = owner?.client.fetchPrints?.bind(owner.client);
+  if (!fetchPrints || !sync.engineReachable(wire.engineKey)) return;
+  printsInFlight.add(sessionId);
+  cyclog('verify.shown', {session: sessionId, pages: `${from}-${to}`});
+  void fetchPrints(wire.paneId, from, to)
+    .then(async (fp) => {
+      // null: the engine cannot answer for this chat; these pages count as
+      // asked, so the next scroll does not ask again
+      const now = verified.get(sessionId);
+      if (now) for (let p = from; p <= to; p++) now.add(p);
+      if (fp && fp.n.length) await verifyPages(sessionId, r, fp, fp.tailPage);
+      return true;
+    })
+    .catch((e) => {
+      cyclog('verify.shown.failed', {session: sessionId, pages: `${from}-${to}`, err: String(e)});
+      return false;
+    })
+    .then((more) => {
+      printsInFlight.delete(sessionId);
+      // the window may still show unchecked pages beyond this request's cap
+      if (more) verifyShown(sessionId);
+    });
 }
 
 export function noteLive(sessionId: string, seq: number | undefined): void {
@@ -632,5 +691,7 @@ export function __resetReplicatorsForTest(): void {
   attachRuns = 0;
   wanted.clear();
   unreconciled.clear();
-  verifiedFrom.clear();
+  verified.clear();
+  printsInFlight.clear();
+  wires.clear();
 }

@@ -57,11 +57,11 @@ import {
 import {
   attachFrontier,
   demand as replDemand,
-  needsVerify,
   replicatorFor,
   running as replBackfilling,
   seedCursor,
-  stopAllReplicators
+  stopAllReplicators,
+  verifyShown as replVerifyShown
 } from './store/rows/repl';
 import {migrateLegacyHistory, rekeyRowsToOneId} from './store/rows/migrate';
 import * as transfers from './transfers/worker';
@@ -745,16 +745,14 @@ function askEngine(s: CycEngineSession, owner: Conn, openSeq: number) {
 
 let attachSeq = 0;
 
-// The window now shows pages below the ones the last attach fingerprinted (the
-// reader scrolled or jumped into older history): ask the engine once more, a
-// plain catch-up attach, so those pages are checked against it too.
+// The window may now show pages the last attach did not fingerprint (the reader
+// loaded older history or jumped to an old message): check just those pages
+// against the engine (repl.ts verifyShown). Never an attach: its answer re-snaps
+// the window to the newest rows, which would throw the reader off the history
+// they are reading.
 function verifyShown(sessionId: string): void {
   if (attachedId !== sessionId) return;
-  if (!needsVerify(sessionId, rowStore.shownLowSeq(sessionId))) return;
-  const s = sessions.get(sessionId);
-  const owner = s ? connOf(s.engineKey) : undefined;
-  if (!s || !owner || !sync.engineReachable(s.engineKey)) return;
-  askEngine(s, owner, attachSeq);
+  replVerifyShown(sessionId);
 }
 
 export function canOlder(sessionId: string): boolean {

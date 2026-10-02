@@ -34,7 +34,7 @@ import { dispatchClientFrame } from "../transport/frames.ts";
 import { dispatchSessionFrame } from "../runtime/mcp.ts";
 import { onUtterance } from "./deliver.ts";
 import { PAGE_SIZE } from "../runtime/pages.ts";
-import { DELTA_PAGES_MAX, FP_PAGES_MAX, wirePage } from "./attach.ts";
+import { DELTA_PAGES_MAX, FP_PAGES_MAX, wirePage, wirePrints } from "./attach.ts";
 import type { Sock } from "../transport/sock.ts";
 
 /* THE PAUSE BETWEEN A BODY AND ITS ENTER, shortened for this file. 250ms is the
@@ -558,6 +558,26 @@ test("fingerprints are capped at the newest FP_PAGES_MAX pages below the served 
   expect(ok.pages).toEqual([]);
   expect(ok.fp.n.length).toBe(FP_PAGES_MAX);
   expect(ok.fp.from).toBe(129 - FP_PAGES_MAX + 1);
+});
+
+/* The shown-page check outside an attach (GET /session/<id>/prints/<from>/<to>):
+ * a window scrolled or jumped below the pages the attach fingerprinted asks for
+ * exactly those, any depth, without re-attaching. Same numbers as the attach. */
+test("wirePrints: the same fingerprints for any range, capped per request and clamped to the tail", async () => {
+  const c = await boot();
+  const seqs: number[] = [];
+  for (let p = 0; p < 130; p++) seqs.push(p * PAGE_SIZE + 5);
+  plantSeqs(c, seqs);
+  const s = c.byHandle(PANE)!;
+  const ok = await attach(c, PANE, c.client(), { frontier: seqs[seqs.length - 1], verifyFrom: 0 });
+  const deep = wirePrints(s, 3, 7);
+  expect(deep.from).toBe(3);
+  expect(deep.n).toEqual([1, 1, 1, 1, 1]);
+  expect(deep.tailPage).toBe(129);
+  const same = wirePrints(s, ok.fp.from, 129);
+  expect({ n: same.n, m: same.m, h: same.h }).toEqual({ n: ok.fp.n, m: ok.fp.m, h: ok.fp.h });
+  expect(wirePrints(s, 0, 500).n.length, "one request answers at most FP_PAGES_MAX pages").toBe(FP_PAGES_MAX);
+  expect(wirePrints(s, 125, 500).n.length, "nothing past the tail").toBe(5);
 });
 
 test("an edit moves the row's rev, the patch line carries it, and the fingerprint sees it", async () => {
