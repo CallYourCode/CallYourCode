@@ -291,21 +291,11 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
 
   let lastActiveScrollH = -1;
 
-  // Pin state, tracked off the scroll event instead of read in the notify path:
-  // reading scrollTop/scrollHeight while the store is applying a change forces a
-  // synchronous layout on every push. The scroll listener runs after layout is
-  // already settled, so this read is free, and the notify path never measures.
-  let nearBottom = true;
-  const updateNearBottom = () => {
-    const el = cs.messageListScroll;
-    const px = Math.max(cs.OVERLAY_SCROLL_NEAR_PX, el.clientHeight / 3);
-    nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= px;
-  };
-  {
-    const el = cs.messageListScroll;
-    el.addEventListener('scroll', updateNearBottom, {passive: true});
-    deps.onTeardown(() => el.removeEventListener('scroll', updateNearBottom));
-  }
+  // Pin state (R8) is owned by the ScrollOwner (phase 2 step 2): cs.nearBottom()
+  // is tracked off the scroll event with the same formula this used locally, so
+  // the notify path still never measures (reading scrollTop/scrollHeight while the
+  // store applies a change forces a synchronous layout on every push). The owner's
+  // listener runs after layout is settled, exactly as the local one did.
 
   let restoredActive = false;
   const bootAt = Date.now();
@@ -433,7 +423,7 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       const prevSessionId = lastActiveSessionId;
       const prevEvCount = lastActiveEvCount;
       const prevScrollH = lastActiveScrollH;
-      const wasNearBottom = nearBottom;
+      const wasNearBottom = cs.nearBottom();
       const prevNewestTs = lastNewestTs;
       let newestTs = 0;
       let newer = 0;
@@ -461,12 +451,6 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
 
       requestAnimationFrame(() => {
         const scrollEl = cs.messageListScroll;
-        // An arrival follows the bottom only when the reader was near it AND is not
-        // driving the scroll: a finger dragging up (even near the bottom, even
-        // mid-settle) owns the offset, so a streamed reply must not yank it back
-        // to the end (the stuck-at-bottom report). A pinned reader not touching
-        // still follows, so a live reply keeps the view at the bottom as before.
-        const followBottom = wasNearBottom && !cs.readerDriving();
 
         if (owned || cs.graceOpen()) {
           if (
@@ -486,28 +470,25 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
           }
         } else if (
           s &&
-          s.id === prevSessionId &&
-          count > 0 &&
-          count !== prevMsgCount &&
-          followBottom
+          wasNearBottom &&
+          ((s.id === prevSessionId && count > 0 && count !== prevMsgCount) ||
+            (prevEvCount !== -1 && evCount > prevEvCount) ||
+            (s.id === prevSessionId &&
+              count === prevMsgCount &&
+              prevScrollH >= 0 &&
+              scrollEl.scrollHeight > prevScrollH))
         ) {
-          cs.scrollToBottom();
-        } else if (s && prevEvCount !== -1 && evCount > prevEvCount && followBottom) {
-          cs.scrollToBottom();
-        } else if (
-          s &&
-          s.id === prevSessionId &&
-          followBottom &&
-          count === prevMsgCount &&
-          prevScrollH >= 0 &&
-          scrollEl.scrollHeight > prevScrollH
-        ) {
-          cs.scrollToBottom();
+          // A row (or an overlay event, or late growth) arrived for a reader who
+          // was near the end: ONE notice to the scroll owner, which keeps the end
+          // unless a reader is driving -- a finger dragging up (even near the
+          // bottom, even mid-settle) owns the offset, so a streamed reply never
+          // yanks it back (the stuck-at-bottom report).
+          cs.followArrival();
         }
 
         if (s && dataState.mode === 'live' && cs.landingOwed()) cs.settleNow(s.id);
         lastActiveScrollH = s ? scrollEl.scrollHeight : -1;
-        updateNearBottom();
+        cs.recomputeNearBottom();
       });
 
       // The unread counter and the read report are store facts, not layout:

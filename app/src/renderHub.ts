@@ -6,8 +6,7 @@ import {
   renderMessages,
   messageVisibleRangeKey,
   messageDomEpoch,
-  setMessageWindowHook,
-  setMessageDividerHold
+  setMessageWindowHook
 } from '@/features/chat/surface/messageList';
 import {cyclog} from '@/shared/logging';
 import {logChatRepaint} from '@/features/chat/surface/machineScroll';
@@ -759,9 +758,6 @@ export function createRenderHub(deps: RenderHubDeps) {
       cs.stickyDates.refresh();
       audio.updateMessagePlays();
     });
-    // anchoredRewindow anchors on the unread divider only while the landing is
-    // actively holding it; feed it the surface's live hold flag.
-    setMessageDividerHold(cs.messageListInner, cs.holdDividerActive);
 
     if (scanKey !== lastScanKey) {
       lastScanKey = scanKey;

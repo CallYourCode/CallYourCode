@@ -9,18 +9,6 @@ import {paintServiceRowWidth} from './messageFrame';
 
 let expandedSeUuid: string | null = null;
 
-function revealExpanded(messageNode: HTMLElement) {
-  requestAnimationFrame(() => {
-    const sc = messageNode.closest<HTMLElement>('.cyc-overflow-y');
-    if (!sc) return;
-    const input = messageNode.closest('.cyc-thread')?.querySelector('.cyc-composer');
-    const limit =
-      (input ? input.getBoundingClientRect().top : sc.getBoundingClientRect().bottom) - 12;
-    const overflow = messageNode.getBoundingClientRect().bottom - limit;
-    if (overflow > 0) sc.scrollTop += overflow;
-  });
-}
-
 type SePillEl = HTMLDivElement & {cycPaint?: (open: boolean) => void};
 
 export const SERVICE_TEXT_UTILS =
@@ -154,7 +142,6 @@ export function sessionEventMessage(
     if (!wasOpen) {
       messageNode.classList.add('cyc-se-open');
       paint(true);
-      revealExpanded(messageNode);
     }
   });
   return messageNode;
@@ -193,8 +180,7 @@ export function sessionEventRunMessages(
   head.append(headContent);
   attachMessageHighlight(head);
   head.addEventListener('click', () => {
-    const open = wrap.classList.toggle('cyc-se-expanded');
-    if (open) revealExpanded(wrap);
+    wrap.classList.toggle('cyc-se-expanded');
   });
   const items = h('div', 'cyc-se-run-items hidden [.cyc-se-expanded_&]:block');
   items.append(
@@ -232,8 +218,7 @@ export function sessionEventFoldMessages(events: CycSessionEvent[]): HTMLDivElem
   head.append(headContent);
   attachMessageHighlight(head);
   head.addEventListener('click', () => {
-    const open = wrap.classList.toggle('cyc-se-expanded');
-    if (open) revealExpanded(wrap);
+    wrap.classList.toggle('cyc-se-expanded');
   });
   const items = h('div', 'cyc-se-run-items hidden [.cyc-se-expanded_&]:block');
   items.append(...events.map((ev) => sessionEventMessage(ev)));

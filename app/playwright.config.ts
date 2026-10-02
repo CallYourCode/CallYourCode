@@ -61,6 +61,9 @@ function offlineConfig() {
 
   return defineConfig({
     testDir: './e2e/offline',
+    // The scroll-redesign matrix runs only under its own config
+    // (scroll-matrix.config.ts: Chromium and WebKit, no guard floor).
+    testIgnore: /scroll-matrix\.spec\.ts$/,
     fullyParallel: false,
     workers: 4,
     timeout: 90_000,

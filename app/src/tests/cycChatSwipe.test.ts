@@ -33,7 +33,10 @@ vi.mock('../features/chat/surface/messageList', () => ({
   attachStickyDates: () => ({refresh: vi.fn()}),
   scrollMessageIntoView: vi.fn(() => false),
   messageVisibleRangeKey: () => '0:0',
-  setMessageWindowHook: vi.fn()
+  setMessageWindowHook: vi.fn(),
+  setMessageScrollOwner: vi.fn(),
+  messageListBanked: () => false,
+  bankMessageShift: vi.fn()
 }));
 vi.mock('../shared/smoothScroll', () => ({smoothScrollTo: vi.fn()}));
 vi.mock('../features/chat/scrolling', () => ({trackComposerHeight: () => () => {}}));

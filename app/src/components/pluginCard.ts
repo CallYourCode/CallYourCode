@@ -499,6 +499,9 @@ export function createPluginCard(title: string, onRefresh: () => void | Promise<
       el.classList.remove('cyc-plugincard-flash');
       void el.offsetWidth;
       el.classList.add('cyc-plugincard-flash');
+      // Not a writer of the message scroller (SCROLL-DESIGN W17, excluded from
+      // its ScrollOwner): a plugin card lives in the sessions list pane, outside
+      // .cyc-message-list-scroll, so this can only move that pane's ancestors.
       el.scrollIntoView({block: 'nearest', behavior: 'smooth'});
       clearTimeout(flashTimer);
       flashTimer = window.setTimeout(() => el.classList.remove('cyc-plugincard-flash'), 4000);

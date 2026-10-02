@@ -8,7 +8,14 @@ import type {CycEngineSession} from '@/engine/store';
 import type {ReadMarker} from '@/engine/store/readState';
 import {sessionState, dataState} from '@/sessionState';
 import {h} from '@/components/domHelpers';
-import {clearMessages, attachStickyDates, rewindowMessages} from './messageList';
+import {
+  clearMessages,
+  attachStickyDates,
+  rewindowMessages,
+  setMessageScrollOwner,
+  messageListBanked,
+  bankMessageShift
+} from './messageList';
 import {scrollSurface} from '@/shared/dom';
 import {cyclog} from '@/shared/logging';
 import {clampNumber} from '@/shared/numbers';
@@ -21,6 +28,7 @@ import {clearNotifications, reportRead} from '@/engine/pushNotify';
 import {active, allSessions, selectTabFor} from '@/sessionSelectors';
 import {createChatChrome} from './chatChrome';
 import {installHistoryPager} from './historyPager';
+import {createScrollOwner} from './scrollOwner';
 import {createReaderLanding} from './readerLanding';
 import type {PlayReason} from './audioPlayback';
 import {
@@ -28,8 +36,7 @@ import {
   isMachineTop as machineTopMatches,
   machineTopOf,
   logScrollWrite,
-  logScrollUpUser,
-  logBottomPin
+  logScrollUpUser
 } from './machineScroll';
 import {onHorizontalSwipe} from '@/features/gestures';
 
@@ -470,6 +477,9 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     const s = active();
     if (!s || !messageListInner.childElementCount) return;
     if (!graceHeldGrowth || firstUnreadId !== undefined) return;
+    // The reader owns the offset (a finger down, their scroll or momentum
+    // live): no re-pin under them.
+    if (scrollOwner.driving()) return;
     const nearPx = Math.max(OVERLAY_SCROLL_NEAR_PX, messageListScroll.clientHeight / 3);
     const dist = distToEnd();
     if (dist > 1 && dist <= nearPx) scrollToBottom();
@@ -504,18 +514,12 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   // same amount so what they are reading stays put. No timers on this path.
   const PIN_PX = 4;
   let pinnedToBottom = false;
+  // The list and box heights as last laid out for the resize observer or the
+  // scroll listener: a change past them is not yet absorbed (no re-pin has run
+  // for it), and a scroll event read after it happened in the same frame.
+  let listHeightSeen = 0;
+  let boxHeightSeen = 0;
   let padTopSeen = 0;
-  let pointerHeld = false;
-  // True from touchstart until the last finger lifts. On a touch build Chrome
-  // fires pointercancel the instant it claims a vertical pan as a native scroll,
-  // which clears `pointerHeld` while the finger is STILL dragging; a bottom re-pin
-  // (onListResize below, or the storeBindings rAF on an arrival) firing in that
-  // gap snapped the reader straight back to the end every frame content was
-  // settling -- the stuck-at-bottom report. The raw touch sequence stays down
-  // through the whole pan, so it is the reliable "a finger owns the offset" signal.
-  let touchHeld = false;
-  // A finger or pointer is physically on the surface right now.
-  const readerHolding = () => pointerHeld || touchHeld;
   const notePinAfterWrite = () => {
     pinnedToBottom = distToEnd() <= PIN_PX;
     padTopSeen = messageListPadTop.offsetHeight;
@@ -549,6 +553,60 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     notePinAfterWrite();
   };
   const isMachineTop = (top: number) => machineTopMatches(messageListScroll, top);
+  // The message re-window's write (anchoredRewindow W5/W6), performed by the
+  // ScrollOwner: the same raw tagged, machine-marked write the re-window did
+  // inline. It does not re-derive the pin; the scroll listener confirms it.
+  const rewindowWrite = (v: number, tag: string) => {
+    const from = messageListScroll.scrollTop;
+    messageListScroll.scrollTop = v;
+    logScrollWrite(messageListScroll, tag, from, messageListScroll.scrollTop);
+    markMachineTop(messageListScroll);
+  };
+
+  // Run a paint holding the reader's seat: capture on-screen anchors (by mid,
+  // rect based) just before it, and return how far the first one that survives
+  // drifted on screen across it. In order: the unread DIVIDER when on screen (a
+  // landing holds it a third down; a message arriving or older history loading
+  // reindexes the rows, so the generic anchor can miss and slide it off its
+  // seat); the first message row at or below the fold; the topmost mounted row
+  // (older history prepended shifts it DOWN by the height carried before, a tail
+  // append leaves it PUT). Null when none survived (a trim, a chat switch).
+  //
+  // Found and held by SCREEN rect, never by row.offsetTop: offsetTop is measured
+  // against the row's positioned GROUP, not the scroll content, so comparing it
+  // to scrollTop picked an arbitrary row, and re-seating by it put the reader's
+  // row wherever its group happened to sit (arrival-held: 140-220 px).
+  const holdAcrossPaint = (paint: () => void): number | null => {
+    const boxTop = messageListScroll.getBoundingClientRect().top;
+    const held: {mid: string; top: number}[] = [];
+    const note = (row: HTMLElement | null | undefined) => {
+      const mid = row?.dataset.mid;
+      if (row && mid) held.push({mid, top: row.getBoundingClientRect().top - boxTop});
+    };
+    const dividerRow = messageListScroll.querySelector<HTMLElement>(
+      '.cyc-message[data-cyc-unread][data-mid]'
+    );
+    if (dividerRow) {
+      const dr = dividerRow.getBoundingClientRect();
+      if (dr.bottom > boxTop && dr.top < boxTop + messageListScroll.clientHeight) note(dividerRow);
+    }
+    const rows = messageListScroll.querySelectorAll<HTMLElement>('.cyc-message[data-mid]');
+    for (const row of rows) {
+      if (row.getBoundingClientRect().top >= boxTop) {
+        note(row);
+        break;
+      }
+    }
+    note(rows[0]);
+    paint();
+    for (const a of held) {
+      const el = messageListInner.querySelector<HTMLElement>(
+        `.cyc-message[data-mid="${CSS.escape(a.mid)}"]`
+      );
+      if (el) return el.getBoundingClientRect().top - boxTop - a.top;
+    }
+    return null;
+  };
 
   let bracketMoves = 0;
   const bracketMessageRender = (id: string, paint: () => void) => {
@@ -560,132 +618,28 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       paint();
       return;
     }
-    // A pinned reader takes the SAME on-screen-anchor hold as a reader in
-    // history: hold the topmost mounted row's seat across the paint, then let the
-    // post-layout pin (the storeBindings rAF and the onListResize re-pin) settle
-    // the view at the true bottom, once, exactly as the live build does. An
-    // earlier revision pinned to the bottom HERE, synchronously, off the
-    // paint-time scrollHeight; on a sliding window that height is a from-estimate
-    // rebuild, so the pin overshot and the later measured-height settle fired a
-    // SECOND re-pin -- two scrolls per message, worse than live's one (D1).
-    // Deferring the pin to after layout lands it once at the settled height.
-    //
-    // Pin the on-screen position across the render: anchor to the first message
-    // whose top sits at or below the fold, captured immediately before the paint.
+    // Paint, then ONE owner settle (phase 3 step 6). The reader's seat is held
+    // by an on-screen anchor captured just before the paint and re-found by mid
+    // after it; the drift it shows is handed to the owner, which banks it in the
+    // spacer while a reader drives and otherwise writes it once and re-windows
+    // once. A pinned reader takes the SAME hold: the post-layout pin (the arrival
+    // follow, the resize settle) then lands the end once at the settled height.
+    // An earlier revision pinned to the bottom HERE, off the paint-time
+    // scrollHeight; on a sliding window that height is a from-estimate rebuild, so
+    // the pin overshot and the measured-height settle re-pinned a SECOND time --
+    // two scrolls per message (D1).
     const before = messageListScroll.scrollTop;
     const hBefore = messageListScroll.scrollHeight;
-    // The anchor: the first message row at or below the fold, by data-mid (a
-    // prepend re-window can recreate its node, so it is re-found by mid, not
-    // trusted by reference) and its on-screen top BEFORE the paint (rect based).
-    const boxTop = messageListScroll.getBoundingClientRect().top;
-    // The topmost mounted message row and its on-screen top, to tell a PREPEND
-    // (older history above the fold shifts it down) apart from a TAIL append (a
-    // message below the fold leaves it exactly where it is) in the fallback below.
-    const firstRow = messageListScroll.querySelector<HTMLElement>('.cyc-message[data-mid]');
-    const firstRowMid = firstRow?.dataset.mid ?? null;
-    const firstRowScreenTop = firstRow ? firstRow.getBoundingClientRect().top - boxTop : 0;
-    let anchorMid: string | null = null;
-    let anchorDelta = 0;
-    let anchorScreenTop = 0;
-    // Prefer the unread DIVIDER as the store-paint anchor when it is on screen:
-    // a landing holds it a third down, and a message arriving (or older history
-    // loading) reindexes the rows, so the generic first-below-the-fold anchor can
-    // miss and fall back to carrying the raw height change, sliding the divider
-    // off its seat and out of view. Anchoring on the divider by its stable mid
-    // keeps its seat across the paint.
-    const dividerRow = messageListScroll.querySelector<HTMLElement>('.cyc-message[data-cyc-unread][data-mid]');
-    if (dividerRow) {
-      const dr = dividerRow.getBoundingClientRect();
-      if (dr.bottom > boxTop && dr.top < boxTop + messageListScroll.clientHeight) {
-        anchorMid = dividerRow.dataset.mid ?? null;
-        anchorDelta = dividerRow.offsetTop - before;
-        anchorScreenTop = dr.top - boxTop;
-      }
-    }
-    if (anchorMid === null) {
-      for (const row of messageListScroll.querySelectorAll<HTMLElement>('.cyc-message[data-mid]')) {
-        if (row.offsetTop >= before) {
-          anchorMid = row.dataset.mid ?? null;
-          anchorDelta = row.offsetTop - before;
-          anchorScreenTop = row.getBoundingClientRect().top - boxTop;
-          break;
-        }
-      }
-    }
-    paint();
-    const findAnchor = (): HTMLElement | null =>
-      anchorMid
-        ? messageListInner.querySelector<HTMLElement>(`.cyc-message[data-mid="${CSS.escape(anchorMid)}"]`)
-        : null;
-    const reseated = findAnchor();
+    const drift = holdAcrossPaint(paint);
     // The paint already re-seated the scroll itself (messageList's front-prepend
-    // hold, which rides the virtualizer's measured offsets): defer to it. The
-    // offsetTop math below cannot preserve a prepend anyway -- row.offsetTop is
-    // measured against the row's positioned GROUP, not the scroll content, so a
-    // prepend that pushes the whole group down leaves offsetTop unchanged and
-    // this computes a zero move, snapping the view back to the top. When the
-    // paint left scrollTop where it was (an append, an edit, a growing reply),
-    // this holds the anchor as before.
-    if (messageListScroll.scrollTop !== before) {
-      // paint moved it: keep the paint's re-seat.
-    } else if (reseated) {
-      // The anchor survived (possibly as a fresh node): re-seat so it keeps the
-      // same offset from the top.
-      messageListScroll.scrollTop = reseated.offsetTop - anchorDelta;
-    } else if (firstRowMid) {
-      // No fold anchor survived. Decide top-growth vs bottom-growth from the
-      // topmost mounted row's SCREEN position: older history prepended shifts it
-      // DOWN (hold it -- the rect delta equals the height carried before), a
-      // tail append leaves it PUT (delta ~0, no move), so a message arriving
-      // while the reader sits in history never shoves the view down a row. When
-      // that row is gone (a trim, a chat switch), fall back to carrying the
-      // scrollHeight growth as before.
-      const fa = messageListInner.querySelector<HTMLElement>(
-        `.cyc-message[data-mid="${CSS.escape(firstRowMid)}"]`
-      );
-      if (fa) {
-        const delta = fa.getBoundingClientRect().top - boxTop - firstRowScreenTop;
-        if (Math.abs(delta) > 0.5) messageListScroll.scrollTop += delta;
-      } else {
-        const grew = messageListScroll.scrollHeight - hBefore;
-        if (grew) messageListScroll.scrollTop = messageListScroll.scrollTop + grew;
-      }
+    // hold under a live selection, which rides the virtualizer's offsets): defer.
+    if (messageListScroll.scrollTop === before) {
+      scrollOwner.settlePaint(drift ?? messageListScroll.scrollHeight - hBefore);
     } else {
-      // The anchor is gone -- an upward-growing list shifted its history down by
-      // the height added at the top, so carry that growth into the offset.
-      const grew = messageListScroll.scrollHeight - hBefore;
-      if (grew) messageListScroll.scrollTop = messageListScroll.scrollTop + grew;
-    }
-    // The re-seat above moved the view to hold the anchor, but the paint sized
-    // the virtual window (and the top spacer) at the PRE-re-seat offset, so for a
-    // frame the reader's rows sit against a stale spacer -- they shift by the
-    // re-seat delta, or the viewport meets an unmounted row that never recovers
-    // (the row-shift/unmount while older history loads, on a store prepend).
-    // Only when the re-seat actually moved the view.
-    if (Math.abs(messageListScroll.scrollTop - before) > 1) {
-      // Recompute the window at the re-seated offset so the coverage net mounts
-      // the viewport and the top spacer catches up.
-      rewindowMessages(messageListInner);
-      // The offsetTop re-seat and rewindowMessages each key off a possibly
-      // different topmost row, and a sticky date/pad above the fold can change
-      // height as older rows arrive, so the reader's anchor lands a few tens of
-      // px off its pre-paint screen top (the row-shift-while-older-loads
-      // residual). Pin it back to that exact top -- rect based, re-found by mid,
-      // a single deterministic correction so it cannot oscillate -- then
-      // re-window once more so the window covers the corrected offset (a moved
-      // scrollTop against a stale window meets an unmounted row).
-      const held = pinnedToBottom ? null : findAnchor();
-      if (held) {
-        const drift = held.getBoundingClientRect().top - boxTop - anchorScreenTop;
-        if (Math.abs(drift) > 0.5) {
-          messageListScroll.scrollTop += drift;
-          rewindowMessages(messageListInner);
-        }
-      }
+      logScrollWrite(messageListScroll, 'bracket', before, messageListScroll.scrollTop);
+      markMachineTop(messageListScroll);
     }
     const after = messageListScroll.scrollTop;
-    logScrollWrite(messageListScroll, keep ? 'bracket' : 'bracket.fresh', before, after);
-    markMachineTop(messageListScroll);
     // A paint never speaks for the reader: it can confirm a pin (a shrink
     // clamped the view to the end) but not drop one. The top pad may already
     // have grown earlier in this same render (the agents bar), which leaves the
@@ -712,56 +666,42 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   // Not pinned: carry a top pad change so the rows under the reader's eyes do
   // not slide. A finger on the surface owns the offset until it lifts.
   const onListResize = () => {
+    listHeightSeen = messageListScroll.scrollHeight;
+    boxHeightSeen = messageListScroll.clientHeight;
     const padNow = messageListPadTop.offsetHeight;
     const padDelta = padNow - padTopSeen;
     padTopSeen = padNow;
-    // A finger (or pointer) on the surface owns the offset until it lifts: never
-    // re-pin or re-seat under an active drag. `readerHolding` stays true for the
-    // whole touch even after Chrome's mid-pan pointercancel, which `pointerHeld`
-    // alone did not (the stuck-at-bottom snap-back).
-    if (readerHolding() || !messageListInner.childElementCount) return;
-    // Hold the unread divider on its landing seat through async row-height changes
-    // ABOVE the fold. A waveform/image/markdown row hydrating a beat after the
-    // open reflows its height; when that does not change the visible index range
-    // the virtualizer fires no re-window, so nothing re-seats the divider and it
-    // slides off screen (measured on the larger viewports, where more hydratable
-    // rows mount above the fold). This observer DOES see the content resize, so
-    // while the landing holds (until the reader's own scroll releases it) re-seat
-    // the divider a third of the way down and re-window so it stays mounted.
-    if (holdDivider && !pinnedToBottom) {
-      const divider = messageListInner.querySelector<HTMLElement>('[data-cyc-unread]');
-      if (divider) {
-        // A live selection means the reader is here and reading: end the hold
-        // and never scroll or re-window the row their selection lives in.
-        if (selectionInList()) {
-          endDividerHold();
-          return;
-        }
-        const seat = messageListScroll.clientHeight / 3;
-        const now =
-          divider.getBoundingClientRect().top - messageListScroll.getBoundingClientRect().top;
-        if (Math.abs(now - seat) > 1) {
-          silentScrollTo(messageListScroll.scrollTop + (now - seat), 'resize.divider');
-          rewindowMessages(messageListInner);
-        }
-        return;
-      }
+    if (!messageListInner.childElementCount) return;
+    // The owner settles every content/pad/box resize (phase 3 step 5): it
+    // re-seats a held divider, keeps a pinned end, or carries a top-pad change
+    // for a reader in history -- and while a reader drives it writes nothing.
+    scrollOwner.settleResize(padDelta);
+  };
+  // Hold the unread divider on its landing seat through async row-height changes
+  // ABOVE the fold. A waveform/image/markdown row hydrating a beat after the
+  // open reflows its height; when that does not change the visible index range
+  // the virtualizer fires no re-window, so nothing re-seats the divider and it
+  // slides off screen (measured on the larger viewports, where more hydratable
+  // rows mount above the fold). The resize observer DOES see the content resize,
+  // so while the landing holds (until the reader's own scroll releases it) the
+  // owner re-seats the divider a third of the way down and re-windows so it
+  // stays mounted. False when no divider is mounted (nothing to hold).
+  const reseatDivider = (): boolean => {
+    const divider = messageListInner.querySelector<HTMLElement>('[data-cyc-unread]');
+    if (!divider) return false;
+    // A live selection means the reader is here and reading: end the hold
+    // and never scroll or re-window the row their selection lives in.
+    if (selectionInList()) {
+      endDividerHold();
+      return true;
     }
-    if (pinnedToBottom) {
-      if (distToEnd() > 0) {
-        // The finger has lifted (readerHolding is false here) but a drag's scroll
-        // event is async and coalesced: if the reader input is still fresh, that
-        // drag may not have dropped the pin yet, so re-pinning now would snap it
-        // back to the end. Defer and NAME the write so a recurrence is not a ghost.
-        if (readerInputPlausible()) {
-          logBottomPin('toBottom', 'resize.reader-active', messageListScroll.scrollTop, messageListScroll.scrollHeight);
-        } else {
-          scrollToBottom('resize.pin');
-        }
-      }
-    } else if (padDelta) {
-      silentScrollTo(messageListScroll.scrollTop + padDelta, 'resize.pad');
+    const seat = messageListScroll.clientHeight / 3;
+    const now = divider.getBoundingClientRect().top - messageListScroll.getBoundingClientRect().top;
+    if (Math.abs(now - seat) > 1) {
+      silentScrollTo(messageListScroll.scrollTop + (now - seat), 'resize.divider');
+      rewindowMessages(messageListInner);
     }
+    return true;
   };
   if (typeof ResizeObserver !== 'undefined') {
     const listResize = new ResizeObserver(onListResize);
@@ -772,67 +712,33 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     deps.onTeardown(() => listResize.disconnect());
   }
 
-  const holdPointer = () => {
-    pointerHeld = true;
-    endDividerHold();
-  };
-  const releasePointer = () => {
-    pointerHeld = false;
-  };
-  const holdTouch = () => {
-    touchHeld = true;
-    endDividerHold();
-  };
-  // The finger owns the offset until the LAST touch lifts (a multi-touch release
-  // leaves one finger still down).
-  const releaseTouch = (e: TouchEvent) => {
-    if (!e.touches || e.touches.length === 0) touchHeld = false;
-  };
   // Any user interaction ends the divider hold at once, so it can never re-seat
-  // (and wipe a selection) once the reader is doing anything in the chat.
+  // (and wipe a selection) once the reader is doing anything in the chat. The
+  // reader's hands themselves (finger/pointer down, fresh input) are tracked by
+  // the ScrollOwner.
   const endHoldOnInput = () => endDividerHold();
   const endHoldOnSelection = () => {
     if (selectionInList()) endDividerHold();
   };
-  messageListScroll.addEventListener('pointerdown', holdPointer, {passive: true});
+  messageListScroll.addEventListener('pointerdown', endHoldOnInput, {passive: true});
   messageListScroll.addEventListener('wheel', endHoldOnInput, {passive: true});
-  messageListScroll.addEventListener('touchstart', holdTouch, {passive: true});
-  window.addEventListener('pointerup', releasePointer, {passive: true});
-  window.addEventListener('pointercancel', releasePointer, {passive: true});
-  window.addEventListener('touchend', releaseTouch, {passive: true});
-  window.addEventListener('touchcancel', releaseTouch, {passive: true});
+  messageListScroll.addEventListener('touchstart', endHoldOnInput, {passive: true});
   window.addEventListener('keydown', endHoldOnInput, {passive: true});
   document.addEventListener('selectionchange', endHoldOnSelection, {passive: true});
   deps.onTeardown(() => {
-    window.removeEventListener('pointerup', releasePointer);
-    window.removeEventListener('pointercancel', releasePointer);
-    window.removeEventListener('touchend', releaseTouch);
-    window.removeEventListener('touchcancel', releaseTouch);
     window.removeEventListener('keydown', endHoldOnInput);
     document.removeEventListener('selectionchange', endHoldOnSelection);
   });
-
-  // The last time a real reader input (a finger drag or a wheel) touched the
-  // scroller. The readerTook guard uses it as evidence that a reader is
-  // plausibly driving a scroll: a touchmove/wheel within ~150ms, or a pointer
-  // still held. Without evidence, an untagged app write (a keyboard-inset
-  // clearance step) or a browser adjustment (clamp, scroll anchoring) can look
-  // exactly like a reader taking the open landing, and must not.
-  const READER_INPUT_MS = 150;
-  let lastReaderInputAt = 0;
-  const noteReaderInput = () => {
-    lastReaderInputAt = Date.now();
-  };
-  messageListScroll.addEventListener('touchmove', noteReaderInput, {passive: true});
-  messageListScroll.addEventListener('wheel', noteReaderInput, {passive: true});
-  const readerInputPlausible = () =>
-    readerHolding() || Date.now() - lastReaderInputAt <= READER_INPUT_MS;
 
   const chrome = createChatChrome({
     chat: deps.chatEl,
     scroll: messageListScroll,
     nearBottomPx: OVERLAY_SCROLL_NEAR_PX,
-    closeSettleGrace
+    closeSettleGrace,
+    // W13 go-to-bottom behind the owner's jump (phase 2 step 3). The handler only
+    // fires at click time, long after the owner is created, so the reference is
+    // safe. The owner runs the existing smooth-scroll routine verbatim.
+    wrapJump: (run) => scrollOwner.jump('to-bottom', run)
   });
   const {setNewBelow, updateGoDown, hideUnreadBanner, showUnreadBanner} = chrome;
 
@@ -904,7 +810,10 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   // Pass the current anchor id so the landing can mount the divider row when it
   // sits outside the virtual window (see readerLanding.scrollToFirstUnread).
   const scrollToFirstUnread = (): boolean => {
-    const ok = scrollToFirstUnreadRaw(firstUnreadId);
+    // W14 unread landing behind the owner's jump (phase 2 step 3). This runs only
+    // at settle/open time, after the owner is created; the owner runs the existing
+    // landing routine verbatim and returns its result.
+    const ok = scrollOwner.jump('unread-landing', () => scrollToFirstUnreadRaw(firstUnreadId));
     if (ok && firstUnreadId !== undefined) {
       holdDivider = true;
       if (holdDividerTimer !== null) clearTimeout(holdDividerTimer);
@@ -944,6 +853,20 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       // (or an untagged writer). readerTrackTop still holds the PREVIOUS offset.
       const readerUp = !machine && top < readerTrackTop - 1;
       if (readerUp) logScrollUpUser(readerTrackTop, top);
+      // A CLAMP is not the reader: the content shrank under a view at its end
+      // and the browser pulled the offset up to the new end, so it lands AT the
+      // end. It must never drop the pin. It did at nearly every open (rows that
+      // measure shorter than their estimate shrink the list right after the
+      // landing), so a pinned reader was left unpinned and the next resize (the
+      // phone keyboard opening, a late image) no longer kept the end.
+      // The clamp happened in the box it was laid out in: when the box shrank
+      // before this event was delivered (the keyboard opening right as a row
+      // measured shorter), it sits at the end of the OLD box height, and the
+      // new box reads it as a reader's scroll 320 px up (the pin dropped and
+      // the keyboard and the reply were never followed).
+      const atSeenBoxEnd = clientH < boxHeightSeen - 1 && height - top - boxHeightSeen <= 1;
+      const clamp =
+        readerUp && height < readerTrackHeight - 1 && (distToEnd() <= 1 || atSeenBoxEnd);
 
       // The reader's own scroll ends the divider hold: a real gesture owns the
       // offset from here on. Machine writes (the hold's own re-seat, the landing)
@@ -955,7 +878,10 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
         openToken &&
         !openToken.readerTook &&
         !machine &&
-        readerInputPlausible() &&
+        // Evidence a reader drove it (a finger/pointer down, or a touch/wheel
+        // within the last breath): an untagged app write or a browser clamp
+        // can look exactly like a reader taking the open landing, and must not.
+        scrollOwner.readerInputFresh() &&
         top < readerTrackTop - 1 &&
         height >= readerTrackHeight - 1 &&
         clientH <= readerTrackClientH + 1
@@ -973,12 +899,25 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       // so it can only confirm a pin, never drop one. A reader's UPWARD drag
       // leaves the bottom AT ONCE -- even a few px, before it clears PIN_PX --
       // so a re-pin cannot race its (async, coalesced) scroll event back to the end.
-      if (readerUp) pinnedToBottom = false;
-      else if (!machine) pinnedToBottom = distToEnd() <= PIN_PX;
-      else if (distToEnd() <= PIN_PX) pinnedToBottom = true;
+      // A scroll that reached the end of the list as last laid out is at the
+      // end, even when this event is read after an arrival grew the list in
+      // the same frame (the reader who had just come back to the end lost the
+      // pin and never followed the reply), and so is one at the end of the box
+      // as last laid out, read after the box shrank (the open landing's scroll
+      // event delivered after the keyboard opened).
+      if (readerUp && !clamp) pinnedToBottom = false;
+      else if (!machine && !clamp) {
+        const grewUnseen = listHeightSeen > 0 && height > listHeightSeen + 1;
+        pinnedToBottom =
+          distToEnd() <= PIN_PX ||
+          atSeenBoxEnd ||
+          (grewUnseen && top + clientH >= listHeightSeen - PIN_PX);
+      } else if (distToEnd() <= PIN_PX) pinnedToBottom = true;
       readerTrackTop = top;
       readerTrackHeight = height;
       readerTrackClientH = clientH;
+      listHeightSeen = height;
+      boxHeightSeen = clientH;
     },
     {passive: true}
   );
@@ -1155,13 +1094,48 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     deps.render();
   };
 
+  // The ScrollOwner for this message scroller (phase 2). Step 1: it owns nothing
+  // yet. It wraps the existing writers and exposes the readers' questions
+  // (R7 isMachineScroll, R8 nearBottom, state()) so later steps can reroute them
+  // through one place; today each answer is identical to the scattered flags.
+  const scrollOwner = createScrollOwner({
+    scroll: messageListScroll,
+    silentScrollTo,
+    scrollToBottom,
+    rewindowWrite,
+    rewindow: () => rewindowMessages(messageListInner),
+    listBanked: () => messageListBanked(messageListInner),
+    isMachineScroll: isMachineTop,
+    nearBottomPx: () => Math.max(OVERLAY_SCROLL_NEAR_PX, messageListScroll.clientHeight / 3),
+    isPinned: () => pinnedToBottom,
+    distToEnd,
+    reseatDivider,
+    bankShift: (d) => bankMessageShift(messageListInner, d),
+    isLanding: () => openLanding,
+    isDividerHeld: () => holdDivider,
+    onTeardown: deps.onTeardown
+  });
+
+  // The owner is the message re-window's one writer (phase 3 step 4): the
+  // re-window asks it whether a reader is driving (then it banks, never writes),
+  // whether the end is pinned, and hands it the write.
+  setMessageScrollOwner(messageListInner, {
+    driving: scrollOwner.driving,
+    pinned: scrollOwner.pinned,
+    dividerHeld: () => holdDivider,
+    write: scrollOwner.rewindowWrite
+  });
+
   const historyPager = installHistoryPager({
     container: messageListScroll,
     messages: messageListInner,
     render: deps.render,
     ownsOpening: openOwned,
     isAnchoring: () => anchorHopPending,
-    isMachineScroll: isMachineTop
+    // R7 routed through the ScrollOwner (phase 2 step 2): the pager asks the owner
+    // "was this a machine re-seat?" instead of reading the tag directly. The owner
+    // delegates to the same machine-top tag, so the answer is identical.
+    isMachineScroll: (top) => scrollOwner.isMachineScroll(top)
   });
   deps.onTeardown(historyPager.destroy);
 
@@ -1270,6 +1244,8 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       readerTrackTop = messageListScroll.scrollTop;
       readerTrackHeight = messageListScroll.scrollHeight;
       readerTrackClientH = messageListScroll.clientHeight;
+      listHeightSeen = messageListScroll.scrollHeight;
+      boxHeightSeen = messageListScroll.clientHeight;
 
       setNewBelow(0);
 
@@ -1378,6 +1354,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
           readerTook: boolean;
           scrolledUp: boolean;
           pinned: boolean;
+          ownerState: string;
         };
       }
     ).__cycScrollDiag = () => ({
@@ -1386,7 +1363,10 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       landingOwed: openLanding,
       readerTook: !!openToken?.readerTook,
       scrolledUp: !!openToken?.readerTook,
-      pinned: pinnedToBottom
+      pinned: pinnedToBottom,
+      // Phase 2 step 1: the ScrollOwner's derived state (informational; nothing
+      // changes behaviour off it yet).
+      ownerState: scrollOwner.state()
     });
     // Whether the unread-divider hold is still active. The hold must end at the
     // first user interaction and after a short bounded window (fix-sync FIX 6),
@@ -1418,13 +1398,21 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     refreshSettleGrace,
     silentScrollTo,
     isMachineTop,
+    // R8 (storeBindings): is the reader near the end so a live reply keeps the
+    // view pinned? Answered by the ScrollOwner (phase 2 step 2), tracked off the
+    // scroll event with the same formula and the same no-measure-in-notify
+    // property storeBindings had locally.
+    nearBottom: scrollOwner.nearBottom,
+    recomputeNearBottom: scrollOwner.recomputeNearBottom,
     bracketMessageRender,
     scrollToBottom,
     releaseBottomPin,
-    // True while a reader is plausibly driving the scroll (a finger/pointer down,
-    // or a touch/wheel within the last ~150ms). storeBindings reads this so an
-    // arrival never re-pins the view to the bottom out from under an active drag.
-    readerDriving: readerInputPlausible,
+    // A row arrived for a reader who was near the end (storeBindings, R8): the
+    // owner re-pins unless a reader is driving (phase 3 step 5).
+    followArrival: scrollOwner.followArrival,
+    // A deliberate move owned for its whole duration (the jump-to-message
+    // travel); it yields the moment a finger lands.
+    ownerJump: scrollOwner.jump,
     setNewBelow,
     updateGoDown,
     hideUnreadBanner,
@@ -1442,10 +1430,6 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     readerTook,
     graceOpen,
     holdGraceGrowth,
-    // Whether the unread-divider landing is still actively holding the divider
-    // on screen. anchoredRewindow reads this (via setMessageDividerHold) so it
-    // anchors on the divider only during the hold, never after.
-    holdDividerActive: () => holdDivider,
     firstUnread,
     newBelowCount,
     openPaintIsPending,

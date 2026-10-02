@@ -109,7 +109,12 @@ function mk(over: Partial<StoreBindingsDeps> = {}) {
     holdGraceGrowth: vi.fn(),
     landingOwed: () => false,
     readerTook: () => false,
-    readerDriving: () => false,
+    followArrival: vi.fn(),
+    // R8 now answered by the ScrollOwner (phase 2 step 2). The old internal
+    // tracker started true and no scroll event fired in this test, so it stayed
+    // true throughout; keep that exact value.
+    nearBottom: () => true,
+    recomputeNearBottom: vi.fn(),
     firstUnread: (): number | undefined => undefined,
     scrollToFirstUnread: vi.fn(() => true),
     scrollToBottom: vi.fn(),
