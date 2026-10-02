@@ -105,6 +105,13 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
   // Released by the last lifted finger, the pointer's up/cancel, the window
   // losing focus or the page going hidden mid-drag (either can swallow the
   // up), so no hold is left stuck down.
+  //
+  // A finger's touchend and touchcancel go to the node it LANDED on, even once
+  // that node has left the DOM (a far scroll re-windows the finger's own row
+  // away), and a detached node's events never reach the window: the hold stuck
+  // down and a pinned reader stopped following replies. So the lift is also
+  // heard on each finger's own target, and a new touch sequence anywhere (one
+  // finger down) proves every earlier finger lifted.
   let pointerHeld = false;
   let touchHeld = false;
   const holding = () => pointerHeld || touchHeld;
@@ -117,8 +124,22 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
   const notePointer = () => {
     pointerHeld = true;
   };
-  const noteTouch = () => {
+  const touchTargets = new Set<EventTarget>();
+  const noteTouch = (e: Event) => {
     touchHeld = true;
+    const t = e.target;
+    if (!t || touchTargets.has(t)) return;
+    touchTargets.add(t);
+    t.addEventListener('touchend', releaseTouch, {passive: true});
+    t.addEventListener('touchcancel', releaseTouch, {passive: true});
+  };
+  const dropTouch = () => {
+    touchHeld = false;
+    for (const t of touchTargets) {
+      t.removeEventListener('touchend', releaseTouch);
+      t.removeEventListener('touchcancel', releaseTouch);
+    }
+    touchTargets.clear();
   };
   const noteInput = () => {
     lastInputAt = Date.now();
@@ -177,11 +198,20 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     if (deps.listBanked() || (deps.isPinned() && deps.distToEnd() > 0.5)) deps.rewindow();
   };
   // The finger owns the offset until the LAST touch lifts (a multi-touch
-  // release leaves one finger still down).
-  const releaseTouch = (e: Event) => {
+  // release leaves one finger still down). A lift on a still-attached target
+  // is heard there and again on the window: handled once.
+  let lastRelease: Event | null = null;
+  function releaseTouch(e: Event) {
+    if (e === lastRelease) return;
+    lastRelease = e;
     const touches = (e as TouchEvent).touches;
-    if (!touches || touches.length === 0) touchHeld = false;
+    if (!touches || touches.length === 0) dropTouch();
     settle();
+  }
+  // The first finger of a new sequence: any hold still down is stale.
+  const newTouchSequence = (e: Event) => {
+    const touches = (e as TouchEvent).touches;
+    if (touchHeld && touches && touches.length === 1) dropTouch();
   };
   const releasePointer = () => {
     pointerHeld = false;
@@ -189,12 +219,13 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
   };
   const releaseAll = () => {
     pointerHeld = false;
-    touchHeld = false;
+    dropTouch();
     settle();
   };
   const releaseOnHidden = () => {
     if (document.visibilityState === 'hidden') releaseAll();
   };
+  window.addEventListener('touchstart', newTouchSequence, {capture: true, passive: true});
   window.addEventListener('touchend', releaseTouch, {passive: true});
   window.addEventListener('touchcancel', releaseTouch, {passive: true});
   window.addEventListener('pointerup', releasePointer, {passive: true});
@@ -202,6 +233,8 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
   window.addEventListener('blur', releaseAll, {passive: true});
   document.addEventListener('visibilitychange', releaseOnHidden, {passive: true});
   deps.onTeardown(() => {
+    dropTouch();
+    window.removeEventListener('touchstart', newTouchSequence, {capture: true});
     window.removeEventListener('touchend', releaseTouch);
     window.removeEventListener('touchcancel', releaseTouch);
     window.removeEventListener('pointerup', releasePointer);
