@@ -282,11 +282,12 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     if (e === lastRelease) return;
     lastRelease = e;
     const touches = (e as TouchEvent).touches;
-    if (!touches || touches.length === 0) {
-      dropTouch();
-      // A finger that lifted after holding still flings nothing.
-      if (performance.now() - readerScrollAt >= READER_SCROLL_QUIET_MS) awaitingScrollend = false;
-    }
+    // The lift does not judge whether a fling follows. The age of the last
+    // scroll event is no evidence (one long frame made a moving finger look
+    // held still, and the settle wrote under the fling); the browser's
+    // scrollend is: it fires at the lift of a finger that held still, and at
+    // the end of the fling otherwise, and closes the allowance either way.
+    if (!touches || touches.length === 0) dropTouch();
     settle();
   }
   // The first finger of a new sequence: any hold still down is stale.

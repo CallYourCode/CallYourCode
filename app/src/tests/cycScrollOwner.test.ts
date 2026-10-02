@@ -210,7 +210,7 @@ describe('ScrollOwner reader-scroll clock', () => {
     expect(owner.driving()).toBe(false);
   });
 
-  test('a finger that held still before lifting ends the reader scroll at the lift', () => {
+  test('a finger that held still before lifting: the scrollend at the lift ends the reader scroll', () => {
     (window as {onscrollend?: unknown}).onscrollend = null;
     const {scroll, text, owner} = mount();
     text.dispatchEvent(touch('touchstart'));
@@ -218,7 +218,23 @@ describe('ScrollOwner reader-scroll clock', () => {
     vi.advanceTimersByTime(400);
     expect(owner.driving()).toBe(true);
     window.dispatchEvent(touch('touchend'));
+    scroll.dispatchEvent(new Event('scrollend'));
     expect(owner.driving()).toBe(false);
+  });
+
+  test('a moving finger whose last scroll event is a long frame old still flings after the lift', () => {
+    (window as {onscrollend?: unknown}).onscrollend = null;
+    const {scroll, text, owner, rewindow} = mount();
+    text.dispatchEvent(touch('touchstart'));
+    scrollBy(scroll, -50, true);
+    // A 200 ms main-thread stall right before the lift.
+    vi.advanceTimersByTime(200);
+    window.dispatchEvent(touch('touchend'));
+    expect(owner.driving()).toBe(true);
+    expect(rewindow).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(100);
+    scrollBy(scroll, -30);
+    expect(owner.driving()).toBe(true);
   });
 
   test('a machine write is never the reader, even mid-momentum', () => {

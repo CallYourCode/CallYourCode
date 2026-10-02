@@ -22,8 +22,10 @@ import {SESSION_NAME, startScrollEngine, type ScrollEngine} from './scrollEngine
 //    driving mid-fling and the re-window wrote under the moving content (20-23
 //    writes in headless WebKit, whose frames run 90-270 ms). The fling here is
 //    shaped like a real one: scroll events with no input of their own, gaps of
-//    90-270 ms, and ONE scrollend when it stops (a programmatic step fires its
-//    own scrollend, which a real fling does not, so the rig swallows those).
+//    90-270 ms, and ONE scrollend when it stops. A programmatic step fires its
+//    own scrollend, which a real drag or fling does not (Chromium fires none
+//    while the finger is down, held still or moving), so the rig swallows every
+//    step's scrollend from the first drag step until the fling stops.
 //
 // Every programmatic write to the scroller (the scrollTop setter, scrollTo /
 // scroll / scrollBy, scrollIntoView of a row) is counted, by phase, except the
@@ -272,6 +274,15 @@ for (const v of VIEWPORTS) {
         await open(page, eng, v);
         await setPhase(page, 'finger');
         await page.evaluate((sel) => {
+          const w = window as never as {__swallowEnds: boolean};
+          w.__swallowEnds = true;
+          window.addEventListener(
+            'scrollend',
+            (e) => {
+              if (w.__swallowEnds) e.stopImmediatePropagation();
+            },
+            {capture: true}
+          );
           (document.querySelector(sel) as HTMLElement).dispatchEvent(
             new Event('touchstart', {bubbles: true})
           );
@@ -295,14 +306,10 @@ for (const v of VIEWPORTS) {
               const w = window as never as {
                 __rigWrite: boolean;
                 __phase: string;
+                __swallowEnds: boolean;
                 __cycScrollDiag: () => {ownerState: string};
               };
               const b = document.querySelector(sel) as HTMLElement;
-              let flinging = true;
-              const swallow = (e: Event) => {
-                if (flinging) e.stopImmediatePropagation();
-              };
-              window.addEventListener('scrollend', swallow, {capture: true});
               window.dispatchEvent(new Event('touchend'));
               w.__phase = 'momentum';
               const seen: number[] = [];
@@ -318,8 +325,7 @@ for (const v of VIEWPORTS) {
                 states.push(w.__cycScrollDiag().ownerState);
                 if (i === gaps.length) {
                   // The fling stops: the browser's one scrollend for it.
-                  flinging = false;
-                  window.removeEventListener('scrollend', swallow, {capture: true});
+                  w.__swallowEnds = false;
                   w.__phase = 'after';
                   b.dispatchEvent(new Event('scrollend'));
                   return done({gaps: seen, driving: states});
