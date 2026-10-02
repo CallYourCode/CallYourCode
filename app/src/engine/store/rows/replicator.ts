@@ -61,6 +61,10 @@ export type ReplicatorDeps = {
 // a quiet ~7 minutes in the background rather than flooding on attach.
 export const DEFAULT_PAGES_PER_SEC = 2;
 
+// A step whose fetch (or commit) threw waits this much longer than the cadence
+// before the next try, so a page that keeps failing cannot spin the pump.
+export const FAILED_STEP_BACKOFF_MS = 5000;
+
 export type Replicator = {
   cursor: CursorState;
   // Feed an attach-ok: its tail bookkeeping seeds the cursor, its pages are
@@ -151,6 +155,7 @@ export function createReplicator(sessionId: string, deps: ReplicatorDeps): Repli
 
   const cursor = emptyCursor(100);
   let lastFetchAt = 0;
+  let backoffMs = 0;
   let inFlight = false;
   let timer = false;
   let stopped = true;
@@ -254,9 +259,12 @@ export function createReplicator(sessionId: string, deps: ReplicatorDeps): Repli
     try {
       const pg = await deps.fetchPage(page);
       lastFetchAt = now();
+      backoffMs = 0;
       if (!pg) return; // cannot confirm; cursor stays, resume later
       await commitPage(page, pg);
     } catch (e) {
+      lastFetchAt = now();
+      backoffMs = FAILED_STEP_BACKOFF_MS;
       cyclog('replicator.fetch.failed', {session: sessionId, page, err: String(e)});
     } finally {
       inFlight = false;
@@ -266,7 +274,7 @@ export function createReplicator(sessionId: string, deps: ReplicatorDeps): Repli
   function kick(): void {
     if (stopped || timer || paused()) return;
     if (nextPage(cursor) === null) return;
-    const wait = Math.max(0, gapMs() - (now() - lastFetchAt));
+    const wait = Math.max(0, gapMs() + backoffMs - (now() - lastFetchAt));
     timer = true;
     schedule(() => {
       timer = false;
