@@ -945,7 +945,7 @@ function frontTrimShift(
 // at: the first mounted MESSAGE row meeting the viewport (its identity checked
 // against the current row model, so a stale data-index after a reindex is never
 // trusted) maps its model start to its on-screen top. Null when no such row is
-// mounted or the model no longer names it at that index.
+// mounted or the model no longer carries it.
 function readerModelOffset(
   inner: HTMLElement,
   st: RenderState,
@@ -973,8 +973,14 @@ function readerModelOffset(
     if (top >= viewBottom) break;
     const id = node.dataset.mid;
     if (!id) continue;
-    const idx = Number(node.dataset.index);
-    if (!Number.isInteger(idx) || st.rows[idx]?.key !== 'm|' + id || !meas[idx]) return null;
+    // The node's data-index is the PREVIOUS model's until this paint commits;
+    // after a reindex (older history prepended, a front trim) it names another
+    // row, so find the reader's row in the new model by its id. Without this a
+    // prepend under a dragging reader computed the window a whole page off the
+    // rows on screen (the reader's rows unmounted for a frame: a leap).
+    let idx = Number(node.dataset.index);
+    if (!Number.isInteger(idx) || st.rows[idx]?.key !== 'm|' + id) idx = rowIndexOfMessageId(st, id);
+    if (idx < 0 || !meas[idx]) return null;
     return Math.max(0, meas[idx].start - (top - boxTop));
   }
   return null;
