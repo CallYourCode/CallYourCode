@@ -66,7 +66,8 @@ export function wireChat(conn: Conn, ctx: HandlerCtx): void {
       tailVersion: a.tailVersion,
       pointerPage: a.pointerPage,
       pages: a.pages ?? [],
-      deltaBase: a.deltaBase
+      deltaBase: a.deltaBase,
+      fp: a.fp
     }).then(() => {
       const st = sessions.get(s.id);
       if (!st) return;
@@ -167,6 +168,7 @@ export function wireChat(conn: Conn, ctx: HandlerCtx): void {
     };
     if (m.seq !== undefined) msg.seq = m.seq;
     if (m.mid) msg.mid = m.mid;
+    if (m.rev) msg.rev = m.rev;
     if (m.msgId) msg.msgId = m.msgId;
     if (m.durationS !== undefined) msg.durationS = m.durationS;
     if (m.growing) {

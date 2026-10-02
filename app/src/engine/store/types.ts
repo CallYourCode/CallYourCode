@@ -59,6 +59,12 @@ export type CycEngineSession = CycSession & {
 
   paintSource?: 'cache' | 'replay';
 
+  /* The open chat's known holes inside its window, as list markers (kind
+   * 'gap'): the store is fetching those pages from the engine, and the list
+   * shows a "Loading N missing messages..." row in their place instead of
+   * joining the rows on either side as if nothing were between them. */
+  gaps?: CycSessionEvent[];
+
   pointer?: number;
   pointerPage?: number;
   tailPage?: number;
@@ -80,4 +86,7 @@ export type CycEngineMessage = CycMessage & {
   cid?: string;
 
   seq?: number;
+
+  /** the engine's edit count for this row (contract EngineChatMessage.rev) */
+  rev?: number;
 };

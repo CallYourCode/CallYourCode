@@ -7,3 +7,12 @@
  * SEALED and immutable forever. Page N holds the messages whose seq is in
  * [N*PAGE_SIZE, N*PAGE_SIZE + PAGE_SIZE - 1]. */
 export const PAGE_SIZE = 100;
+
+/* One row's term in a page fingerprint (fix-sync-gap). The engine's attach-ok
+ * (chat/attach.ts pagePrints) and the app's store (rowStore.pagePrints) each sum
+ * it over the rows of a page, so both weight a row by its offset on the page and
+ * its edit count (rev) the same way: a missing, extra, moved or stale row moves
+ * the sum. */
+export function printTerm(offset: number, rev: number): number {
+  return (offset + 1) * 1009 + rev;
+}

@@ -11,9 +11,22 @@ import {memTx} from './rowStoreFake';
 import type {CycEngineMessage, CycEngineSession} from '../engine/store/types';
 
 // The open chat's held tail is the row store's now; the frontier a re-attach
-// asks with is the highest seq the store holds. Seed seqs 0..1 so it is 1.
+// asks with is the held tail capped at what the engine confirmed. Seed seqs 0..1
+// and a confirmed edge of 1 so it is 1.
 async function seedFrontier(sid: string) {
   await rowStore.upsert(sid, [messageRow(sid, msg(0)), messageRow(sid, msg(1))]);
+  // the engine confirmed both rows on an earlier attach (fix-sync-gap: the
+  // frontier is what the engine confirmed, never merely what is held)
+  rowStore.writeMeta({
+    sessionId: sid,
+    cursor: 0,
+    tailVersion: 2,
+    tailPage: 0,
+    coveredFrom: 0,
+    pageSize: 100,
+    total: 2,
+    syncedAt: 1
+  });
 }
 
 /* The push-poke (bg-refresh, deferred piece now wired): a push that lands
@@ -281,7 +294,7 @@ describe('page half: the poke runs the existing catch-up, on its discipline', ()
 
     poke(); // untargeted "sync now"
     expect(client.attach).toHaveBeenCalledTimes(1);
-    expect(client.attach).toHaveBeenCalledWith('p1', 1);
+    expect(client.attach).toHaveBeenCalledWith('p1', 1, 0);
     expect(client.verifyPipe).toHaveBeenCalled(); // the push proved the engine spoke; the pipe must too
 
     client.attach.mockClear();
@@ -324,7 +337,7 @@ describe('page half: the poke runs the existing catch-up, on its discipline', ()
 
     flip(false); // the deferral cashes out here: foregroundReturn catches up
     expect(client.attach).toHaveBeenCalledTimes(1);
-    expect(client.attach).toHaveBeenCalledWith('p1', 1);
+    expect(client.attach).toHaveBeenCalledWith('p1', 1, 0);
   });
 
   test('after stop() the listener is gone: a poke reaches nothing', async () => {

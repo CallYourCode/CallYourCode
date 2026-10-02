@@ -12,7 +12,7 @@
 // window; the replicator only feeds the door.
 
 import {cyclog} from '@/shared/logging';
-import type {EnginePage} from '../../contract';
+import type {EnginePage, EnginePagePrints} from '../../contract';
 import {eventRow, messageRow, type StoreRow} from './core';
 import {
   addDemand,
@@ -31,8 +31,13 @@ export type ReplicatorDeps = {
   // Fetch one page from the engine. null when the page cannot be confirmed
   // (offline, 404): the cursor stays at the edge and resumes later.
   fetchPage: (page: number) => Promise<EnginePage | null>;
-  // The one door: append rows to the store. Resolves once committed.
-  upsert: (rows: StoreRow[]) => Promise<{loSeq: number; hiSeq: number}>;
+  // The one door: append rows to the store. Resolves once committed. `pg` is the
+  // engine page the rows came from, so the registry can replace a page whose
+  // fingerprint differed instead of only adding to it.
+  upsert: (rows: StoreRow[], pg: EnginePage) => Promise<{loSeq: number; hiSeq: number}>;
+  // A page committed; `wasHole` when it filled a known hole (the registry logs
+  // the fill and re-checks a page it was verifying).
+  pageCommitted?: (page: number, pg: EnginePage, wasHole: boolean) => void;
   // Persist the cursor after a committed advance.
   persistCursor: (st: CursorState) => void;
   // The rate limiter's clock and scheduler, injectable so tests drive the pump
@@ -94,6 +99,8 @@ export type AttachOkLite = {
   pointerPage?: number;
   pages: EnginePage[];
   deltaBase?: number;
+  // the shown pages' fingerprints (repl.ts verifyPages reads them)
+  fp?: EnginePagePrints;
 };
 
 export function rowsFromPage(sessionId: string, page: EnginePage): StoreRow[] {
@@ -154,17 +161,20 @@ export function createReplicator(sessionId: string, deps: ReplicatorDeps): Repli
 
   async function commitPage(page: number, pg: EnginePage): Promise<void> {
     const rows = rowsFromPage(sessionId, pg);
-    await deps.upsert(rows);
+    await deps.upsert(rows, pg);
     // The write committed: only now does the cursor move over this page.
+    const wasHole = cursor.holes.has(page);
     notePageCommitted(cursor, page);
     persist();
+    deps.pageCommitted?.(page, pg, wasHole);
   }
 
   const attachOk = async (a: AttachOkLite): Promise<void> => {
     cursor.pageSize = a.pageSize || cursor.pageSize || 100;
     const tailPage = a.tailPage ?? a.pointerPage ?? -1;
     const version = tailVersionOf(a);
-    if (renumberDirty(cursor, version)) {
+    const renumbered = renumberDirty(cursor, version);
+    if (renumbered) {
       cyclog('replicator.renumber', {
         session: sessionId,
         was: cursor.tailVersion,
@@ -174,22 +184,57 @@ export function createReplicator(sessionId: string, deps: ReplicatorDeps): Repli
       resetCoverage(cursor, tailPage, version);
     } else {
       if (tailPage > cursor.tailPage) cursor.tailPage = tailPage;
-      cursor.tailVersion = Math.max(cursor.tailVersion, version);
+    }
+    if (!renumbered && cursor.tailVersion > 0 && a.pages.length) {
+      // THE CAPPED DELTA (fix-sync-gap, the tablet's and iPhone's holes). The
+      // engine serves at most 20 pages above the frontier; a device further
+      // behind gets the newest 20 and nothing between its confirmed edge and the
+      // lowest served page. Those pages were never sent, so they are holes the
+      // replicator fetches first, never "covered" because the tail moved past
+      // them.
+      const ps = cursor.pageSize;
+      let lowest = Infinity;
+      for (const p of a.pages) if (p.page < lowest) lowest = p.page;
+      const from = Math.floor(cursor.tailVersion / ps);
+      const added: number[] = [];
+      for (let p = from; p < lowest; p++) {
+        if (!cursor.holes.has(p)) added.push(p);
+        cursor.holes.add(p);
+      }
+      if (added.length) {
+        cyclog('gap.detected', {
+          session: sessionId,
+          pages: `${added[0]}-${added[added.length - 1]}`,
+          seqs: `${cursor.tailVersion}-${lowest * ps - 1}`,
+          deltaBase: a.deltaBase ?? -1,
+          why: 'the engine capped the delta: the pages between the confirmed edge and the lowest served page were never sent'
+        });
+      }
     }
     // write and cover the pages the attach already carried
     for (const p of a.pages) {
       await commitPage(p.page, p);
     }
+    // Only once the served pages committed does the confirmed edge move to the
+    // engine's tail: everything at or below it is now held, or is a known hole.
+    if (!renumbered) cursor.tailVersion = Math.max(cursor.tailVersion, version);
     persist();
     if (!stopped) kick();
   };
 
+  // A live row moves the confirmed edge ONLY when it is the very next seq
+  // (fix-sync-gap). An attached chat receives every row in order (messages and
+  // session records), so its edge keeps up and the catch-up tick stays empty. A
+  // chat this device is NOT attached to receives the broadcast messages but not
+  // the records between them, so the next one is never edge + 1 and the edge
+  // stays where the engine last confirmed it: the next attach asks from there.
+  // That broadcast row raising the frontier was the laptop's whole hole.
   const noteLive = (seq: number | undefined): void => {
     if (seq === undefined || !Number.isFinite(seq) || cursor.pageSize <= 0) return;
+    if (cursor.tailVersion <= 0 || seq !== cursor.tailVersion) return;
+    cursor.tailVersion = seq + 1;
     const page = Math.floor(seq / cursor.pageSize);
     if (page > cursor.tailPage) cursor.tailPage = page;
-    // a live tail row that sits exactly on the covered edge extends coverage
-    notePageCommitted(cursor, page);
     persist();
   };
 

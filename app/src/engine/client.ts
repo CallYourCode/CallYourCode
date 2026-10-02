@@ -293,9 +293,16 @@ export class WsEngineClient implements EngineClient {
   // -1 when it has never held anything contiguous. Unsealed, the frame waits
   // in the queue (latest attach wins) and flushes first on the next pipe; the
   // store re-attaches again on the settled edge with the same frontier.
-  public attach(sessionId: string, frontier = -1) {
+  // `verifyFrom` names the lowest page the open window shows; the attach-ok
+  // then fingerprints the shown pages so the store can refetch any that differ.
+  public attach(sessionId: string, frontier = -1, verifyFrom?: number) {
     this.attachedId = sessionId;
-    this.send({t: 'attach', id: sessionId, frontier});
+    this.send({
+      t: 'attach',
+      id: sessionId,
+      frontier,
+      ...(verifyFrom !== undefined && verifyFrom >= 0 ? {verifyFrom} : {})
+    });
 
     if (this.sealReady() && this.awaitingInboundBy === null) {
       this.awaitingInboundBy = Date.now() + LIVENESS_GRACE_MS;

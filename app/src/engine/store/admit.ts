@@ -108,6 +108,7 @@ export function adoptEngineRow(
   // Carry the engine's durable row id onto the adopted bubble so a later
   // re-serve (a renumber, another attach) dedups on it instead of twinning.
   if (m.mid && !local.mid) local.mid = m.mid;
+  if (m.rev) local.rev = m.rev;
 
   // A bubble still streaming the device's own transcript (draftCommitted set)
   // holds a PARTIAL: the engine's delivered text is the settled superset

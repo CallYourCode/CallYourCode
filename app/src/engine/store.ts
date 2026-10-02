@@ -57,6 +57,7 @@ import {
 import {
   attachFrontier,
   demand as replDemand,
+  needsVerify,
   replicatorFor,
   running as replBackfilling,
   seedCursor,
@@ -358,7 +359,8 @@ export function contentVersion(s: CycSession): string {
     s.askUnknown ? 1 : 0,
     es.heardTs ?? 0,
     es.historyPending ? 1 : 0,
-    es.notOnEngine ? 1 : 0
+    es.notOnEngine ? 1 : 0,
+    es.gaps ? es.gaps.map((g) => g.uuid + '#' + g.text).join(',') : ''
   ].join('\x1f');
 }
 
@@ -722,7 +724,14 @@ function askEngine(s: CycEngineSession, owner: Conn, openSeq: number) {
   s.historyPending = s.messages.length > 0;
   s.awaitingChatStart = true;
   s.historyAskedAt = Date.now();
-  owner.client.attach(s.paneId, attachFrontier(sessionId, rowStore.highestHeldSeq(sessionId)));
+  const held = rowStore.highestHeldSeq(sessionId);
+  const frontier = attachFrontier(sessionId, held);
+  // The lowest page the open window shows: the engine fingerprints every shown
+  // page it is not serving inline, so a hole or a stale copy there is found.
+  const low = rowStore.shownLowSeq(sessionId);
+  const verifyFrom = low >= 0 ? Math.floor(low / (s.pageSize ?? PAGE_SIZE)) : undefined;
+  cyclog('sync.frontier', {session: sessionId, held, frontier, verifyFrom: verifyFrom ?? -1});
+  owner.client.attach(s.paneId, frontier, verifyFrom);
   window.setTimeout(() => {
     if (openSeq !== attachSeq || attachedId !== sessionId) return;
     const st = sessions.get(sessionId);
@@ -735,6 +744,18 @@ function askEngine(s: CycEngineSession, owner: Conn, openSeq: number) {
 }
 
 let attachSeq = 0;
+
+// The window now shows pages below the ones the last attach fingerprinted (the
+// reader scrolled or jumped into older history): ask the engine once more, a
+// plain catch-up attach, so those pages are checked against it too.
+function verifyShown(sessionId: string): void {
+  if (attachedId !== sessionId) return;
+  if (!needsVerify(sessionId, rowStore.shownLowSeq(sessionId))) return;
+  const s = sessions.get(sessionId);
+  const owner = s ? connOf(s.engineKey) : undefined;
+  if (!s || !owner || !sync.engineReachable(s.engineKey)) return;
+  askEngine(s, owner, attachSeq);
+}
 
 export function canOlder(sessionId: string): boolean {
   const s = sessions.get(sessionId);
@@ -759,6 +780,7 @@ export function loadOlder(sessionId: string): Promise<void> {
         const floor = rowStore.windowFloorSeq(sessionId);
         if (floor > 0) replDemand(sessionId, floor - 1);
       }
+      verifyShown(sessionId);
       notify();
     } catch (e) {
       cyclog('history.older.failed', {session: sessionId, err: e});
@@ -811,7 +833,10 @@ export function ensureMessageHeld(
       return false;
     }
     const st = sessions.get(sessionId);
-    if (st) notify();
+    if (st) {
+      verifyShown(sessionId);
+      notify();
+    }
 
     return !!st && heldFast(st, ref);
   })();

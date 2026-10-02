@@ -19,6 +19,7 @@
  */
 
 import { PAGE_SIZE, pageOf, tailPage, buildPage, pageAt, pointerSeq, tsForSeq } from "../runtime/pages.ts";
+import { printTerm } from "../../../shared/pages.ts";
 import { ensureSeqs, type ChatSession } from "./chatlog.ts";
 import type { RowsGenerational } from "./wirecache.ts";
 import type { ChatMsg } from "./chatmsg.ts";
@@ -135,7 +136,7 @@ export function pagePrints(rows: readonly WireRow[], from: number, to: number): 
     for (const r of cut) {
       if ((r as WireRec).t !== "s") msgs++;
       const rev = (r as { rev?: unknown }).rev;
-      h += (r.seq - base + 1) * 1009 + (typeof rev === "number" ? rev : 0);
+      h += printTerm(r.seq - base, typeof rev === "number" ? rev : 0);
     }
     out.n.push(cut.length);
     out.m.push(msgs);

@@ -115,9 +115,22 @@ function settle() {
 }
 
 // The open chat's held tail is now the row store's, so the frontier a re-attach
-// asks with is the highest seq the store holds. Seed seqs 0..1 so it is 1.
+// asks with is the held tail capped at what the engine confirmed. Seed seqs 0..1
+// and a confirmed edge of 1 so it is 1.
 async function seedFrontier(sid: string) {
   await rowStore.upsert(sid, [messageRow(sid, msg(0)), messageRow(sid, msg(1))]);
+  // the engine confirmed both rows on an earlier attach (fix-sync-gap: the
+  // frontier is what the engine confirmed, never merely what is held)
+  rowStore.writeMeta({
+    sessionId: sid,
+    cursor: 0,
+    tailVersion: 2,
+    tailPage: 0,
+    coveredFrom: 0,
+    pageSize: 100,
+    total: 2,
+    syncedAt: 1
+  });
 }
 
 // attach() paints the cache in an async IIFE before it asks the engine.
@@ -166,7 +179,7 @@ describe('foreground return catches the open chat up', () => {
 
     flip(false);
     expect(client.attach).toHaveBeenCalledTimes(1);
-    expect(client.attach).toHaveBeenCalledWith('p1', 1);
+    expect(client.attach).toHaveBeenCalledWith('p1', 1, 0);
     // Every pipe that only LOOKS alive is challenged on the same edge.
     expect(client.verifyPipe).toHaveBeenCalled();
   });
@@ -190,7 +203,7 @@ describe('foreground return catches the open chat up', () => {
     Object.defineProperty(restored, 'persisted', {value: true});
     window.dispatchEvent(restored);
     expect(client.attach).toHaveBeenCalledTimes(1);
-    expect(client.attach).toHaveBeenCalledWith('p1', 1);
+    expect(client.attach).toHaveBeenCalledWith('p1', 1, 0);
     expect(client.verifyPipe).toHaveBeenCalled();
   });
 
