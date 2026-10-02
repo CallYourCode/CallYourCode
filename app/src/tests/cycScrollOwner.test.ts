@@ -1,4 +1,4 @@
-import {afterEach, describe, expect, test, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import {createScrollOwner} from '../features/chat/surface/scrollOwner';
 
 // The ScrollOwner's hands: a finger down on the list owns the offset until it
@@ -6,16 +6,23 @@ import {createScrollOwner} from '../features/chat/surface/scrollOwner';
 // finger's touchend goes to the node it landed on, even once that node has left
 // the DOM, and a detached node's touchend never reaches the window (the
 // phase-3 verifier's stuck reader-driving: a pinned reader stopped following
-// replies). The e2e twin is e2e/offline/scroll-owner-release.spec.ts.
+// replies). And the reader's own scroll (momentum after the lift) is timed on
+// the owner's own clock from the current scroll event, held through a
+// main-thread stall until the browser's scrollend. The e2e twin is
+// e2e/offline/scroll-owner-release.spec.ts.
 
 const teardowns: (() => void)[] = [];
 afterEach(() => {
   for (const d of teardowns.splice(0)) d();
   document.body.innerHTML = '';
+  vi.useRealTimers();
+  delete (window as {onscrollend?: unknown}).onscrollend;
 });
 
 function mount() {
   const scroll = document.createElement('div');
+  let top = 0;
+  Object.defineProperty(scroll, 'scrollTop', {get: () => top, set: (v: number) => (top = v)});
   const row = document.createElement('div');
   const text = document.createElement('p');
   row.appendChild(text);
@@ -28,7 +35,6 @@ function mount() {
     scrollToBottom: vi.fn(),
     rewindowWrite: vi.fn(),
     rewindow,
-    listScrolling: () => false,
     listBanked: () => true,
     isMachineScroll: () => false,
     nearBottomPx: () => 100,
@@ -118,5 +124,109 @@ describe('ScrollOwner touch release', () => {
     document.body.appendChild(elsewhere);
     elsewhere.dispatchEvent(touch('touchstart', [{}, {}]));
     expect(owner.driving()).toBe(true);
+  });
+});
+
+describe('ScrollOwner reader-scroll clock', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({toFake: ['Date', 'performance']});
+  });
+
+  // The reader's scroll, as the browser delivers it: the offset moves and a
+  // scroll event fires (with a wheel: fresh reader input; without: momentum).
+  const scrollBy = (scroll: HTMLElement, dy: number, input = false) => {
+    if (input) scroll.dispatchEvent(new Event('wheel'));
+    scroll.scrollTop += dy;
+    scroll.dispatchEvent(new Event('scroll'));
+  };
+
+  test('momentum after the input is the reader while scroll events keep coming', () => {
+    const {scroll, owner} = mount();
+    scrollBy(scroll, -50, true);
+    for (let i = 0; i < 5; i++) {
+      vi.advanceTimersByTime(140);
+      expect(owner.driving()).toBe(true);
+      scrollBy(scroll, -20);
+    }
+    expect(owner.driving()).toBe(true);
+    vi.advanceTimersByTime(150);
+    expect(owner.driving()).toBe(false);
+  });
+
+  test('no scrollend: a quiet gap over 150 ms ends the reader scroll', () => {
+    const {scroll, owner} = mount();
+    scrollBy(scroll, -50, true);
+    vi.advanceTimersByTime(200);
+    expect(owner.driving()).toBe(false);
+    scrollBy(scroll, -20);
+    expect(owner.driving()).toBe(false);
+  });
+
+  test('with scrollend: momentum through 270 ms stalls stays the reader until scrollend', () => {
+    (window as {onscrollend?: unknown}).onscrollend = null;
+    const {scroll, owner, rewindow} = mount();
+    scrollBy(scroll, -50, true);
+    for (const gap of [90, 270, 180, 250, 270]) {
+      vi.advanceTimersByTime(gap);
+      expect(owner.driving()).toBe(true);
+      scrollBy(scroll, -20);
+    }
+    // A stall long enough that the virtualizer's scroll-end tick came and went.
+    vi.advanceTimersByTime(300);
+    expect(owner.driving()).toBe(true);
+    expect(rewindow).not.toHaveBeenCalled();
+    scroll.dispatchEvent(new Event('scrollend'));
+    expect(owner.driving()).toBe(false);
+    expect(rewindow).toHaveBeenCalledTimes(1);
+  });
+
+  test('with scrollend: right after it, the plain quiet still runs out first', () => {
+    (window as {onscrollend?: unknown}).onscrollend = null;
+    const {scroll, owner, rewindow} = mount();
+    scrollBy(scroll, -50, true);
+    scroll.dispatchEvent(new Event('scrollend'));
+    expect(owner.driving()).toBe(true);
+    expect(rewindow).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(150);
+    expect(owner.driving()).toBe(false);
+  });
+
+  test('with scrollend: a lost scrollend cannot hold the reader past 1 s', () => {
+    (window as {onscrollend?: unknown}).onscrollend = null;
+    const {scroll, owner} = mount();
+    scrollBy(scroll, -50, true);
+    vi.advanceTimersByTime(999);
+    expect(owner.driving()).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(owner.driving()).toBe(false);
+  });
+
+  test('with scrollend: a scroll event that did not move opens no stall allowance', () => {
+    (window as {onscrollend?: unknown}).onscrollend = null;
+    const {scroll, owner} = mount();
+    scrollBy(scroll, 0, true);
+    vi.advanceTimersByTime(150);
+    expect(owner.driving()).toBe(false);
+  });
+
+  test('a finger that held still before lifting ends the reader scroll at the lift', () => {
+    (window as {onscrollend?: unknown}).onscrollend = null;
+    const {scroll, text, owner} = mount();
+    text.dispatchEvent(touch('touchstart'));
+    scrollBy(scroll, -50, true);
+    vi.advanceTimersByTime(400);
+    expect(owner.driving()).toBe(true);
+    window.dispatchEvent(touch('touchend'));
+    expect(owner.driving()).toBe(false);
+  });
+
+  test('a machine write is never the reader, even mid-momentum', () => {
+    const {scroll, owner} = mount();
+    scrollBy(scroll, -50, true);
+    const isMachine = owner.isMachineScroll;
+    expect(isMachine(scroll.scrollTop)).toBe(false);
+    vi.advanceTimersByTime(100);
+    owner.jump('to-bottom', () => scrollBy(scroll, 400));
+    expect(owner.driving()).toBe(false);
   });
 });

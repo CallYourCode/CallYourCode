@@ -1117,14 +1117,6 @@ export function setMessageScrollOwner(inner: HTMLElement, owner: MessageScrollOw
   scrollOwners.set(inner, owner);
 }
 
-// True while the virtualizer sees the box scrolling (a scroll event within its
-// reset delay, ~150 ms). The owner reads it, with who wrote the last offset, to
-// tell a reader's live scroll or momentum from a settled list.
-export function messageListScrolling(inner: HTMLElement): boolean {
-  const st = renderStates.get(inner);
-  return !!st?.virt && (st.virt as unknown as {isScrolling?: boolean}).isScrolling === true;
-}
-
 // Absorb a content shift above the reader (a top-pad change) in the spacer while
 // a reader drives, exactly like a banked re-measure (RenderState.bank). Only a
 // windowed list has a spacer to hold it.

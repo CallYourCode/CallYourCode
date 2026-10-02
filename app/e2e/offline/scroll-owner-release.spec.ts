@@ -4,8 +4,8 @@ import {SESSION_NAME, startScrollEngine, type ScrollEngine} from './scrollEngine
 
 // THE SCROLL OWNER LETS GO (SCROLL-DESIGN.md, phase 3 fix-ups). While a reader
 // drives (a finger down, or their own scroll or momentum still live) the
-// ScrollOwner writes nothing. Each way that "driving" was wrong, proven by the
-// phase-3 verifier, is pinned here:
+// ScrollOwner writes nothing. Two ways that "driving" was wrong, each proven by
+// the phase-3 verifier and pinned here:
 //
 // 1. LOST TOUCHEND. A finger's touchend goes to the node it LANDED on, even once
 //    that node has left the DOM. The message window re-windows rows away under a
@@ -14,6 +14,16 @@ import {SESSION_NAME, startScrollEngine, type ScrollEngine} from './scrollEngine
 //    owner listened. The hold stuck down: a pinned reader stopped following
 //    replies (166 / 289 / 412 px off the end after 3 arrivals). Proven with a
 //    synthetic touch on both engines and a real CDP touch in Chromium.
+//
+// 2. MOMENTUM THROUGH A LONG FRAME. Momentum keeps scrolling through a
+//    main-thread stall; the owner judged "still the reader's scroll" off the
+//    virtualizer's 150 ms scrolling flag, read before it updated for the current
+//    event, so one gap over 150 ms between momentum's scroll events ended
+//    driving mid-fling and the re-window wrote under the moving content (20-23
+//    writes in headless WebKit, whose frames run 90-270 ms). The fling here is
+//    shaped like a real one: scroll events with no input of their own, gaps of
+//    90-270 ms, and ONE scrollend when it stops (a programmatic step fires its
+//    own scrollend, which a real fling does not, so the rig swallows those).
 //
 // Every programmatic write to the scroller (the scrollTop setter, scrollTo /
 // scroll / scrollBy, scrollIntoView of a row) is counted, by phase, except the
@@ -40,6 +50,10 @@ const VIEWPORTS = [
   {key: 'tablet', width: 1069, height: 800},
   {key: 'phone', width: 390, height: 844}
 ] as const;
+
+// Frame gaps of a fling through a loaded main thread (headless WebKit measured
+// 90-270 ms), every one of them past the old 150 ms clock but the first.
+const FLING_GAPS = [90, 160, 270, 120, 200, 250, 180, 270, 150, 220, 110, 260, 190, 240, 170, 270];
 
 const WRITE_HOOK = () => {
   const w = window as unknown as Record<string, unknown> & {
@@ -95,6 +109,17 @@ const dist = (page: Page) =>
     const b = document.querySelector(sel) as HTMLElement;
     return Math.round(b.scrollHeight - b.scrollTop - b.clientHeight);
   }, SCROLL);
+
+const writesIn = (page: Page, phase: string) =>
+  page.evaluate(
+    (phase) =>
+      (window as never as {__writes: {phase: string}[]}).__writes.filter((x) => x.phase === phase)
+        .length,
+    phase
+  );
+
+const setPhase = (page: Page, p: string) =>
+  page.evaluate((p) => ((window as never as {__phase: string}).__phase = p), p);
 
 // The reader's own scroll: the offset moves (the rig's write, not counted) and
 // the scroll event plus a wheel (reader input) land, as the matrix rig does.
@@ -229,6 +254,110 @@ for (const v of VIEWPORTS) {
         expect(r.stateAfterLift).not.toBe('reader-driving');
         for (const d of r.dists)
           expect(d, `pinned reader follows each reply: ${r.dists}`).toBeLessThanOrEqual(2);
+      } finally {
+        await eng.close();
+      }
+    });
+
+    test('momentum through 90-270 ms frames is still the reader: nothing writes until it stops', async ({
+      page
+    }) => {
+      const eng = await startScrollEngine({
+        count: 600,
+        eventsEvery: 6,
+        imageEvery: 13,
+        lines: LONG
+      });
+      try {
+        await open(page, eng, v);
+        await setPhase(page, 'finger');
+        await page.evaluate((sel) => {
+          (document.querySelector(sel) as HTMLElement).dispatchEvent(
+            new Event('touchstart', {bubbles: true})
+          );
+        }, SCROLL);
+        // An upward drag under the finger: rows mount and re-measure, so the
+        // re-window has corrections to bank.
+        for (let i = 0; i < 30; i++) {
+          await page.evaluate((sel) => {
+            const w = window as never as {__rigWrite: boolean};
+            const b = document.querySelector(sel) as HTMLElement;
+            w.__rigWrite = true;
+            b.scrollTop = Math.max(0, b.scrollTop - 400);
+            w.__rigWrite = false;
+            b.dispatchEvent(new Event('touchmove', {bubbles: true}));
+          }, SCROLL);
+          await page.waitForTimeout(30);
+        }
+        const fling = await page.evaluate(
+          ({sel, gaps}) =>
+            new Promise<{gaps: number[]; driving: string[]}>((done) => {
+              const w = window as never as {
+                __rigWrite: boolean;
+                __phase: string;
+                __cycScrollDiag: () => {ownerState: string};
+              };
+              const b = document.querySelector(sel) as HTMLElement;
+              let flinging = true;
+              const swallow = (e: Event) => {
+                if (flinging) e.stopImmediatePropagation();
+              };
+              window.addEventListener('scrollend', swallow, {capture: true});
+              window.dispatchEvent(new Event('touchend'));
+              w.__phase = 'momentum';
+              const seen: number[] = [];
+              const states: string[] = [];
+              let last = performance.now();
+              b.addEventListener('scroll', () => {
+                const now = performance.now();
+                seen.push(Math.round(now - last));
+                last = now;
+              });
+              let i = 0;
+              const step = () => {
+                states.push(w.__cycScrollDiag().ownerState);
+                if (i === gaps.length) {
+                  // The fling stops: the browser's one scrollend for it.
+                  flinging = false;
+                  window.removeEventListener('scrollend', swallow, {capture: true});
+                  w.__phase = 'after';
+                  b.dispatchEvent(new Event('scrollend'));
+                  return done({gaps: seen, driving: states});
+                }
+                w.__rigWrite = true;
+                b.scrollTop = Math.max(0, b.scrollTop - Math.max(8, 60 - i * 3));
+                w.__rigWrite = false;
+                setTimeout(step, gaps[i++]);
+              };
+              step();
+            }),
+          {sel: SCROLL, gaps: FLING_GAPS}
+        );
+        const momentumWrites = await writesIn(page, 'momentum');
+        const fingerWrites = await writesIn(page, 'finger');
+        await page.waitForTimeout(800);
+        const after = {writes: await writesIn(page, 'after'), state: await ownerState(page)};
+        const r = {
+          fingerWrites,
+          momentumWrites,
+          after,
+          scrollGaps: fling.gaps,
+          states: fling.driving
+        };
+        test.info().annotations.push({type: 'owner lets go', description: JSON.stringify(r)});
+        expect(
+          Math.max(...fling.gaps.slice(2)),
+          'the fling had frames past 150 ms'
+        ).toBeGreaterThan(150);
+        expect(fingerWrites, 'no write under the finger').toBe(0);
+        expect(momentumWrites, `no write while momentum runs: ${JSON.stringify(r)}`).toBe(0);
+        expect(
+          fling.driving.every((s) => s === 'reader-driving'),
+          `driving through the fling: ${fling.driving}`
+        ).toBe(true);
+        // Once it stops the owner lets go (and may release its bank in one write).
+        expect(after.state).not.toBe('reader-driving');
+        expect(after.writes).toBeLessThanOrEqual(2);
       } finally {
         await eng.close();
       }

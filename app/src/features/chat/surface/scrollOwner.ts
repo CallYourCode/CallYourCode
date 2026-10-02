@@ -26,8 +26,8 @@
 //
 //   - driving()        a reader owns the offset: a finger or pointer is down, or
 //                      the reader's own scroll (a drag, a wheel, momentum after
-//                      the finger lifts) is still live by the virtualizer's
-//                      scroll clock. While driving NOTHING writes scrollTop; the
+//                      the finger lifts) is still live by the owner's scroll
+//                      clock. While driving NOTHING writes scrollTop; the
 //                      re-window banks its correction in the top spacer instead.
 //   - rewindowWrite()  the re-window's single tagged, machine-marked write.
 //   - settle on release: the moment the last finger/pointer lifts with the
@@ -73,9 +73,7 @@ export interface ScrollOwnerDeps {
   // re-window at the current offset that applies any banked correction.
   rewindowWrite(v: number, tag: string): void;
   rewindow(): void;
-  // The list's virtual-scroll clock: true while the box is still scrolling, and
-  // whether a correction is banked in its top spacer.
-  listScrolling(): boolean;
+  // Whether a correction is banked in the list's top spacer.
   listBanked(): boolean;
   // The existing readers, so each owner answer is identical to today's.
   isMachineScroll(top: number): boolean;
@@ -173,22 +171,60 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
   // touch/wheel, or the continuation of a scroll that was (momentum keeps
   // scrolling after the finger lifts, with no input of its own). A browser
   // clamp or an untagged app write with no reader behind it is not the reader.
-  // Read with the list's scroll clock, it is the reader's own scroll or
-  // momentum still running, which no timer of ours has to end: the clock runs
-  // out on its own once the scroll events stop.
+  //
+  // The reader's scroll runs on the owner's OWN clock, stamped from the current
+  // scroll event. (It read the virtualizer's 150 ms scrolling flag, whose
+  // listener runs after this one, so the flag still described the previous
+  // event: one gap over 150 ms between momentum's scroll events ended driving
+  // mid-fling and the re-window wrote under the moving content.) The scroll is
+  // over once READER_SCROLL_QUIET_MS pass with no scroll event: the
+  // virtualizer's own reset delay, so its scroll-end tick, which re-windows
+  // anyway, is the settle and no timer of ours has to end it. But momentum
+  // keeps scrolling through a main-thread stall, and where the browser has
+  // scrollend it says when the sequence truly stopped: until then a quiet gap
+  // of up to READER_SCROLL_STALL_MS is still the reader's (bounded, so a lost
+  // scrollend cannot hold it). An event that did not move the offset gets no
+  // scrollend, so it opens no such allowance.
+  const READER_SCROLL_QUIET_MS = 150;
+  const READER_SCROLL_STALL_MS = 1000;
+  const hasScrollend = 'onscrollend' in window;
   let lastScrollByReader = false;
+  let readerScrollAt = 0;
+  let awaitingScrollend = false;
+  let lastTop = scroll.scrollTop;
+  const readerScrolling = (): boolean => {
+    if (!lastScrollByReader) return false;
+    const quiet = performance.now() - readerScrollAt;
+    return (
+      quiet < READER_SCROLL_QUIET_MS || (awaitingScrollend && quiet < READER_SCROLL_STALL_MS)
+    );
+  };
   const noteScroll = () => {
+    const top = scroll.scrollTop;
+    const moved = top !== lastTop;
+    lastTop = top;
     lastScrollByReader =
-      jumpDepth === 0 &&
-      !deps.isMachineScroll(scroll.scrollTop) &&
-      (readerInputFresh() || (lastScrollByReader && deps.listScrolling()));
+      jumpDepth === 0 && !deps.isMachineScroll(top) && (readerInputFresh() || readerScrolling());
+    if (lastScrollByReader) readerScrollAt = performance.now();
+    awaitingScrollend = lastScrollByReader && moved && hasScrollend;
+  };
+  // The sequence stopped. The virtualizer's scroll-end tick settles it once
+  // the quiet runs out; if that tick already came and went inside a long
+  // stall (it found the reader still driving), settle here.
+  const noteScrollEnd = () => {
+    awaitingScrollend = false;
+    settle();
   };
   scroll.addEventListener('scroll', noteScroll, {passive: true});
-  deps.onTeardown(() => scroll.removeEventListener('scroll', noteScroll));
+  scroll.addEventListener('scrollend', noteScrollEnd, {passive: true});
+  deps.onTeardown(() => {
+    scroll.removeEventListener('scroll', noteScroll);
+    scroll.removeEventListener('scrollend', noteScrollEnd);
+  });
 
   // A reader owns the offset: a finger or pointer down, or their own scroll
   // (drag, wheel, momentum) still live. No programmatic scrollTop while true.
-  const driving = (): boolean => holding() || (lastScrollByReader && deps.listScrolling());
+  const driving = (): boolean => holding() || readerScrolling();
 
   // The reader let go. If the list is already still, release the banked
   // correction (or re-pin a pinned end that content grew past) in one re-window
@@ -205,7 +241,11 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     if (e === lastRelease) return;
     lastRelease = e;
     const touches = (e as TouchEvent).touches;
-    if (!touches || touches.length === 0) dropTouch();
+    if (!touches || touches.length === 0) {
+      dropTouch();
+      // A finger that lifted after holding still flings nothing.
+      if (performance.now() - readerScrollAt >= READER_SCROLL_QUIET_MS) awaitingScrollend = false;
+    }
     settle();
   }
   // The first finger of a new sequence: any hold still down is stale.
@@ -220,6 +260,7 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
   const releaseAll = () => {
     pointerHeld = false;
     dropTouch();
+    awaitingScrollend = false;
     settle();
   };
   const releaseOnHidden = () => {
@@ -330,6 +371,7 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
       const end = () => {
         jumpDepth--;
         lastScrollByReader = false;
+        awaitingScrollend = false;
       };
       let result: T;
       try {

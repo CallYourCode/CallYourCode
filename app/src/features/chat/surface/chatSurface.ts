@@ -13,7 +13,6 @@ import {
   attachStickyDates,
   rewindowMessages,
   setMessageScrollOwner,
-  messageListScrolling,
   messageListBanked,
   bankMessageShift
 } from './messageList';
@@ -1075,7 +1074,6 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     scrollToBottom,
     rewindowWrite,
     rewindow: () => rewindowMessages(messageListInner),
-    listScrolling: () => messageListScrolling(messageListInner),
     listBanked: () => messageListBanked(messageListInner),
     isMachineScroll: isMachineTop,
     nearBottomPx: () => Math.max(OVERLAY_SCROLL_NEAR_PX, messageListScroll.clientHeight / 3),

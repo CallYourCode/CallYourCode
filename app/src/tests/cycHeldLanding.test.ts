@@ -50,7 +50,6 @@ vi.mock('../features/chat/surface/messageList', () => ({
   messageVisibleRangeKey: () => '0:0',
   setMessageWindowHook: vi.fn(),
   setMessageScrollOwner: vi.fn(),
-  messageListScrolling: () => false,
   messageListBanked: () => false,
   bankMessageShift: vi.fn()
 }));
