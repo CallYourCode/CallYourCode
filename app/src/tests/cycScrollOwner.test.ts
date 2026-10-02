@@ -19,7 +19,7 @@ afterEach(() => {
   delete (window as {onscrollend?: unknown}).onscrollend;
 });
 
-function mount() {
+function mount(over: {isPinned?: () => boolean; distToEnd?: () => number} = {}) {
   const scroll = document.createElement('div');
   let top = 0;
   Object.defineProperty(scroll, 'scrollTop', {get: () => top, set: (v: number) => (top = v)});
@@ -29,24 +29,25 @@ function mount() {
   scroll.appendChild(row);
   document.body.appendChild(scroll);
   const rewindow = vi.fn();
+  const scrollToBottom = vi.fn();
   const owner = createScrollOwner({
     scroll,
     silentScrollTo: vi.fn(),
-    scrollToBottom: vi.fn(),
+    scrollToBottom,
     rewindowWrite: vi.fn(),
     rewindow,
     listBanked: () => true,
     isMachineScroll: () => false,
     nearBottomPx: () => 100,
-    isPinned: () => false,
-    distToEnd: () => 0,
+    isPinned: over.isPinned ?? (() => false),
+    distToEnd: over.distToEnd ?? (() => 0),
     isLanding: () => false,
     isDividerHeld: () => false,
     reseatDivider: () => false,
     bankShift: vi.fn(),
     onTeardown: (d) => teardowns.push(d)
   });
-  return {scroll, row, text, owner, rewindow};
+  return {scroll, row, text, owner, rewindow, scrollToBottom};
 }
 
 const touch = (type: string, touches?: unknown[]) => {
@@ -228,5 +229,100 @@ describe('ScrollOwner reader-scroll clock', () => {
     vi.advanceTimersByTime(100);
     owner.jump('to-bottom', () => scrollBy(scroll, 400));
     expect(owner.driving()).toBe(false);
+  });
+});
+
+// After a wheel stops at the end the browser can clamp the offset (the content
+// shrank) 14 ms after scrollend. That scroll was credited to the reader and
+// reopened the 1 s allowance, and an arrival inside it was skipped for good (the
+// final verifier: 25 of 35 missed after a wheel stop, Chromium laptop).
+describe('ScrollOwner after the reader stops', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout']});
+    (window as {onscrollend?: unknown}).onscrollend = null;
+  });
+
+  const scrollBy = (scroll: HTMLElement, dy: number, input = false) => {
+    if (input) scroll.dispatchEvent(new Event('wheel'));
+    scroll.scrollTop += dy;
+    scroll.dispatchEvent(new Event('scroll'));
+  };
+
+  test('a clamp after scrollend with no input since is not the reader', () => {
+    const {scroll, owner} = mount();
+    scrollBy(scroll, 300, true);
+    scroll.dispatchEvent(new Event('scrollend'));
+    vi.advanceTimersByTime(14);
+    scrollBy(scroll, -8);
+    vi.advanceTimersByTime(140);
+    expect(owner.driving()).toBe(false);
+  });
+
+  test('a scrollend while the finger is still down does not end its gesture', () => {
+    const {scroll, text, owner} = mount();
+    text.dispatchEvent(touch('touchstart'));
+    text.dispatchEvent(touch('touchmove'));
+    scrollBy(scroll, -40);
+    scroll.dispatchEvent(new Event('scrollend'));
+    window.dispatchEvent(touch('touchend'));
+    vi.advanceTimersByTime(100);
+    // The fling after the lift: scroll events with no input of their own.
+    scrollBy(scroll, -30);
+    vi.advanceTimersByTime(100);
+    expect(owner.driving()).toBe(true);
+  });
+
+  test('new input after scrollend is the reader again', () => {
+    const {scroll, owner} = mount();
+    scrollBy(scroll, 300, true);
+    scroll.dispatchEvent(new Event('scrollend'));
+    vi.advanceTimersByTime(200);
+    scrollBy(scroll, -40, true);
+    expect(owner.driving()).toBe(true);
+  });
+
+  test('an arrival skipped while the reader drives is followed once they stop at the end', () => {
+    let dist = 0;
+    const {scroll, owner, rewindow, scrollToBottom} = mount({
+      isPinned: () => true,
+      distToEnd: () => dist
+    });
+    scrollBy(scroll, 300, true);
+    scroll.dispatchEvent(new Event('scrollend'));
+    vi.advanceTimersByTime(50);
+    dist = 120;
+    owner.followArrival();
+    expect(scrollToBottom).not.toHaveBeenCalled();
+    expect(rewindow).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(150);
+    expect(owner.driving()).toBe(false);
+    expect(rewindow).toHaveBeenCalledTimes(1);
+  });
+
+  test('a lost scrollend: the owed follow is paid when the stall allowance runs out', () => {
+    let dist = 0;
+    const {scroll, owner, rewindow} = mount({isPinned: () => true, distToEnd: () => dist});
+    scrollBy(scroll, 300, true);
+    vi.advanceTimersByTime(300);
+    dist = 120;
+    owner.followArrival();
+    vi.advanceTimersByTime(600);
+    expect(rewindow).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(101);
+    expect(rewindow).toHaveBeenCalledTimes(1);
+  });
+
+  test('an owed follow is dropped if the reader ends away from the end', () => {
+    let pinned = true;
+    const {scroll, owner, rewindow} = mount({isPinned: () => pinned, distToEnd: () => 120});
+    scrollBy(scroll, -300, true);
+    owner.followArrival();
+    pinned = false;
+    vi.advanceTimersByTime(1100);
+    // listBanked is true in this mount, so the settle still re-windows once.
+    expect(rewindow).toHaveBeenCalledTimes(1);
+    pinned = true;
+    vi.advanceTimersByTime(2000);
+    expect(rewindow).toHaveBeenCalledTimes(1);
   });
 });

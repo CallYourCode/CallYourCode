@@ -514,6 +514,9 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   // same amount so what they are reading stays put. No timers on this path.
   const PIN_PX = 4;
   let pinnedToBottom = false;
+  // The list height as last laid out for the resize observer or the scroll
+  // listener: growth past it is not yet absorbed (no re-pin has run for it).
+  let listHeightSeen = 0;
   let padTopSeen = 0;
   const notePinAfterWrite = () => {
     pinnedToBottom = distToEnd() <= PIN_PX;
@@ -661,6 +664,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   // Not pinned: carry a top pad change so the rows under the reader's eyes do
   // not slide. A finger on the surface owns the offset until it lifts.
   const onListResize = () => {
+    listHeightSeen = messageListScroll.scrollHeight;
     const padNow = messageListPadTop.offsetHeight;
     const padDelta = padNow - padTopSeen;
     padTopSeen = padNow;
@@ -885,12 +889,20 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       // so it can only confirm a pin, never drop one. A reader's UPWARD drag
       // leaves the bottom AT ONCE -- even a few px, before it clears PIN_PX --
       // so a re-pin cannot race its (async, coalesced) scroll event back to the end.
+      // A scroll that reached the end of the list as last laid out is at the
+      // end, even when this event is read after an arrival grew the list in
+      // the same frame (the reader who had just come back to the end lost the
+      // pin and never followed the reply).
       if (readerUp && !clamp) pinnedToBottom = false;
-      else if (!machine) pinnedToBottom = distToEnd() <= PIN_PX;
-      else if (distToEnd() <= PIN_PX) pinnedToBottom = true;
+      else if (!machine) {
+        const grewUnseen = listHeightSeen > 0 && height > listHeightSeen + 1;
+        pinnedToBottom =
+          distToEnd() <= PIN_PX || (grewUnseen && top + clientH >= listHeightSeen - PIN_PX);
+      } else if (distToEnd() <= PIN_PX) pinnedToBottom = true;
       readerTrackTop = top;
       readerTrackHeight = height;
       readerTrackClientH = clientH;
+      listHeightSeen = height;
     },
     {passive: true}
   );
@@ -1217,6 +1229,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       readerTrackTop = messageListScroll.scrollTop;
       readerTrackHeight = messageListScroll.scrollHeight;
       readerTrackClientH = messageListScroll.clientHeight;
+      listHeightSeen = messageListScroll.scrollHeight;
 
       setNewBelow(0);
 

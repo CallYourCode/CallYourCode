@@ -378,4 +378,20 @@ describe('pinned to the bottom across late growth', () => {
     fire();
     expect(g.top()).toBe(4300);
   });
+  test('a reader whose scroll event lands after an arrival grew the list stays pinned', () => {
+    const box: Box = {scrollHeight: 5000, clientHeight: 800, padTop: 66};
+    const {cs} = mk();
+    const g = geometry(cs, box);
+    cs.scrollToBottom();
+    g.readerScrollTo(2000);
+    box.scrollHeight = 5050;
+    fire();
+    expect(g.top()).toBe(2000);
+    // The reader reaches the end; an arrival grows the list in the same frame,
+    // before their scroll event is delivered.
+    box.scrollHeight = 5150;
+    g.readerScrollTo(4250);
+    fire();
+    expect(g.top()).toBe(4350);
+  });
 });

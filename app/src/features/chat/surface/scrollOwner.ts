@@ -139,8 +139,13 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     }
     touchTargets.clear();
   };
+  // Whether reader input landed since the browser's last scrollend. A scroll
+  // after a scrollend with none (the content shrank under a view at its end
+  // and the browser clamped it, 14 ms after a wheel stopped) is no reader's.
+  let inputSinceScrollend = true;
   const noteInput = () => {
     lastInputAt = Date.now();
+    inputSinceScrollend = true;
   };
   scroll.addEventListener('pointerdown', notePointer, {passive: true});
   scroll.addEventListener('touchstart', noteTouch, {passive: true});
@@ -203,6 +208,12 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     const top = scroll.scrollTop;
     const moved = top !== lastTop;
     lastTop = top;
+    // The reader's sequence already ended and no input of theirs came since:
+    // not their scroll, so it neither extends their clock nor reopens the
+    // allowance (it did, and a pinned reader skipped arrivals for 1 s).
+    if (!inputSinceScrollend && !holding() && jumpDepth === 0 && !deps.isMachineScroll(top)) {
+      return;
+    }
     lastScrollByReader =
       jumpDepth === 0 && !deps.isMachineScroll(top) && (readerInputFresh() || readerScrolling());
     if (lastScrollByReader) readerScrollAt = performance.now();
@@ -213,6 +224,10 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
   // stall (it found the reader still driving), settle here.
   const noteScrollEnd = () => {
     awaitingScrollend = false;
+    // A finger or pointer still down: the gesture has not ended (a browser
+    // fires no scrollend mid-drag; a programmatic step can), so its input
+    // still stands for the fling that follows the lift.
+    if (!holding()) inputSinceScrollend = false;
     settle();
   };
   scroll.addEventListener('scroll', noteScroll, {passive: true});
@@ -229,8 +244,34 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
   // The reader let go. If the list is already still, release the banked
   // correction (or re-pin a pinned end that content grew past) in one re-window
   // now; mid-momentum the virtualizer's scroll-end tick does it instead.
+  //
+  // An arrival (or growth under a pinned end) skipped while the reader drove
+  // is OWED, not dropped: this settle pays it if the reader ended at the end.
+  // Driving can also end by the clock alone (the quiet or the stall allowance
+  // running out, input going stale with no scroll), where no event settles, so
+  // while a follow is owed one timer wakes the settle when driving can lapse.
+  let followOwed = false;
+  let owedTimer: ReturnType<typeof setTimeout> | undefined;
+  const owe = () => {
+    followOwed = true;
+    clearTimeout(owedTimer);
+    // A held finger or pointer settles on its own release.
+    if (holding()) return;
+    let wait = READER_INPUT_MS - (Date.now() - lastInputAt);
+    if (lastScrollByReader) {
+      const allow = awaitingScrollend ? READER_SCROLL_STALL_MS : READER_SCROLL_QUIET_MS;
+      wait = Math.max(wait, allow - (performance.now() - readerScrollAt));
+    }
+    owedTimer = setTimeout(settle, Math.max(0, wait) + 1);
+  };
+  deps.onTeardown(() => clearTimeout(owedTimer));
   const settle = () => {
-    if (driving()) return;
+    if (driving() || (followOwed && readerInputFresh())) {
+      if (followOwed) owe();
+      return;
+    }
+    followOwed = false;
+    clearTimeout(owedTimer);
     if (deps.listBanked() || (deps.isPinned() && deps.distToEnd() > 0.5)) deps.rewindow();
   };
   // The finger owns the offset until the LAST touch lifts (a multi-touch
@@ -318,11 +359,12 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     // carried for a reader in history.
     settleResize(padDelta: number): void {
       // A pinned end that grew while the reader's input was live: the re-pin
-      // waits (their async, coalesced scroll may be about to leave the end), and
-      // is NAMED so a recurrence is not a ghost.
+      // waits (their async, coalesced scroll may be about to leave the end),
+      // owed to the settle, and is NAMED so a recurrence is not a ghost.
       const skipPin = () => {
         if (deps.isPinned() && deps.distToEnd() > 0) {
           logBottomPin('toBottom', 'resize.reader-active', scroll.scrollTop, scroll.scrollHeight);
+          owe();
         }
       };
       if (driving()) {
@@ -355,9 +397,13 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     },
     // A row arrived (storeBindings' rAF, R8) for a reader who was near the end:
     // keep them at the end, unless a reader is driving or their input is fresh
-    // enough that their own scroll may not have landed yet.
+    // enough that their own scroll may not have landed yet. Then the follow is
+    // owed to the settle, which pays it if the reader ends at the end.
     followArrival(): void {
-      if (driving() || readerInputFresh()) return;
+      if (driving() || readerInputFresh()) {
+        owe();
+        return;
+      }
       deps.scrollToBottom();
     },
     // A deliberate move (go-to-bottom W13, unread landing W14). The owner runs the
