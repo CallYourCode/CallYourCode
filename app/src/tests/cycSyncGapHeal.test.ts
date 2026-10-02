@@ -372,6 +372,8 @@ describe('trigger B: a capped delta leaves the unserved middle as holes, and the
     await drain();
     // main never fetched a page here: the cursor called 0..58 covered
     expect(heldMessageSeqs()).toEqual(engineMessageSeqs(engine));
+    // the session records of the skipped range came with their pages
+    expect(rowStore.__mirror(SID)!.idx.length).toBe(engine.rows.length);
     for (let p = 27; p <= 37; p++) expect(engine.fetched).toContain(p);
     const detected = events('gap.detected').find((l) => String(l.fields.why).includes('capped'));
     expect(detected?.fields.pages).toBe('27-37');
@@ -413,6 +415,7 @@ describe('self-heal: the shown pages are fingerprinted on every attach', () => {
     await drain();
     for (let p = 12; p <= 24; p++) expect(engine.fetched).toContain(p);
     expect(heldMessageSeqs()).toEqual(engineMessageSeqs(engine));
+    expect(rowStore.__mirror(SID)!.idx.length).toBe(engine.rows.length);
     expect(sessions.get(SID)!.gaps).toBeUndefined();
     // the painted window reads oldest to newest
     const ts = sessions.get(SID)!.messages.map((m) => m.ts);
