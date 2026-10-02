@@ -378,6 +378,38 @@ describe('pinned to the bottom across late growth', () => {
     fire();
     expect(g.top()).toBe(4300);
   });
+  test('a clamp delivered after the box shrank (the keyboard opening) keeps the pin', () => {
+    const box: Box = {scrollHeight: 5000, clientHeight: 800, padTop: 66};
+    const {cs} = mk();
+    const g = geometry(cs, box);
+    cs.scrollToBottom();
+    g.readerScrollTo(4200);
+    // A row measures 32 px shorter: the browser clamps the view at the end of
+    // the 800 px box; the keyboard shrinks the box to 480 before the scroll
+    // event is delivered.
+    box.scrollHeight = 4968;
+    box.clientHeight = 480;
+    g.readerScrollTo(4168);
+    fire();
+    expect(g.top()).toBe(4488);
+  });
+  test('a landing whose scroll event is delivered after the box shrank keeps the pin', () => {
+    const box: Box = {scrollHeight: 5000, clientHeight: 800, padTop: 66};
+    const {cs} = mk();
+    const g = geometry(cs, box);
+    cs.scrollToBottom();
+    g.readerScrollTo(4200);
+    // The landing pins a taller list; rows measure shorter and the browser
+    // clamps the view at the end of the 800 px box; the keyboard shrinks the
+    // box to 480 before the one scroll event for all of it is delivered.
+    box.scrollHeight = 5400;
+    cs.scrollToBottom();
+    box.scrollHeight = 5000;
+    box.clientHeight = 480;
+    g.readerScrollTo(4200);
+    fire();
+    expect(g.top()).toBe(4520);
+  });
   test('a reader whose scroll event lands after an arrival grew the list stays pinned', () => {
     const box: Box = {scrollHeight: 5000, clientHeight: 800, padTop: 66};
     const {cs} = mk();

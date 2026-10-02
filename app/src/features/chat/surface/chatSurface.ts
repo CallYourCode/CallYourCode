@@ -514,9 +514,11 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   // same amount so what they are reading stays put. No timers on this path.
   const PIN_PX = 4;
   let pinnedToBottom = false;
-  // The list height as last laid out for the resize observer or the scroll
-  // listener: growth past it is not yet absorbed (no re-pin has run for it).
+  // The list and box heights as last laid out for the resize observer or the
+  // scroll listener: a change past them is not yet absorbed (no re-pin has run
+  // for it), and a scroll event read after it happened in the same frame.
   let listHeightSeen = 0;
+  let boxHeightSeen = 0;
   let padTopSeen = 0;
   const notePinAfterWrite = () => {
     pinnedToBottom = distToEnd() <= PIN_PX;
@@ -665,6 +667,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   // not slide. A finger on the surface owns the offset until it lifts.
   const onListResize = () => {
     listHeightSeen = messageListScroll.scrollHeight;
+    boxHeightSeen = messageListScroll.clientHeight;
     const padNow = messageListPadTop.offsetHeight;
     const padDelta = padNow - padTopSeen;
     padTopSeen = padNow;
@@ -856,7 +859,14 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       // measure shorter than their estimate shrink the list right after the
       // landing), so a pinned reader was left unpinned and the next resize (the
       // phone keyboard opening, a late image) no longer kept the end.
-      const clamp = readerUp && height < readerTrackHeight - 1 && distToEnd() <= 1;
+      // The clamp happened in the box it was laid out in: when the box shrank
+      // before this event was delivered (the keyboard opening right as a row
+      // measured shorter), it sits at the end of the OLD box height, and the
+      // new box reads it as a reader's scroll 320 px up (the pin dropped and
+      // the keyboard and the reply were never followed).
+      const atSeenBoxEnd = clientH < boxHeightSeen - 1 && height - top - boxHeightSeen <= 1;
+      const clamp =
+        readerUp && height < readerTrackHeight - 1 && (distToEnd() <= 1 || atSeenBoxEnd);
 
       // The reader's own scroll ends the divider hold: a real gesture owns the
       // offset from here on. Machine writes (the hold's own re-seat, the landing)
@@ -892,17 +902,22 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       // A scroll that reached the end of the list as last laid out is at the
       // end, even when this event is read after an arrival grew the list in
       // the same frame (the reader who had just come back to the end lost the
-      // pin and never followed the reply).
+      // pin and never followed the reply), and so is one at the end of the box
+      // as last laid out, read after the box shrank (the open landing's scroll
+      // event delivered after the keyboard opened).
       if (readerUp && !clamp) pinnedToBottom = false;
-      else if (!machine) {
+      else if (!machine && !clamp) {
         const grewUnseen = listHeightSeen > 0 && height > listHeightSeen + 1;
         pinnedToBottom =
-          distToEnd() <= PIN_PX || (grewUnseen && top + clientH >= listHeightSeen - PIN_PX);
+          distToEnd() <= PIN_PX ||
+          atSeenBoxEnd ||
+          (grewUnseen && top + clientH >= listHeightSeen - PIN_PX);
       } else if (distToEnd() <= PIN_PX) pinnedToBottom = true;
       readerTrackTop = top;
       readerTrackHeight = height;
       readerTrackClientH = clientH;
       listHeightSeen = height;
+      boxHeightSeen = clientH;
     },
     {passive: true}
   );
@@ -1230,6 +1245,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       readerTrackHeight = messageListScroll.scrollHeight;
       readerTrackClientH = messageListScroll.clientHeight;
       listHeightSeen = messageListScroll.scrollHeight;
+      boxHeightSeen = messageListScroll.clientHeight;
 
       setNewBelow(0);
 
