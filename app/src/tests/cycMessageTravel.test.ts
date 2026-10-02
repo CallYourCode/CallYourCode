@@ -139,6 +139,33 @@ describe('jumpToMessage', () => {
     expect(scrollMessageIntoView).toHaveBeenCalledTimes(1);
     expect(api.jumpToMessage(999, 'claude')).toBe(false);
   });
+  test('the travel is the scroll owner jump, and stops writing once the reader takes over', async () => {
+    let took = false;
+    const writes: number[] = [];
+    const container = document.createElement('div');
+    Object.defineProperty(container, 'scrollTop', {
+      get: () => 100,
+      set: (v: number) => writes.push(v)
+    });
+    const jump = vi.fn((_kind: string, run: (readerTook: () => boolean) => unknown) =>
+      run(() => took)
+    );
+    const {api, deps} = mk({scroller: () => container, jump: jump as MessageTravelDeps['jump']});
+    const el = document.createElement('div');
+    el.className = 'cyc-message';
+    el.dataset.mid = '7';
+    deps.messageListInner.append(el);
+    expect(api.jumpToMessage(500, 'claude')).toBe(true);
+    expect(jump).toHaveBeenCalledWith('to-message', expect.any(Function));
+    const travelled = jump.mock.results[0]!.value as Promise<void>;
+    await new Promise((r) => setTimeout(r, 60));
+    // Re-centring the target: the travel writes while nobody else drives.
+    expect(writes.length).toBeGreaterThan(0);
+    took = true;
+    const n = writes.length;
+    await travelled;
+    expect(writes).toHaveLength(n);
+  });
 });
 describe('goToMessage', () => {
   test('on-screen chat skips the open; the seat gets a flushed render first', async () => {

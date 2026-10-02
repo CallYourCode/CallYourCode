@@ -418,7 +418,8 @@ function buildApp() {
     openPaintIsPending,
     openPaintStartedAt,
     clearOpenPaint,
-    mountChrome
+    mountChrome,
+    ownerJump
   } = cs;
 
   const {
@@ -457,7 +458,8 @@ function buildApp() {
     render: () => render(),
     openChat: (id, after) => openChat(id, after),
     isChatViewOpen: () => mainColumns.dataset.view === 'chat',
-    releaseBottomPin: () => releaseBottomPin()
+    releaseBottomPin: () => releaseBottomPin(),
+    jump: ownerJump
   });
 
   installMessageMenu({

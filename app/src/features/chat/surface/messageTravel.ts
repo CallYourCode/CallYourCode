@@ -45,6 +45,10 @@ export interface MessageTravelDeps {
   // Drop the surface's "pinned to bottom" state as the jump leaves the bottom,
   // so the resize observer does not re-pin and yank the target off-screen.
   releaseBottomPin?(): void;
+  // The ScrollOwner's deliberate move (owner.jump): the travel runs inside it
+  // for its whole duration, so its scrolls never read as a reader driving, and
+  // it stops writing the moment the reader's finger lands (readerTook).
+  jump?<T>(kind: string, run: (readerTook: () => boolean) => T): T;
 }
 
 // A single animation-frame tick, for the jump settle loop below.
@@ -67,14 +71,16 @@ export function createMessageTravel(deps: MessageTravelDeps) {
   // drift out of view (or the one-shot centre lands off, and on tablet/laptop
   // the row was gone 2s later). Re-centre it every frame -- re-mounting it if
   // the window slid past it -- until its centred offset holds, bounded so this
-  // always terminates. Runs after the smooth first leg the reader sees.
-  const settleToMessage = async (id: string): Promise<void> => {
+  // always terminates. Runs after the smooth first leg the reader sees. Stops
+  // the moment the reader takes the offset back.
+  const settleToMessage = async (id: string, readerTook: () => boolean): Promise<void> => {
     const container = deps.scroller();
     const first = messageListInner.querySelector<HTMLElement>(midSel(id));
     if (first) await smoothScrollTo({container, element: first, position: 'center'});
     const MAX_FRAMES = 60; // ~1s ceiling, under the 2s a caller waits to read it
     let stable = 0;
     for (let i = 0; i < MAX_FRAMES; i++) {
+      if (readerTook()) return;
       const el = messageListInner.querySelector<HTMLElement>(midSel(id));
       if (!el) {
         // The window slid off the target (estimate drift remounted a different
@@ -99,7 +105,7 @@ export function createMessageTravel(deps: MessageTravelDeps) {
       await nextFrame();
     }
     const el = messageListInner.querySelector<HTMLElement>(midSel(id));
-    if (el) {
+    if (el && !readerTook()) {
       const from = container.scrollTop;
       container.scrollTop = seatScrollTop({container, element: el, position: 'center'});
       logScrollWrite(container, 'travel.final', from, container.scrollTop);
@@ -126,6 +132,10 @@ export function createMessageTravel(deps: MessageTravelDeps) {
     if (!touchCapable) composer.focus();
   };
 
+  // A travel write is the owner's deliberate move (see MessageTravelDeps.jump).
+  const travel = <T>(run: (readerTook: () => boolean) => T): T =>
+    deps.jump ? deps.jump('to-message', run) : run(() => false);
+
   const jumpToMessage = (ts: number, role: 'user' | 'claude', wantId?: string): boolean => {
     const s = active();
     if (!s) return false;
@@ -151,7 +161,7 @@ export function createMessageTravel(deps: MessageTravelDeps) {
     // The target row may sit outside the virtual window (never mounted). Scroll
     // the box to its computed offset, which re-windows and mounts it, then
     // re-query and centre it with the settle below.
-    if (m && !el && scrollMessageIntoView(messageListInner, m.id, 'center')) {
+    if (m && !el && travel(() => scrollMessageIntoView(messageListInner, m.id, 'center'))) {
       el = messageListInner.querySelector<HTMLElement>(sel(m.id));
     }
     if (!m || !el) return false;
@@ -159,7 +169,8 @@ export function createMessageTravel(deps: MessageTravelDeps) {
     // Centre and hold it against the measure-vs-estimate drift; the target is
     // resolved and mounted now, so the jump has succeeded and we return true
     // while the centring settles.
-    void settleToMessage(m.id);
+    const id = m.id;
+    void travel((readerTook) => settleToMessage(id, readerTook));
     return true;
   };
 

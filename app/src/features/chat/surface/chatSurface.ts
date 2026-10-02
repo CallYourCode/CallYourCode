@@ -477,6 +477,9 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     const s = active();
     if (!s || !messageListInner.childElementCount) return;
     if (!graceHeldGrowth || firstUnreadId !== undefined) return;
+    // The reader owns the offset (a finger down, their scroll or momentum
+    // live): no re-pin under them.
+    if (scrollOwner.driving()) return;
     const nearPx = Math.max(OVERLAY_SCROLL_NEAR_PX, messageListScroll.clientHeight / 3);
     const dist = distToEnd();
     if (dist > 1 && dist <= nearPx) scrollToBottom();
@@ -1378,6 +1381,9 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     // A row arrived for a reader who was near the end (storeBindings, R8): the
     // owner re-pins unless a reader is driving (phase 3 step 5).
     followArrival: scrollOwner.followArrival,
+    // A deliberate move owned for its whole duration (the jump-to-message
+    // travel); it yields the moment a finger lands.
+    ownerJump: scrollOwner.jump,
     setNewBelow,
     updateGoDown,
     hideUnreadBanner,
