@@ -435,6 +435,29 @@ describe('self-heal: the shown pages are fingerprinted on every attach', () => {
     );
   });
 
+  test('a hole that reaches the tail page stands where the rows are missing, not after the newest message', async () => {
+    // A main-built cache: held through 2349, then the newest message 2590 that
+    // arrived as a broadcast; the cursor claims it all. The engine is at 2590,
+    // so the attach is caught up and the fingerprints flag pages 23..25, the
+    // tail page among them.
+    const engine = new FakeEngine(2590);
+    const held = [...Array.from({length: 2350}, (_, i) => i), 2590];
+    await seedDevice(engine, held, {tailVersion: 2591, tailPage: 25, coveredFrom: 0});
+    stand(engine);
+    hidePage(true);
+    attach(SID);
+    await settle(150);
+    expect(events('gap.detected').map((l) => l.fields.pages)).toEqual(['23-25']);
+    const s = sessions.get(SID)!;
+    expect(s.gaps?.length).toBe(1);
+    // after the last row held below the missing stretch, before the newest message
+    expect(s.gaps![0].ts).toBe(tsOf(2349));
+    hidePage(false);
+    await drain();
+    expect(heldMessageSeqs()).toEqual(engineMessageSeqs(engine));
+    expect(sessions.get(SID)!.gaps).toBeUndefined();
+  });
+
   test('a page holding a second copy of a message under another id is replaced: dup.dropped', async () => {
     const engine = new FakeEngine(399);
     await seedDevice(

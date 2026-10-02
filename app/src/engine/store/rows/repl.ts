@@ -568,7 +568,11 @@ function onPageCommitted(sessionId: string, page: number, pg: EnginePage, wasHol
 }
 
 // The gap rows for the open chat: one per run of consecutive hole pages that the
-// window reaches, placed right after the newest shown row at or below the run.
+// window reaches. Within a run the row stands where the window shows the
+// widest stretch of seqs with nothing in it: between the newest shown row below
+// the run, the shown rows inside it, and the run's end (or the engine's newest
+// seq when the run reaches the growing tail page, so a newer message already
+// held there stays below the gap, not above it).
 function gapMarkers(sessionId: string): CycSessionEvent[] {
   const r = repls.get(sessionId);
   if (!r || !r.cursor.holes.size) return [];
@@ -577,15 +581,37 @@ function gapMarkers(sessionId: string): CycSessionEvent[] {
   const ps = r.cursor.pageSize;
   const pages = [...r.cursor.holes].sort((a, b) => a - b);
   const want = wanted.get(sessionId);
+  const newest = r.cursor.tailVersion > 0 ? r.cursor.tailVersion - 1 : Infinity;
   const out: CycSessionEvent[] = [];
   for (let i = 0; i < pages.length;) {
     let j = i;
     while (j + 1 < pages.length && pages[j + 1] === pages[j] + 1) j++;
     const lo = pages[i] * ps;
     const hi = (pages[j] + 1) * ps - 1;
-    let at: {seq: number; ts: number} | null = null;
-    for (const x of shown) if (x.seq <= hi && (!at || x.seq > at.seq)) at = x;
-    if (at) {
+    let below: {seq: number; ts: number} | null = null;
+    const inside: Array<{seq: number; ts: number}> = [];
+    for (const x of shown) {
+      if (x.seq < lo) {
+        if (!below || x.seq > below.seq) below = x;
+      } else if (x.seq <= hi) inside.push(x);
+    }
+    if (below || inside.length) {
+      inside.sort((a, b) => a.seq - b.seq);
+      let after = below;
+      let prev = below ? below.seq : lo - 1;
+      let prevRow = below;
+      let widest = -1;
+      for (let k = 0; k <= inside.length; k++) {
+        const next = k < inside.length ? inside[k].seq : Math.min(hi, newest) + 1;
+        if (next - prev > widest) {
+          widest = next - prev;
+          after = prevRow;
+        }
+        if (k < inside.length) {
+          prev = inside[k].seq;
+          prevRow = inside[k];
+        }
+      }
       let n = 0;
       let known = false;
       for (let p = pages[i]; p <= pages[j]; p++) {
@@ -599,7 +625,10 @@ function gapMarkers(sessionId: string): CycSessionEvent[] {
         known && n > 0
           ? `Loading ${n} missing message${n === 1 ? '' : 's'}...`
           : 'Loading missing messages...';
-      out.push({uuid: `gap:${lo}`, kind: 'gap', ts: at.ts, seq: lo, text});
+      // the list puts a message of the same ts before the gap row, so "before
+      // the lowest shown row" is one millisecond earlier
+      const ts = after ? after.ts : inside[0].ts - 1;
+      out.push({uuid: `gap:${lo}`, kind: 'gap', ts, seq: lo, text});
     }
     i = j + 1;
   }
