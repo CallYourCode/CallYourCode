@@ -402,8 +402,9 @@ const samePrint = (a: Print, b: Print) => a.n === b.n && a.m === b.m && a.h === 
 const printKey = (p: Print) => `${p.n}/${p.m}/${p.h}`;
 
 // Pages flagged by a fingerprint and not yet refetched: the engine's print and
-// how many messages the device lacked there (the gap row's count).
-type Want = {print: Print; missingMsgs: number};
+// how many rows and messages the device lacked there (the gap row's count; a
+// page that lacks no row is a stale edit, refetched without a gap row).
+type Want = {print: Print; missingRows: number; missingMsgs: number};
 const wanted = new Map<string, Map<number, Want>>();
 // The loop guard: a page refetched once that STILL differs (a row the store
 // refuses or folds) is remembered at the engine print it had, and not refetched
@@ -473,10 +474,11 @@ async function verifyPages(
     // shortfall there is chased; the next attach checks the page again.
     if (page === tailPage && dev.n > eng.n) continue;
     const lack = Math.max(0, eng.m - dev.m);
-    want.set(page, {print: eng, missingMsgs: lack});
+    const lackRows = Math.max(0, eng.n - dev.n);
+    want.set(page, {print: eng, missingRows: lackRows, missingMsgs: lack});
     if (!r.cursor.holes.has(page)) flagged.push(page);
     r.cursor.holes.add(page);
-    missingRows += Math.max(0, eng.n - dev.n);
+    missingRows += lackRows;
     missingMsgs += lack;
   }
   if (!flagged.length) return;
@@ -568,7 +570,8 @@ function onPageCommitted(sessionId: string, page: number, pg: EnginePage, wasHol
 }
 
 // The gap rows for the open chat: one per run of consecutive hole pages that the
-// window reaches. Within a run the row stands where the window shows the
+// window reaches. A page flagged only for a stale edit lacks no row, so it is
+// refetched without one. Within a run the row stands where the window shows the
 // widest stretch of seqs with nothing in it: between the newest shown row below
 // the run, the shown rows inside it, and the run's end (or the engine's newest
 // seq when the run reaches the growing tail page, so a newer message already
@@ -576,11 +579,14 @@ function onPageCommitted(sessionId: string, page: number, pg: EnginePage, wasHol
 function gapMarkers(sessionId: string): CycSessionEvent[] {
   const r = repls.get(sessionId);
   if (!r || !r.cursor.holes.size) return [];
+  const want = wanted.get(sessionId);
+  const pages = [...r.cursor.holes]
+    .filter((p) => (want?.get(p)?.missingRows ?? 1) > 0)
+    .sort((a, b) => a - b);
+  if (!pages.length) return [];
   const shown = rowStore.shownRows(sessionId);
   if (!shown.length) return [];
   const ps = r.cursor.pageSize;
-  const pages = [...r.cursor.holes].sort((a, b) => a - b);
-  const want = wanted.get(sessionId);
   const newest = r.cursor.tailVersion > 0 ? r.cursor.tailVersion - 1 : Infinity;
   const out: CycSessionEvent[] = [];
   for (let i = 0; i < pages.length;) {

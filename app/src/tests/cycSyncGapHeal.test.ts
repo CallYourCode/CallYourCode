@@ -520,8 +520,13 @@ describe('self-heal: the shown pages are fingerprinted on every attach', () => {
     row.rev = 1;
     row.text = 'm220, transcript filled';
     stand(engine);
+    hidePage(true);
     attach(SID);
     await settle(120);
+    // flagged and queued for a refetch, but nothing is missing: no gap row
+    expect(events('gap.detected').map((l) => l.fields.pages)).toEqual(['2']);
+    expect(sessions.get(SID)!.gaps).toBeUndefined();
+    hidePage(false);
     await drain();
     expect(engine.fetched).toEqual([2]);
     const m = rowStore.__mirror(SID)!;
