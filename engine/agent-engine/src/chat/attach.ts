@@ -109,6 +109,47 @@ export function newestSeqOf(rows: readonly { seq: number }[]): number {
  *  pages and backfills older by scroll. */
 export const DELTA_PAGES_MAX = 20;
 
+/** The most pages one attach-ok fingerprints. A 300-message window on the
+ *  busiest chat spans about 45 pages; a device that scrolled further asks
+ *  again from its new floor. */
+export const FP_PAGES_MAX = 100;
+
+/* PAGE FINGERPRINTS (fix-sync-gap). The device names the lowest page its open
+ * window shows (`verifyFrom`) and the attach-ok answers three numbers for every
+ * page from there up to the pages it is serving inline (those are fresh and
+ * need no check): n = rows on the page, m = chat messages among them, h = the
+ * sum over rows of ((seq - page base + 1) * 1009 + rev). The app computes the
+ * same three from its own seq index; a page that differs is missing rows,
+ * holds rows the engine does not, or holds a stale edit, and the app refetches
+ * it. Counting what this engine actually serves makes unused or repaired seqs
+ * irrelevant: both sides count the same page. */
+export type PagePrints = { from: number; n: number[]; m: number[]; h: number[] };
+
+export function pagePrints(rows: readonly WireRow[], from: number, to: number): PagePrints {
+  const out: PagePrints = { from, n: [], m: [], h: [] };
+  for (let p = from; p <= to; p++) {
+    const base = p * PAGE_SIZE;
+    let msgs = 0;
+    let h = 0;
+    const cut = pageAt(rows, p).messages;
+    for (const r of cut) {
+      if ((r as WireRec).t !== "s") msgs++;
+      const rev = (r as { rev?: unknown }).rev;
+      h += (r.seq - base + 1) * 1009 + (typeof rev === "number" ? rev : 0);
+    }
+    out.n.push(cut.length);
+    out.m.push(msgs);
+    out.h.push(h);
+  }
+  return out;
+}
+
+function readVerifyFrom(m: any): number | null {
+  if (m.verifyFrom === undefined || m.verifyFrom === null || m.verifyFrom === "") return null;
+  const v = Math.floor(Number(m.verifyFrom));
+  return Number.isFinite(v) && v >= 0 ? v : null;
+}
+
 function readFrontier(m: any): number | null {
   if (m.frontier === undefined || m.frontier === null || m.frontier === "") return null;
   const F = Math.floor(Number(m.frontier));
@@ -196,11 +237,23 @@ export function onAttach(ws: Sock, m: any) {
     pagesSkipped = tailMatches;
   }
 
+  /* Fingerprint the pages the device shows that this answer does not carry
+   * (inline pages are served whole, so they are fresh by construction). */
+  const verifyFrom = readVerifyFrom(m);
+  let fp: PagePrints | undefined;
+  if (verifyFrom !== null) {
+    let top = tail;
+    for (const p of pages) if (p.page - 1 < top) top = p.page - 1;
+    const from = Math.max(verifyFrom, top - FP_PAGES_MAX + 1, 0);
+    if (top >= from) fp = pagePrints(rows, from, top);
+  }
+
   d.log("attach", { client: `c${ws.data.cid}`, session: id, known: true,
     total, messages: s.chat.length, records: s.log.length, pointer, ptrPage, tail,
     tailVersion, frontier: F0 ?? undefined, deltaBase,
     have: have !== null || undefined, pagesSkipped: pagesSkipped || undefined,
-    legacyHave: legacyHave || undefined, axisMismatch: axisMismatch || undefined });
+    legacyHave: legacyHave || undefined, axisMismatch: axisMismatch || undefined,
+    verifyFrom: verifyFrom ?? undefined, fpPages: fp ? fp.n.length : undefined });
   /* THE QUEUED TRUTH RIDES ON EVERY ATTACH. A dequeue is a patch: it changes
    * a row without changing any seq, so the have/tailVersion check cannot see
    * it and a client that missed the live `dequeued` frame (a reconnect gap)
@@ -209,8 +262,8 @@ export function onAttach(ws: Sock, m: any) {
    * the app reconciles its held rows against it on every open. */
   const queued = s.chat.filter((m) => m.role === "user" && m.queued).map((m) => m.ts);
   d.send(ws, { t: "attach-ok", id: s.id, known: true,
-    pointer, pointerPage: ptrPage, tailPage: tail, pageSize: PAGE_SIZE, total, pages, queued,
-    ...(deltaBase !== undefined ? { deltaBase } : {}) });
+    pointer, pointerPage: ptrPage, tailPage: tail, tailVersion, pageSize: PAGE_SIZE, total, pages, queued,
+    ...(deltaBase !== undefined ? { deltaBase } : {}), ...(fp ? { fp } : {}) });
   const wasUnseen = s.seenDoneSeq < s.doneSeq;
   s.seenDoneSeq = s.doneSeq; // opening the chat clears the ACTIVITY dot only
   if (wasUnseen) { d.scheduleHeardSave(s.id); d.broadcastSessions(); }
