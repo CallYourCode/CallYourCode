@@ -86,14 +86,34 @@ export function applyProjection(sessionId: string): boolean {
   const pending = (s.messages as CycEngineMessage[]).filter(
     (m) => (isLocalOnly(m) || isUnsettledOwnSend(m)) && !(m.cid && settled.has(m.cid))
   );
-  const sig = projectionSig(messages as CycEngineMessage[], events, pending);
+  const gaps = rowStore.isOpen(sessionId) ? gapSource(sessionId) : [];
+  const sig =
+    projectionSig(messages as CycEngineMessage[], events, pending) +
+    '|g|' +
+    gaps.map((g) => `${g.uuid}#${g.ts}#${g.text}`).join('|');
   if (lastSig.get(sessionId) === sig) return false;
   lastSig.set(sessionId, sig);
   s.messages = pending.length
     ? [...(messages as CycEngineMessage[]), ...pending]
     : (messages as CycEngineMessage[]);
   s.events = events;
+  s.gaps = gaps.length ? gaps : undefined;
   return true;
+}
+
+// The open chat's known holes as list markers (kind 'gap'), supplied by the
+// replicator registry (repl.ts gapMarkers), which owns the holes. Kept as an
+// injected source so the door does not import the registry that imports it.
+let gapSource: (sessionId: string) => CycSessionEvent[] = () => [];
+export function setGapSource(fn: (sessionId: string) => CycSessionEvent[]): void {
+  gapSource = fn;
+}
+
+// Re-project the open chat after something other than a row write changed what
+// it shows (a hole found or filled), painting only when the projection moved.
+export function reproject(sessionId: string): void {
+  if (!rowStore.isOpen(sessionId)) return;
+  if (applyProjection(sessionId)) notify();
 }
 
 // Forget a session's last-projected signature, so the next projection is treated

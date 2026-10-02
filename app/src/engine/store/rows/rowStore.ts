@@ -14,6 +14,7 @@
 //   - one meta record per session, key `<sid>|meta` (the replicator's cursor)
 
 import {cyclog} from '@/shared/logging';
+import {printTerm} from '@shared/pages';
 import type {CycEngineMessage} from '../types';
 import type {CycSessionEvent} from '../../../types';
 import {
@@ -49,6 +50,9 @@ export type SessionMeta = {
   pageSize: number;
   total: number;
   syncedAt: number;
+  // The cursor's known holes (cursor.ts CursorState.holes), as page numbers.
+  // Absent on a meta written before fix-sync-gap: no known holes.
+  holes?: number[];
 };
 
 // The transaction runner over the single `rows` store, resolving the request
@@ -901,6 +905,85 @@ export function close(sessionId: string): void {
   flushIdx(sessionId);
   mirrors.delete(sessionId);
   idxLoaded.delete(sessionId);
+}
+
+// PAGE FINGERPRINTS, the device's side (fix-sync-gap; the engine's twin is
+// chat/attach.ts pagePrints). For each page in [from, to]: n = rows the store
+// holds with a seq on that page, m = message rows among them, h = the sum of
+// ((seq - page base + 1) * 1009 + rev). One pass over the warm index, no
+// payload read.
+export type PagePrint = {n: number; m: number; h: number};
+export async function pagePrints(
+  sessionId: string,
+  from: number,
+  to: number,
+  pageSize: number
+): Promise<PagePrint[]> {
+  const out: PagePrint[] = [];
+  for (let p = from; p <= to; p++) out.push({n: 0, m: 0, h: 0});
+  if (to < from || pageSize <= 0) return out;
+  const m = await ensureIdx(sessionId);
+  const lo = from * pageSize;
+  const hi = (to + 1) * pageSize;
+  for (const t of m.idx) {
+    if (t.seq < lo || t.seq >= hi) continue;
+    const page = Math.floor(t.seq / pageSize);
+    const pr = out[page - from];
+    pr.n++;
+    if (t.kind === 'msg') pr.m++;
+    pr.h += printTerm(t.seq - page * pageSize, t.rv ?? 0);
+  }
+  return out;
+}
+
+// REPLACE one sealed engine page (fix-sync-gap): upsert its rows (fills what is
+// missing, updates stale payloads by id), then drop every row the store holds
+// with a seq in [loSeq, hiSeq] that the page does not carry under the same id: a
+// second copy of one message under another id, or a row the engine no longer
+// has there. Rows the upsert folded INTO an incumbent keep that incumbent.
+// Returns the tuples dropped.
+export async function replacePage(
+  sessionId: string,
+  loSeq: number,
+  hiSeq: number,
+  rows: StoreRow[],
+  tag = 'replace'
+): Promise<{loSeq: number; hiSeq: number; dropped: RowTuple[]}> {
+  const m = await ensureIdx(sessionId);
+  floorOpenWindow(sessionId, m);
+  const res = upsertMirror(m, rows);
+  persistUpsert(sessionId, m, rows, res);
+  logRefused(sessionId, res, tag);
+  if (openSid === sessionId && res.touchesWindow && res.changed) {
+    fireChange(sessionId, res.loSeq, res.hiSeq);
+  }
+  const keep = new Set<string>();
+  for (const r of rows) keep.add(r.id);
+  for (const f of res.foldedInto) keep.add(f.into);
+  const extra: RowTuple[] = [];
+  for (const t of m.idx) if (t.seq >= loSeq && t.seq <= hiSeq && !keep.has(t.id)) extra.push(t);
+  for (const t of extra) dropRow(sessionId, t.id);
+  return {loSeq: res.loSeq, hiSeq: res.hiSeq, dropped: extra};
+}
+
+// The open window as the gap markers need it: the seq and ts of every loaded
+// row, so a marker can sit right after the newest shown row at or below a hole.
+export function shownRows(sessionId: string): Array<{seq: number; ts: number; kind: string}> {
+  const m = mirrors.get(sessionId);
+  if (!m) return [];
+  const out: Array<{seq: number; ts: number; kind: string}> = [];
+  for (const r of m.loaded.values()) if (r.seq >= 0) out.push({seq: r.seq, ts: r.ts, kind: r.kind});
+  return out;
+}
+
+// The lowest committed seq the open window shows, or -1 when it shows nothing:
+// the page the attach asks the engine to fingerprint from (verifyFrom).
+export function shownLowSeq(sessionId: string): number {
+  const m = mirrors.get(sessionId);
+  if (!m || !m.floor) return -1;
+  let lo = Infinity;
+  for (const r of m.loaded.values()) if (r.seq >= 0 && r.seq < lo) lo = r.seq;
+  return Number.isFinite(lo) ? lo : -1;
 }
 
 // Test/inspection: the loaded projection and index size without going through a

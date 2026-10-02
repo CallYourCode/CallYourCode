@@ -60,7 +60,8 @@ import {
   replicatorFor,
   running as replBackfilling,
   seedCursor,
-  stopAllReplicators
+  stopAllReplicators,
+  verifyShown as replVerifyShown
 } from './store/rows/repl';
 import {migrateLegacyHistory, rekeyRowsToOneId} from './store/rows/migrate';
 import * as transfers from './transfers/worker';
@@ -358,7 +359,8 @@ export function contentVersion(s: CycSession): string {
     s.askUnknown ? 1 : 0,
     es.heardTs ?? 0,
     es.historyPending ? 1 : 0,
-    es.notOnEngine ? 1 : 0
+    es.notOnEngine ? 1 : 0,
+    es.gaps ? es.gaps.map((g) => g.uuid + '#' + g.text).join(',') : ''
   ].join('\x1f');
 }
 
@@ -722,7 +724,14 @@ function askEngine(s: CycEngineSession, owner: Conn, openSeq: number) {
   s.historyPending = s.messages.length > 0;
   s.awaitingChatStart = true;
   s.historyAskedAt = Date.now();
-  owner.client.attach(s.paneId, attachFrontier(sessionId, rowStore.highestHeldSeq(sessionId)));
+  const held = rowStore.highestHeldSeq(sessionId);
+  const frontier = attachFrontier(sessionId, held);
+  // The lowest page the open window shows: the engine fingerprints every shown
+  // page it is not serving inline, so a hole or a stale copy there is found.
+  const low = rowStore.shownLowSeq(sessionId);
+  const verifyFrom = low >= 0 ? Math.floor(low / (s.pageSize ?? PAGE_SIZE)) : undefined;
+  cyclog('sync.frontier', {session: sessionId, held, frontier, verifyFrom: verifyFrom ?? -1});
+  owner.client.attach(s.paneId, frontier, verifyFrom);
   window.setTimeout(() => {
     if (openSeq !== attachSeq || attachedId !== sessionId) return;
     const st = sessions.get(sessionId);
@@ -735,6 +744,16 @@ function askEngine(s: CycEngineSession, owner: Conn, openSeq: number) {
 }
 
 let attachSeq = 0;
+
+// The window may now show pages the last attach did not fingerprint (the reader
+// loaded older history or jumped to an old message): check just those pages
+// against the engine (repl.ts verifyShown). Never an attach: its answer re-snaps
+// the window to the newest rows, which would throw the reader off the history
+// they are reading.
+function verifyShown(sessionId: string): void {
+  if (attachedId !== sessionId) return;
+  replVerifyShown(sessionId);
+}
 
 export function canOlder(sessionId: string): boolean {
   const s = sessions.get(sessionId);
@@ -759,6 +778,7 @@ export function loadOlder(sessionId: string): Promise<void> {
         const floor = rowStore.windowFloorSeq(sessionId);
         if (floor > 0) replDemand(sessionId, floor - 1);
       }
+      verifyShown(sessionId);
       notify();
     } catch (e) {
       cyclog('history.older.failed', {session: sessionId, err: e});
@@ -811,7 +831,10 @@ export function ensureMessageHeld(
       return false;
     }
     const st = sessions.get(sessionId);
-    if (st) notify();
+    if (st) {
+      verifyShown(sessionId);
+      notify();
+    }
 
     return !!st && heldFast(st, ref);
   })();

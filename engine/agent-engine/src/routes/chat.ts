@@ -4,7 +4,7 @@
  * (requireOwner/requireLocal), exactly as the if-chain had them. */
 
 import type { RoutesCtx } from "./ctx.ts";
-import { wirePage } from "../chat/attach.ts";
+import { wirePage, wirePrints } from "../chat/attach.ts";
 import { JSON_BODY_MAX_BYTES, readJsonCapped } from "../storage/body-limits.ts";
 import { ensureSeqs } from "../chat/chatlog.ts";
 import { bumpRowsGen } from "../chat/wirecache.ts";
@@ -39,6 +39,23 @@ export async function chatRoutes(ctx: RoutesCtx, req: Request, url: URL, path: s
     }
   }
 
+
+  /* FINGERPRINTS OF SHOWN PAGES (fix-sync-gap): pages [from, to], at most
+   * FP_PAGES_MAX of them, the same three numbers per page an attach-ok's `fp`
+   * carries. The app asks when its window reaches pages the last attach did not
+   * fingerprint (older history, a jump), so it can refetch any that differ
+   * without re-attaching. Read-only. */
+  {
+    const mPrints = req.method === "GET" && path.match(/^\/session\/(.+)\/prints\/(\d+)\/(\d+)$/);
+    if (mPrints) {
+      const denied = await requireOwner(req, server);
+      if (denied) return denied;
+      const id = decodeURIComponent(mPrints[1]);
+      const s = sessions.get(id);
+      if (!s) return json({ error: "no such session", known: false }, 404);
+      return json(wirePrints(s, Number(mPrints[2]), Number(mPrints[3])));
+    }
+  }
 
   /* Shorten one session's chat log: drop all of it, or all but the last N.
    *

@@ -686,7 +686,18 @@ export function chatRefFor(agentId: string): { aid: string; chatId: string } {
 export function persistPatch(agentId: string, mts: number,
   set?: Record<string, unknown>, del?: string[]): void {
   const { aid, chatId } = chatRefFor(agentId);
-  chatStore.appendPatch(aid, chatId, { mts, set, del });
+  /* The edit moves the row's rev (chatmsg.ts), carried in the patch's own
+   * `set` so replay lands on the same number. A queued-only edit is left out:
+   * the attach re-states the queued list every time, so it needs no
+   * fingerprint, and a dequeue's live frame carries no row to stamp. */
+  const queuedOnly = !set && del?.length === 1 && del[0] === "queued";
+  const chat = sessions.get(agentId)?.chat ?? restoredChats.get(agentId);
+  let row: ChatMsg | undefined;
+  if (!queuedOnly && chat) {
+    for (let i = chat.length - 1; i >= 0; i--) if (chat[i].ts === mts) { row = chat[i]; break; }
+  }
+  if (row) row.rev = (row.rev ?? 0) + 1;
+  chatStore.appendPatch(aid, chatId, { mts, set: row ? { ...set, rev: row.rev } : set, del });
   /* Every in-memory row edit is persisted through here (a dequeue, a
    * completed note, a grown clip finalising), and the caller has already
    * mutated the row's fields, so this is the one place that sees them all:

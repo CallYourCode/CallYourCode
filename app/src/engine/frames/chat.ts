@@ -19,6 +19,18 @@ const attachOk: FrameHandler = (ctx, frame) => {
   // the engine's authoritative queued-row list (absent on older engines)
   if (Array.isArray(frame.queued)) a.queued = frame.queued.map(Number).filter(Number.isFinite);
   if (Number.isFinite(frame.deltaBase)) a.deltaBase = Number(frame.deltaBase);
+  const fp = frame.fp;
+  if (
+    fp &&
+    Number.isFinite(fp.from) &&
+    Array.isArray(fp.n) &&
+    Array.isArray(fp.m) &&
+    Array.isArray(fp.h) &&
+    fp.n.length === fp.m.length &&
+    fp.n.length === fp.h.length
+  ) {
+    a.fp = {from: Number(fp.from), n: fp.n.map(Number), m: fp.m.map(Number), h: fp.h.map(Number)};
+  }
   ctx.emit('attachOk', a);
 };
 

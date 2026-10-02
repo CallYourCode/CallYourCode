@@ -32,6 +32,7 @@ import {attachmentMessage, uploadMessage} from '../messages/attachmentMessages';
 import {snippetMessage, fileMessage, downloadMessage} from '../messages/fileMessages';
 import {
   dateMessage,
+  gapMessage,
   sessionEventMessage,
   sessionEventRunMessages,
   sessionEventFoldMessages,
@@ -362,6 +363,14 @@ function evKey(ev: CycSessionEvent): string {
   return (ev as {uuid?: string}).uuid ?? String(ev.ts);
 }
 
+// The store's gap row (door.ts s.gaps) rides the event list as kind 'gap', but
+// it is never part of a run of session events: it always stands as its own row,
+// so a fold or a tool run can never swallow it.
+export const GAP_KIND = 'gap';
+function inEvRun(it: {ev?: CycSessionEvent} | undefined): boolean {
+  return !!it?.ev && it.ev.kind !== GAP_KIND;
+}
+
 // The full render-row model over the merged item list, grouped EXACTLY as the
 // paint loop groups: a maximal same-day run of >= COLLAPSE_MIN events folds to
 // one row; a shorter same-day tool run (+ optional trailing interrupt) is one
@@ -391,7 +400,8 @@ function buildRowModel(items: RowItem[]): {
     const it = items[i];
     if (it.ev) {
       let runEnd = i;
-      while (runEnd + 1 < n && items[runEnd + 1].ev && day[runEnd + 1] === curDay) runEnd++;
+      if (it.ev.kind !== GAP_KIND)
+        while (runEnd + 1 < n && inEvRun(items[runEnd + 1]) && day[runEnd + 1] === curDay) runEnd++;
       if (runEnd - i + 1 >= COLLAPSE_MIN) {
         const ri = rows.length;
         rows.push({key: 'e|' + evKey(it.ev) + '|f', kind: 'event', itemFrom: i, itemTo: runEnd, estimate: EST_EVENT});
@@ -1336,7 +1346,9 @@ function paintMessages(
   // input, not a message. Filtered here so it never becomes a transcript item,
   // without shifting any other row's id or store order.
   const msgs = s.messages.filter((m) => !isResumeControlRow(m));
-  const evs = events ? events.filter((ev) => VISIBLE_EVENT_KINDS.has(ev.kind)) : [];
+  const evs = events
+    ? events.filter((ev) => VISIBLE_EVENT_KINDS.has(ev.kind) || ev.kind === GAP_KIND)
+    : [];
 
   let lastClaudeMi = -1;
   for (let j = msgs.length - 1; j >= 0; j--)
@@ -1588,13 +1600,17 @@ function paintMessages(
     let isFold = false;
     let build: () => HTMLElement;
     let runEnd = i;
-    while (
-      runEnd + 1 < winItems.length &&
-      winItems[runEnd + 1].ev &&
-      new Date(winItems[runEnd + 1].ts).toDateString() === key
-    )
-      runEnd++;
-    if (runEnd - i + 1 >= COLLAPSE_MIN) {
+    if (winItems[from].ev!.kind !== GAP_KIND)
+      while (
+        runEnd + 1 < winItems.length &&
+        inEvRun(winItems[runEnd + 1]) &&
+        new Date(winItems[runEnd + 1].ts).toDateString() === key
+      )
+        runEnd++;
+    if (winItems[from].ev!.kind === GAP_KIND) {
+      const text = winItems[from].ev!.text;
+      build = () => gapMessage(text);
+    } else if (runEnd - i + 1 >= COLLAPSE_MIN) {
       const events: CycSessionEvent[] = [];
       for (let k = i; k <= runEnd; k++) events.push(winItems[k].ev!);
       isFold = true;
@@ -2049,7 +2065,7 @@ function paintMessages(
   let grown: ItemFrame[] | null = null;
   if (reusable && start === reusable.length && start > 0 && start < winItems.length) {
     const next = winItems[start];
-    if (next?.ev) {
+    if (inEvRun(next)) {
       const day = new Date(next.ts).toDateString();
       let li = start - 1;
       while (li > 0 && !reusable[li]) li--;
@@ -2063,7 +2079,7 @@ function paintMessages(
         let end = start;
         while (
           end < winItems.length &&
-          winItems[end].ev &&
+          inEvRun(winItems[end]) &&
           new Date(winItems[end].ts).toDateString() === day
         ) {
           add.push(winItems[end].ev!);
@@ -2091,14 +2107,15 @@ function paintMessages(
           while (j >= 0 && !reusable[j]) j--;
           if (j < 0) break;
           const f = reusable[j];
-          if (!f.se || new Date(winItems[j].ts).toDateString() !== day) break;
+          if (!f.se || !inEvRun(winItems[j]) || new Date(winItems[j].ts).toDateString() !== day)
+            break;
           runStart = j;
           j--;
         }
         let end = runStart;
         while (
           end < winItems.length &&
-          winItems[end].ev &&
+          inEvRun(winItems[end]) &&
           new Date(winItems[end].ts).toDateString() === day
         )
           end++;

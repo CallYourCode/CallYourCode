@@ -201,6 +201,13 @@ export type ChatMsg = {
    * and ensureSeqs backfills it before any page is served, so it is in fact
    * present on every message the wire ever carries. */
   seq?: number;
+  /* THE ROW'S EDIT COUNT (fix-sync-gap). persistPatch bumps it on every edit
+   * that is not a queued-flag change (those reconcile on every attach through
+   * the queued list) and writes it into the patch line, so replay restores it.
+   * The attach's page fingerprints fold it in, so a device that missed an
+   * edit's live frame sees its page differ and refetches it. Absent = 0: every
+   * row edited before this shipped, and every row never edited. */
+  rev?: number;
   /* A DURABLE, RESTART- AND RENUMBER-INVARIANT ROW IDENTITY (dup-rows).
    *
    * `seq` is the paging axis, and it is NOT a stable identity: it is shared

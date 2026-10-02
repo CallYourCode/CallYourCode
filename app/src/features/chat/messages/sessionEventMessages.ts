@@ -251,6 +251,24 @@ const DATE_MESSAGE_STICKY =
   'cyc-date-chip sticky top-[calc(var(--cyc-chat-pad-top)+0.25rem)] z-[2] pb-1 ' +
   'pointer-events-none font-medium [transform:translateZ(0)] [&.cyc-date-veiled]:invisible';
 
+// The gap row (fix-sync-gap): the store knows rows are missing here and is
+// fetching them, so the list says so instead of joining the rows on either side.
+// The date chip's service style, not sticky; it goes away when the page lands.
+export function gapMessage(label: string): HTMLDivElement {
+  const messageNode = h(
+    'div',
+    'cyc-message cyc-msg-system cyc-gap-marker relative z-[1] mx-auto mb-0.5 flex flex-wrap ' +
+      SERVICE_MSG_UTILS +
+      ' max-w-[var(--cyc-chat-width)]'
+  );
+  const content = h('div', 'cyc-message-content ' + SERVICE_CONTENT_UTILS);
+  const msg = h('div', 'cyc-service-text ' + SERVICE_TEXT_UTILS);
+  msg.textContent = label;
+  content.append(msg);
+  messageNode.append(content);
+  return messageNode;
+}
+
 export function dateMessage(label: string): HTMLDivElement {
   const messageNode = h(
     'div',

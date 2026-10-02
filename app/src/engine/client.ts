@@ -3,6 +3,7 @@ import type {
   EngineClient,
   EngineEvents,
   EnginePage,
+  EnginePagePrints,
   SttStream,
   SttStreamHandlers
 } from './contract';
@@ -293,9 +294,16 @@ export class WsEngineClient implements EngineClient {
   // -1 when it has never held anything contiguous. Unsealed, the frame waits
   // in the queue (latest attach wins) and flushes first on the next pipe; the
   // store re-attaches again on the settled edge with the same frontier.
-  public attach(sessionId: string, frontier = -1) {
+  // `verifyFrom` names the lowest page the open window shows; the attach-ok
+  // then fingerprints the shown pages so the store can refetch any that differ.
+  public attach(sessionId: string, frontier = -1, verifyFrom?: number) {
     this.attachedId = sessionId;
-    this.send({t: 'attach', id: sessionId, frontier});
+    this.send({
+      t: 'attach',
+      id: sessionId,
+      frontier,
+      ...(verifyFrom !== undefined && verifyFrom >= 0 ? {verifyFrom} : {})
+    });
 
     if (this.sealReady() && this.awaitingInboundBy === null) {
       this.awaitingInboundBy = Date.now() + LIVENESS_GRACE_MS;
@@ -311,6 +319,38 @@ export class WsEngineClient implements EngineClient {
     const json = await res.json();
     if (!json || typeof json.page !== 'number' || !Array.isArray(json.messages)) return null;
     return decodePage(json);
+  }
+
+  public async fetchPrints(
+    sessionId: string,
+    from: number,
+    to: number
+  ): Promise<(EnginePagePrints & {tailPage: number}) | null> {
+    const res = await this.engineFetch(
+      '/session/' + encodeURIComponent(sessionId) + '/prints/' + from + '/' + to,
+      {signal: AbortSignal.timeout(15_000)}
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`prints failed: HTTP ${res.status}`);
+    const fp = await res.json();
+    if (
+      !fp ||
+      !Number.isFinite(fp.from) ||
+      !Number.isFinite(fp.tailPage) ||
+      !Array.isArray(fp.n) ||
+      !Array.isArray(fp.m) ||
+      !Array.isArray(fp.h) ||
+      fp.n.length !== fp.m.length ||
+      fp.n.length !== fp.h.length
+    )
+      return null;
+    return {
+      from: Number(fp.from),
+      n: fp.n.map(Number),
+      m: fp.m.map(Number),
+      h: fp.h.map(Number),
+      tailPage: Number(fp.tailPage)
+    };
   }
 
   public progress(sessionId: string, seq: number, explicit = false): boolean {

@@ -164,10 +164,12 @@ describe('the attach frontier states only contiguous coverage (root cause)', () 
     expect(attachFrontier(SID, held)).toBe(299);
   });
 
-  test('no replicator: keep the held tail, invent no suffix', () => {
-    // With no covered run to prove a suffix, the prior behavior stands: the held
-    // tail is stated. Only a PROVEN non-anchored suffix downgrades to cold.
-    expect(attachFrontier(SID, 12345)).toBe(12345);
+  test('no confirmed edge: attach cold, never the held tail', () => {
+    // With no replicator the engine has confirmed nothing on this page load, and
+    // the held tail can be a broadcast message for a chat this device was not
+    // attached to (fix-sync-gap: the laptop's BZ Builder stated 136559 that way
+    // and never received the 65 messages below it). Cold is the honest answer.
+    expect(attachFrontier(SID, 12345)).toBe(-1);
   });
 });
 

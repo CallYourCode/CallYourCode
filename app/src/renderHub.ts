@@ -402,6 +402,17 @@ export function createRenderHub(deps: RenderHubDeps) {
   // re-run only when a structural input could actually have moved.
   const statusNum = (st?: string): number =>
     st === 'sending' ? 1 : st === 'sent' ? 2 : st === 'delivered' ? 3 : st === 'failed' ? 4 : 0;
+  // The overlay's events with the store's gap rows merged in by ts (a stable
+  // merge, so a gap row sits after an event of the same instant).
+  function withGapRows(
+    events: CycSessionEvent[] | undefined,
+    gaps: CycSessionEvent[] | undefined
+  ): CycSessionEvent[] | undefined {
+    if (!gaps?.length) return events;
+    if (!events?.length) return gaps;
+    return [...events, ...gaps].sort((a, b) => a.ts - b.ts);
+  }
+
   function chatScanKey(
     s: CycSession,
     overlayActive: boolean,
@@ -449,13 +460,18 @@ export function createRenderHub(deps: RenderHubDeps) {
     // nodes on inputs the message fold alone misses. Fold those too:
     // - the TUI overlay swaps event rows in and out; when it is active each
     //   event's ts and kind are folded so an arriving event (or the interrupt
-    //   reorder, which reorders by these same inputs) re-keys.
+    //   reorder, which reorders by these same inputs) re-keys. The store's gap
+    //   rows ride the same list whatever the overlay, their words folded too.
     let evFold = 0;
-    if (overlayActive && events) {
+    if (events) {
       for (const ev of events) {
         evFold = (Math.imul(evFold, 31) + (ev.ts | 0)) | 0;
         const k = ev.kind;
         for (let j = 0; j < k.length; j++) evFold = (Math.imul(evFold, 31) + k.charCodeAt(j)) | 0;
+        // a gap row's count changes its words without moving it
+        if (k === 'gap')
+          for (let j = 0; j < ev.text.length; j++)
+            evFold = (Math.imul(evFold, 31) + ev.text.charCodeAt(j)) | 0;
       }
     }
     // firstUnread fixes the divider's position; mode gates hydrateWaveforms
@@ -624,7 +640,11 @@ export function createRenderHub(deps: RenderHubDeps) {
     // the scan key plus the tail's live body. When it is unchanged the bracket
     // -- the sole writer of the message scroller's scrollTop -- does not run, so
     // an idle open chat neither repaints nor creeps upward (the V4 symptom).
-    const scanKey = chatScanKey(s, overlayActive, es.events);
+    // The transcript's event rows: the overlay's session events when it is on,
+    // plus the store's gap rows (door.ts s.gaps) always, so a known hole is
+    // never painted as two adjacent rows.
+    const shownEvents = withGapRows(overlayActive ? es.events : undefined, es.gaps);
+    const scanKey = chatScanKey(s, overlayActive, shownEvents);
     const msgs = s.messages ?? [];
     const tail = msgs.length
       ? (msgs[msgs.length - 1] as CycMessage & {
@@ -666,7 +686,7 @@ export function createRenderHub(deps: RenderHubDeps) {
           cs.firstUnread(),
           audio.onMessageSeek,
           media.onOpenFileCard,
-          overlayActive ? es.events : undefined,
+          shownEvents,
 
           (m) =>
             m.upload

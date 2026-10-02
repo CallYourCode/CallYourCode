@@ -55,7 +55,10 @@ export type StoreRow = {
 // loading the payload. It is set only for event tuples. It does NOT drive the
 // open-window floor (see anchorsOpenWindow: only messages anchor the window); it
 // stays on the tuple as the durable pill-kind hint the surface reads.
-export type RowTuple = {id: string; seq: number; ts: number; kind: RowKind; ek?: string};
+// `rv` is a message row's engine edit count (msg.rev), carried on the tuple so
+// the page fingerprint (repl.ts verifyPages) is computable from the index alone.
+// Absent = 0.
+export type RowTuple = {id: string; seq: number; ts: number; kind: RowKind; ek?: string; rv?: number};
 
 // THE ONE NAME of a message row: its durable string identity, computed here and
 // nowhere else (fix-oneid). One row, one name, used by the store AND by every
@@ -121,6 +124,7 @@ export function eventRow(sessionId: string, ev: CycSessionEvent): StoreRow {
 export function tupleOf(r: StoreRow): RowTuple {
   const t: RowTuple = {id: r.id, seq: r.seq, ts: r.ts, kind: r.kind};
   if (r.kind === 'event' && r.event) t.ek = r.event.kind;
+  if (r.kind === 'msg' && r.msg?.rev) t.rv = r.msg.rev;
   return t;
 }
 
@@ -486,6 +490,9 @@ function mergeReserve(inc: CycEngineMessage, next: CycEngineMessage): void {
   carryClientFields(inc, next);
   if (!next.mid && inc.mid) next.mid = inc.mid;
   if (!next.dedupeKey && inc.dedupeKey) next.dedupeKey = inc.dedupeKey;
+  // The engine's edit count only grows; a local patch built without it must not
+  // read as an older copy.
+  if ((inc.rev ?? 0) > (next.rev ?? 0)) next.rev = inc.rev;
 }
 
 function carryClientFields(inc: CycEngineMessage, next: CycEngineMessage): void {
@@ -746,6 +753,14 @@ export function upsertMirror(m: Mirror, rows: StoreRow[]): UpsertResult {
         payloadChanged = true;
         changed = true;
       }
+      // An edit the engine counted (rev) rewrites the held tuple in place, so
+      // the page fingerprint reads the new count; the durable layer rewrites
+      // this row's chunk (persistUpsert marks every arriving row's chunk).
+      const held = m.byId.get(row.id);
+      if (held && (held.rv ?? 0) !== (t.rv ?? 0)) {
+        if (t.rv) held.rv = t.rv;
+        else delete held.rv;
+      }
     }
     seenRows.push({row, isNew, payloadChanged, reseated});
     if (row.seq >= 0) {
@@ -821,7 +836,8 @@ function samePayload(a: StoreRow, b: StoreRow): boolean {
     x.queued === y.queued &&
     (x as {growing?: boolean}).growing === (y as {growing?: boolean}).growing &&
     x.durationS === y.durationS &&
-    x.transcriptPending === y.transcriptPending
+    x.transcriptPending === y.transcriptPending &&
+    (x.rev ?? 0) === (y.rev ?? 0)
   );
 }
 

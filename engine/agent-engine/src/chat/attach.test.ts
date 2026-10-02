@@ -25,14 +25,16 @@
 import { test, expect, afterAll, afterEach } from "bun:test";
 
 import { wireCore, sessionsFrame, type WireCore, type FakeClient, wireId } from "../test-utils/wire-core.ts";
-import { chatStore } from "../sessions/session-state.ts";
+import { chatStore, chatRefFor, persistPatch } from "../sessions/session-state.ts";
+import { agentChatFile } from "../storage/datadir.ts";
+import { replayLogText } from "./chatstore.ts";
 import { PANE } from "../test-utils/fake-herdr.ts";
 import { until } from "../test-utils/wait.ts";
 import { dispatchClientFrame } from "../transport/frames.ts";
 import { dispatchSessionFrame } from "../runtime/mcp.ts";
 import { onUtterance } from "./deliver.ts";
 import { PAGE_SIZE } from "../runtime/pages.ts";
-import { DELTA_PAGES_MAX, wirePage } from "./attach.ts";
+import { DELTA_PAGES_MAX, FP_PAGES_MAX, wirePage, wirePrints } from "./attach.ts";
 import type { Sock } from "../transport/sock.ts";
 
 /* THE PAUSE BETWEEN A BODY AND ITS ENTER, shortened for this file. 250ms is the
@@ -505,4 +507,99 @@ test("a frontier past the newest seq is a STALE AXIS: serve the cold tail, log t
   const mm = c.logs.find((l) => l.event === "attach.axis-mismatch")!;
   expect(mm.fields.frontier).toBe(133361);
   expect(mm.fields.tailVersion).toBe(12);
+});
+
+/* PAGE FINGERPRINTS (fix-sync-gap). The laptop's BZ Builder hole: the device's
+ * window covered pages it held only in part (the middle never arrived), and no
+ * attach ever said so. The device now names the lowest page its window shows and
+ * the attach-ok fingerprints every page from there to the pages it serves inline,
+ * so the device can see which shown pages differ and refetch exactly those. */
+test("verifyFrom: every shown page below the served ones is fingerprinted, the served ones are not", async () => {
+  const c = await boot();
+  const seqs: number[] = [];
+  for (let q = 0; q < 450; q++) if (q % 7 !== 3) seqs.push(q); // a few unused seqs on every page
+  plantSeqs(c, seqs);
+  const T = seqs[seqs.length - 1];
+  const ok = await attach(c, PANE, c.client(), { frontier: 380, verifyFrom: 1 });
+  // the delta serves pages 3 and 4 inline (F = 380 is on page 3), so pages 1..2 are fingerprinted
+  expect(ok.pages.map((p: any) => p.page).sort()).toEqual([3, 4]);
+  expect(ok.tailVersion).toBe(T + 1);
+  expect(ok.fp.from).toBe(1);
+  expect(ok.fp.n.length).toBe(2);
+  for (let i = 0; i < 2; i++) {
+    const page = 1 + i;
+    const on = seqs.filter((q) => Math.floor(q / PAGE_SIZE) === page);
+    expect(ok.fp.n[i]).toBe(on.length);
+    expect(ok.fp.m[i]).toBe(on.length - (page === 0 ? 1 : 0));
+    expect(ok.fp.h[i]).toBe(on.reduce((a, q) => a + (q - page * PAGE_SIZE + 1) * 1009, 0));
+  }
+});
+
+test("a caught-up attach fingerprints up to the tail; no verifyFrom, no fingerprints", async () => {
+  const c = await boot();
+  await seedReplies(c, 12);
+  const caught = await attach(c, PANE, c.client(), { frontier: 11, verifyFrom: 0 });
+  expect(caught.pages).toEqual([]);
+  expect(caught.tailVersion).toBe(12);
+  expect(caught.fp.from).toBe(0);
+  expect(caught.fp.n).toEqual([12]);
+  expect(caught.fp.m).toEqual([12]);
+  const plain = await attach(c, PANE, c.client(), { frontier: 11 });
+  expect(plain.fp, "an app that does not ask gets the old frame").toBeUndefined();
+});
+
+test("fingerprints are capped at the newest FP_PAGES_MAX pages below the served ones", async () => {
+  const c = await boot();
+  const seqs: number[] = [];
+  for (let p = 0; p < 130; p++) seqs.push(p * PAGE_SIZE + 5);
+  plantSeqs(c, seqs);
+  const T = seqs[seqs.length - 1];
+  const ok = await attach(c, PANE, c.client(), { frontier: T, verifyFrom: 0 });
+  expect(ok.pages).toEqual([]);
+  expect(ok.fp.n.length).toBe(FP_PAGES_MAX);
+  expect(ok.fp.from).toBe(129 - FP_PAGES_MAX + 1);
+});
+
+/* The shown-page check outside an attach (GET /session/<id>/prints/<from>/<to>):
+ * a window scrolled or jumped below the pages the attach fingerprinted asks for
+ * exactly those, any depth, without re-attaching. Same numbers as the attach. */
+test("wirePrints: the same fingerprints for any range, capped per request and clamped to the tail", async () => {
+  const c = await boot();
+  const seqs: number[] = [];
+  for (let p = 0; p < 130; p++) seqs.push(p * PAGE_SIZE + 5);
+  plantSeqs(c, seqs);
+  const s = c.byHandle(PANE)!;
+  const ok = await attach(c, PANE, c.client(), { frontier: seqs[seqs.length - 1], verifyFrom: 0 });
+  const deep = wirePrints(s, 3, 7);
+  expect(deep.from).toBe(3);
+  expect(deep.n).toEqual([1, 1, 1, 1, 1]);
+  expect(deep.tailPage).toBe(129);
+  const same = wirePrints(s, ok.fp.from, 129);
+  expect({ n: same.n, m: same.m, h: same.h }).toEqual({ n: ok.fp.n, m: ok.fp.m, h: ok.fp.h });
+  expect(wirePrints(s, 0, 500).n.length, "one request answers at most FP_PAGES_MAX pages").toBe(FP_PAGES_MAX);
+  expect(wirePrints(s, 125, 500).n.length, "nothing past the tail").toBe(5);
+});
+
+test("an edit moves the row's rev, the patch line carries it, and the fingerprint sees it", async () => {
+  const c = await boot();
+  await seedReplies(c, 3);
+  const s = c.byHandle(PANE)!;
+  const before = await attach(c, PANE, c.client(), { frontier: 2, verifyFrom: 0 });
+  const row = s.chat[1];
+  row.durationS = 4;
+  persistPatch(s.id, row.ts, { durationS: 4 }, []);
+  expect(row.rev).toBe(1);
+  const after = await attach(c, PANE, c.client(), { frontier: 2, verifyFrom: 0 });
+  expect(after.fp.h[0] - before.fp.h[0], "one edit adds exactly one to the page's sum").toBe(1);
+  // a queued-only edit has its own reconcile on every attach and leaves rev alone
+  persistPatch(s.id, row.ts, undefined, ["queued"]);
+  expect(row.rev).toBe(1);
+  await chatStore.flush();
+  const { aid, chatId } = chatRefFor(s.id);
+  const lines = (await Bun.file(agentChatFile(aid, chatId)).text()).trim().split("\n").map((l) => JSON.parse(l));
+  const patches = lines.filter((l) => l.t === "e" && l.ev === "patch" && l.mts === row.ts);
+  expect(patches.map((p) => p.set?.rev)).toEqual([1, undefined]);
+  // replay restores the number from the patch line alone
+  const replayed = replayLogText(lines.map((l) => JSON.stringify(l)).join("\n"));
+  expect((replayed.msgs.find((m) => m.ts === row.ts) as { rev?: number }).rev).toBe(1);
 });

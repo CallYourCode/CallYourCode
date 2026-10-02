@@ -7,10 +7,11 @@
 // its own whether the open window changed).
 
 import {cyclog} from '@/shared/logging';
+import {printTerm} from '@shared/pages';
 import {connOf} from '../registry';
 import * as sync from '../../sync';
 import * as rowStore from './rowStore';
-import {forgetProjection, resnapOpenWindow, WINDOW} from './door';
+import {forgetProjection, reproject, resnapOpenWindow, setGapSource, WINDOW} from './door';
 import {
   createReplicator,
   rowsFromPage,
@@ -21,8 +22,13 @@ import {
 } from './replicator';
 import {cursorSeq, resetCoverage, type CursorState} from './cursor';
 import type {StoreRow} from './core';
+import type {EnginePage, EnginePagePrints} from '../../contract';
+import type {CycSessionEvent} from '../../../types';
 
 const repls = new Map<string, Replicator>();
+// The engine and pane each session's replicator talks to, for the shown-page
+// check outside an attach (verifyShown).
+const wires = new Map<string, {engineKey: string; paneId: string}>();
 
 // The OPEN chat backfills at the full rate; every other session fills its whole
 // offline history at a slow background trickle, so a dozen live sessions never
@@ -62,11 +68,13 @@ function persist(sessionId: string, st: CursorState): void {
     coveredFrom: Number.isFinite(st.coveredFrom) ? st.coveredFrom : -1,
     pageSize: st.pageSize,
     total: prev?.total ?? 0,
-    syncedAt: Date.now()
+    syncedAt: Date.now(),
+    ...(st.holes.size ? {holes: [...st.holes]} : {})
   });
 }
 
 export function replicatorFor(sessionId: string, engineKey: string, paneId: string): Replicator {
+  wires.set(sessionId, {engineKey, paneId});
   let r = repls.get(sessionId);
   if (!r) {
     r = createReplicator(sessionId, {
@@ -74,10 +82,13 @@ export function replicatorFor(sessionId: string, engineKey: string, paneId: stri
         const owner = connOf(engineKey);
         return owner ? owner.client.fetchPage(paneId, page) : Promise.resolve(null);
       },
-      upsert: (rows) =>
-        rowStore
-          .upsert(sessionId, rows, 'replicator')
-          .then((res) => ({loSeq: res.loSeq, hiSeq: res.hiSeq})),
+      upsert: (rows, pg) =>
+        pg.sealed && wantOf(sessionId).has(pg.page)
+          ? replaceShownPage(sessionId, pg, rows)
+          : rowStore
+              .upsert(sessionId, rows, 'replicator')
+              .then((res) => ({loSeq: res.loSeq, hiSeq: res.hiSeq})),
+      pageCommitted: (page, pg, wasHole) => onPageCommitted(sessionId, page, pg, wasHole),
       persistCursor: (st) => persist(sessionId, st),
       reachable: () => sync.engineReachable(engineKey),
       paused: () => pageHidden(),
@@ -98,6 +109,7 @@ export function seedCursor(r: Replicator, meta: rowStore.SessionMeta | null): vo
   r.cursor.tailPage = meta.tailPage;
   r.cursor.tailVersion = meta.tailVersion;
   r.cursor.coveredFrom = meta.coveredFrom >= 0 ? meta.coveredFrom : Infinity;
+  for (const p of meta.holes ?? []) if (Number.isFinite(p) && p >= 0) r.cursor.holes.add(p);
 }
 
 // A per-session serializer for attach-ok handling. The chat handler fires
@@ -197,6 +209,14 @@ async function runAttachOk(
   // background backfill runs, so every older page the replicator pulls falls
   // below the window and paints nothing.
   await resnapOpenWindow(sessionId);
+  if (a.fp) {
+    // Checked now: the fingerprinted pages and the ones served inline above them.
+    const done = new Set<number>();
+    const top = Math.max(a.tailPage ?? -1, a.fp.from + a.fp.n.length - 1);
+    for (let p = a.fp.from; p <= top; p++) done.add(p);
+    verified.set(sessionId, done);
+    await verifyPages(sessionId, r, a.fp, a.tailPage ?? -1);
+  }
   r.start();
 }
 
@@ -334,35 +354,344 @@ function staleReason(sessionId: string, version: number): string | null {
   return rowStore.staleRowReason(sessionId, version);
 }
 
-// The frontier the app may HONESTLY state to the engine on attach: the highest
-// seq it can PROVE it holds as a contiguous run from the START of the axis.
+// The frontier the app may HONESTLY state to the engine on attach: a seq the
+// ENGINE confirmed this device holds everything at or below (fix-sync-gap).
 //
-// The engine reads `frontier` as "the highest seq this device holds
-// contiguously" and re-serves only pages above it (chat/attach.ts). The bug this
-// replaces reported `rowStore.highestHeldSeq` -- the MAX seq over every held row
-// -- unconditionally. On a busy chat the newest rows by seq are session-event
-// records a running agent stamps in the thousands ABOVE the newest chat message,
-// and the cache can be only a SUFFIX of the axis (the replicator fills
-// newest-first, so older history sits unpulled below a covered run
-// [coveredFrom, tail] whose floor is far above page 0). Stating the max held seq
-// then told the engine the device was caught up to a seq whose whole history it
-// did not hold, so the engine's re-serve collapsed to the single newest page and
-// the truncated suffix stood as the whole conversation (the false, foreshortened
-// chat the owner saw until wiping the cache).
+// The engine reads `frontier` as "this device holds every row at or below F"
+// and re-serves only pages above it (chat/attach.ts). Two earlier rules broke
+// that promise:
+//   - the MAX seq over every held row. A chat this device was NOT attached to
+//     still receives every broadcast chat message (the engine sends session
+//     records only to attached clients), so one newer message landing alone set
+//     the frontier past everything missed in between. The laptop's BZ Builder
+//     (2026-10-02): offline overnight, two messages at 09:01 and 09:07 arrived
+//     while it sat on the list, the open stated frontier 136559, the engine
+//     served only page 1365, and 65 messages from 22:39 to 10:10 never came.
+//   - a non-anchored SUFFIX (the replicator fills newest-first, so older history
+//     sits unpulled below the covered run) attaches cold (-1), kept below: the
+//     device cannot prove the older history, so the engine re-serves its tail
+//     and the backfill heals the rest.
 //
-// The honest rule: downgrade to a COLD attach (-1) exactly when the replicator's
-// covered run is a PROVEN non-anchored suffix -- its floor sits above the axis
-// start (cursorSeq > 0: coveredFrom finite AND > 0). Then the device cannot prove
-// any contiguous prefix, so the engine re-serves and the cache heals, exactly as
-// a wiped device does. When coverage is unknown (never page-filled: cursorSeq -1)
-// or reaches the start (fully synced: cursorSeq 0), the held tail is a truthful
-// frontier and is kept, so a small or complete chat still catches up with what it
-// holds and cold-open speed is untouched. A session with no replicator has no
-// suffix to prove, so it keeps the held tail (the prior behavior).
+// The confirmed edge C is the replicator's tailVersion - 1: it moves only when an
+// attach-ok's pages committed (to the engine's tail; a capped delta records the
+// pages it skipped as holes the replicator fetches) or a live row arrives that
+// is exactly C + 1 (replicator.ts noteLive). The frontier is min(held tail, C).
+// With no confirmed edge (no replicator, or one never fed an attach-ok) the
+// device attaches cold, so the engine re-serves its tail.
 export function attachFrontier(sessionId: string, heldTail: number): number {
   const r = repls.get(sessionId);
-  if (!r) return heldTail;
-  return cursorSeq(r.cursor) > 0 ? -1 : heldTail;
+  if (!r) return -1;
+  if (cursorSeq(r.cursor) > 0) return -1;
+  const confirmed = r.cursor.tailVersion - 1;
+  if (confirmed < 0) return -1;
+  return Math.min(heldTail, confirmed);
+}
+
+// ---- Shown-page verification and the gap markers (fix-sync-gap) ----
+//
+// Every attach names the lowest page the open window shows (verifyFrom) and the
+// attach-ok answers a fingerprint per shown page (rowStore.pagePrints is the
+// device's twin). A page that differs is missing rows, holds rows the engine
+// does not, or holds a stale edit: it joins the cursor's holes, the replicator
+// fetches it first, and a sealed one REPLACES the device's copy (replaceShownPage).
+// While a hole sits inside the open window the list shows a gap row in its place
+// (gapMarkers), never the rows on either side joined as if nothing were missing.
+
+type Print = {n: number; m: number; h: number};
+const samePrint = (a: Print, b: Print) => a.n === b.n && a.m === b.m && a.h === b.h;
+const printKey = (p: Print) => `${p.n}/${p.m}/${p.h}`;
+
+// Pages flagged by a fingerprint and not yet refetched: the engine's print and
+// how many rows and messages the device lacked there (the gap row's count; a
+// page that lacks no row is a stale edit, refetched without a gap row).
+type Want = {print: Print; missingRows: number; missingMsgs: number};
+const wanted = new Map<string, Map<number, Want>>();
+// The loop guard: a page refetched once that STILL differs (a row the store
+// refuses or folds) is remembered at the engine print it had, and not refetched
+// again until that print changes or the app reloads.
+const unreconciled = new Map<string, Map<number, string>>();
+// The pages compared with the engine since the last attach-ok that carried
+// fingerprints: its range, the pages it served inline, and every range a prints
+// request answered since. Absent until an engine answered fingerprints at all
+// (an older engine is never asked). A shown page outside it is asked for once
+// (verifyShown), so the check never re-fires on pages already compared.
+const verified = new Map<string, Set<number>>();
+// One prints request in flight per session.
+const printsInFlight = new Set<string>();
+// The most pages one prints request names (the engine caps its answer the same).
+const PRINTS_PAGES_MAX = 100;
+
+function wantOf(sessionId: string): Map<number, Want> {
+  let w = wanted.get(sessionId);
+  if (!w) wanted.set(sessionId, (w = new Map()));
+  return w;
+}
+function oddOf(sessionId: string): Map<number, string> {
+  let o = unreconciled.get(sessionId);
+  if (!o) unreconciled.set(sessionId, (o = new Map()));
+  return o;
+}
+
+function ranges(pages: number[]): string {
+  const out: string[] = [];
+  const sorted = [...pages].sort((a, b) => a - b);
+  for (let i = 0; i < sorted.length;) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+    out.push(i === j ? String(sorted[i]) : `${sorted[i]}-${sorted[j]}`);
+    i = j + 1;
+  }
+  return out.join(',');
+}
+
+async function verifyPages(
+  sessionId: string,
+  r: Replicator,
+  fp: EnginePagePrints,
+  tailPage: number
+): Promise<void> {
+  const ps = r.cursor.pageSize;
+  const to = fp.from + fp.n.length - 1;
+  if (to < fp.from || ps <= 0) return;
+  const held = await rowStore.pagePrints(sessionId, fp.from, to, ps);
+  const want = wantOf(sessionId);
+  const odd = oddOf(sessionId);
+  const flagged: number[] = [];
+  let missingRows = 0;
+  let missingMsgs = 0;
+  for (let i = 0; i < fp.n.length; i++) {
+    const page = fp.from + i;
+    const eng: Print = {n: fp.n[i], m: fp.m[i], h: fp.h[i]};
+    const dev = held[i];
+    if (samePrint(eng, dev)) {
+      want.delete(page);
+      odd.delete(page);
+      continue;
+    }
+    if (odd.get(page) === printKey(eng)) continue;
+    // The engine's growing tail page: a live row that landed after the engine
+    // took this print makes the device hold MORE, which is not a hole. Only a
+    // shortfall there is chased; the next attach checks the page again.
+    if (page === tailPage && dev.n > eng.n) continue;
+    const lack = Math.max(0, eng.m - dev.m);
+    const lackRows = Math.max(0, eng.n - dev.n);
+    want.set(page, {print: eng, missingRows: lackRows, missingMsgs: lack});
+    if (!r.cursor.holes.has(page)) flagged.push(page);
+    r.cursor.holes.add(page);
+    missingRows += lackRows;
+    missingMsgs += lack;
+  }
+  if (!flagged.length) return;
+  persist(sessionId, r.cursor);
+  cyclog('gap.detected', {
+    session: sessionId,
+    pages: ranges(flagged),
+    seqs: `${Math.min(...flagged) * ps}-${(Math.max(...flagged) + 1) * ps - 1}`,
+    missingRows,
+    missingMsgs,
+    why: 'a shown page differs from the engine fingerprint; refetching it'
+  });
+  reproject(sessionId);
+  r.wake();
+}
+
+// A sealed page whose fingerprint differed: put the engine's copy in place of
+// the device's, dropping the rows the engine does not have there. A dropped row
+// sharing a ts and kind with a served row is a second copy of it (dup.dropped);
+// any other dropped row is one the engine no longer has on that page.
+async function replaceShownPage(
+  sessionId: string,
+  pg: EnginePage,
+  rows: StoreRow[]
+): Promise<{loSeq: number; hiSeq: number}> {
+  const ps = repls.get(sessionId)?.cursor.pageSize ?? 100;
+  const lo = pg.page * ps;
+  const res = await rowStore.replacePage(sessionId, lo, lo + ps - 1, rows);
+  if (res.dropped.length) {
+    const served = new Set(rows.map((x) => `${x.kind}@${x.ts}`));
+    const dups = res.dropped.filter((d) => served.has(`${d.kind}@${d.ts}`));
+    const stale = res.dropped.filter((d) => !served.has(`${d.kind}@${d.ts}`));
+    if (dups.length)
+      cyclog('dup.dropped', {
+        session: sessionId,
+        page: pg.page,
+        ids: dups.map((d) => d.id).join(','),
+        why: 'a second copy of a served row under another id'
+      });
+    if (stale.length)
+      cyclog('page.replaced', {
+        session: sessionId,
+        page: pg.page,
+        dropped: stale.length,
+        ids: stale.map((d) => d.id).join(','),
+        why: 'rows the engine does not hold on this page'
+      });
+  }
+  return {loSeq: res.loSeq, hiSeq: res.hiSeq};
+}
+
+// A page committed: when it filled a known hole, say so; when a fingerprint had
+// flagged it, re-check it against the page just served and stop chasing it if
+// the store still cannot hold it the same way (the loop guard).
+function onPageCommitted(sessionId: string, page: number, pg: EnginePage, wasHole: boolean): void {
+  const w = wanted.get(sessionId);
+  const flagged = w?.get(page);
+  if (!wasHole && !flagged) return;
+  w?.delete(page);
+  const ps = repls.get(sessionId)?.cursor.pageSize ?? 100;
+  const rows = rowsFromPage(sessionId, pg);
+  cyclog('gap.filled', {
+    session: sessionId,
+    page,
+    seqs: `${page * ps}-${page * ps + ps - 1}`,
+    rows: rows.length
+  });
+  if (flagged) {
+    const served: Print = {n: 0, m: 0, h: 0};
+    for (const row of rows) {
+      if (row.seq < 0) continue;
+      served.n++;
+      if (row.kind === 'msg') served.m++;
+      served.h += printTerm(row.seq - page * ps, row.msg?.rev ?? 0);
+    }
+    void rowStore.pagePrints(sessionId, page, page, ps).then(([dev]) => {
+      if (samePrint(served, dev)) return;
+      oddOf(sessionId).set(page, printKey(flagged.print));
+      cyclog('page.unreconciled', {
+        session: sessionId,
+        page,
+        engine: printKey(flagged.print),
+        held: printKey(dev),
+        why: 'the refetched page still differs; it will not be refetched again at this fingerprint'
+      });
+    });
+  }
+  reproject(sessionId);
+}
+
+// The gap rows for the open chat: one per run of consecutive hole pages that the
+// window reaches. A page flagged only for a stale edit lacks no row, so it is
+// refetched without one. Within a run the row stands where the window shows the
+// widest stretch of seqs with nothing in it: between the newest shown row below
+// the run, the shown rows inside it, and the run's end (or the engine's newest
+// seq when the run reaches the growing tail page, so a newer message already
+// held there stays below the gap, not above it).
+function gapMarkers(sessionId: string): CycSessionEvent[] {
+  const r = repls.get(sessionId);
+  if (!r || !r.cursor.holes.size) return [];
+  const want = wanted.get(sessionId);
+  const pages = [...r.cursor.holes]
+    .filter((p) => (want?.get(p)?.missingRows ?? 1) > 0)
+    .sort((a, b) => a - b);
+  if (!pages.length) return [];
+  const shown = rowStore.shownRows(sessionId);
+  if (!shown.length) return [];
+  const ps = r.cursor.pageSize;
+  const newest = r.cursor.tailVersion > 0 ? r.cursor.tailVersion - 1 : Infinity;
+  const out: CycSessionEvent[] = [];
+  for (let i = 0; i < pages.length;) {
+    let j = i;
+    while (j + 1 < pages.length && pages[j + 1] === pages[j] + 1) j++;
+    const lo = pages[i] * ps;
+    const hi = (pages[j] + 1) * ps - 1;
+    let below: {seq: number; ts: number} | null = null;
+    const inside: Array<{seq: number; ts: number}> = [];
+    for (const x of shown) {
+      if (x.seq < lo) {
+        if (!below || x.seq > below.seq) below = x;
+      } else if (x.seq <= hi) inside.push(x);
+    }
+    if (below || inside.length) {
+      inside.sort((a, b) => a.seq - b.seq);
+      let after = below;
+      let prev = below ? below.seq : lo - 1;
+      let prevRow = below;
+      let widest = -1;
+      for (let k = 0; k <= inside.length; k++) {
+        const next = k < inside.length ? inside[k].seq : Math.min(hi, newest) + 1;
+        if (next - prev > widest) {
+          widest = next - prev;
+          after = prevRow;
+        }
+        if (k < inside.length) {
+          prev = inside[k].seq;
+          prevRow = inside[k];
+        }
+      }
+      let n = 0;
+      let known = false;
+      for (let p = pages[i]; p <= pages[j]; p++) {
+        const f = want?.get(p);
+        if (f) {
+          known = true;
+          n += f.missingMsgs;
+        }
+      }
+      const text =
+        known && n > 0
+          ? `Loading ${n} missing message${n === 1 ? '' : 's'}...`
+          : 'Loading missing messages...';
+      // the list puts a message of the same ts before the gap row, so "before
+      // the lowest shown row" is one millisecond earlier
+      const ts = after ? after.ts : inside[0].ts - 1;
+      out.push({uuid: `gap:${lo}`, kind: 'gap', ts, seq: lo, text});
+    }
+    i = j + 1;
+  }
+  return out;
+}
+
+setGapSource(gapMarkers);
+
+// THE SHOWN-PAGE CHECK OUTSIDE AN ATTACH. The window now shows pages no
+// fingerprint has covered since the last attach (the reader loaded older history
+// or jumped to an old message): ask the engine for those pages' prints alone
+// (client.fetchPrints, at most PRINTS_PAGES_MAX per request, any depth) and
+// compare them as the attach-ok's are compared. Unlike an attach, the answer
+// never touches the window: a page that differs only joins the holes, and its
+// refetch lands in place. Each page is asked for once until the next attach; a
+// request that fails is retried by the next scroll, never by a loop.
+export function verifyShown(sessionId: string): void {
+  const r = repls.get(sessionId);
+  const done = verified.get(sessionId);
+  const wire = wires.get(sessionId);
+  if (!r || !done || !wire || printsInFlight.has(sessionId)) return;
+  const ps = r.cursor.pageSize;
+  const low = rowStore.shownLowSeq(sessionId);
+  const top = r.cursor.tailPage;
+  if (low < 0 || ps <= 0 || top < 0) return;
+  let from = -1;
+  for (let p = Math.floor(low / ps); p <= top; p++)
+    if (!done.has(p)) {
+      from = p;
+      break;
+    }
+  if (from < 0) return;
+  let to = from;
+  while (to < top && to + 1 - from < PRINTS_PAGES_MAX && !done.has(to + 1)) to++;
+  const owner = connOf(wire.engineKey);
+  const fetchPrints = owner?.client.fetchPrints?.bind(owner.client);
+  if (!fetchPrints || !sync.engineReachable(wire.engineKey)) return;
+  printsInFlight.add(sessionId);
+  cyclog('verify.shown', {session: sessionId, pages: `${from}-${to}`});
+  void fetchPrints(wire.paneId, from, to)
+    .then(async (fp) => {
+      // null: the engine cannot answer for this chat; these pages count as
+      // asked, so the next scroll does not ask again
+      const now = verified.get(sessionId);
+      if (now) for (let p = from; p <= to; p++) now.add(p);
+      if (fp && fp.n.length) await verifyPages(sessionId, r, fp, fp.tailPage);
+      return true;
+    })
+    .catch((e) => {
+      cyclog('verify.shown.failed', {session: sessionId, pages: `${from}-${to}`, err: String(e)});
+      return false;
+    })
+    .then((more) => {
+      printsInFlight.delete(sessionId);
+      // the window may still show unchecked pages beyond this request's cap
+      if (more) verifyShown(sessionId);
+    });
 }
 
 export function noteLive(sessionId: string, seq: number | undefined): void {
@@ -395,4 +724,9 @@ export function __resetReplicatorsForTest(): void {
   attachInFlight.clear();
   attachPending.clear();
   attachRuns = 0;
+  wanted.clear();
+  unreconciled.clear();
+  verified.clear();
+  printsInFlight.clear();
+  wires.clear();
 }

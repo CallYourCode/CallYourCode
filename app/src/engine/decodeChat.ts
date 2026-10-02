@@ -14,6 +14,7 @@ export function decodeChat(frame: any): EngineChatMessage | null {
   // re-served under a renumbered seq is not painted twice. The app rebuilds
   // every frame field by field, so it exists only because it is copied here.
   if (typeof frame.mid === 'string' && frame.mid) m.mid = frame.mid;
+  if (Number.isFinite(frame.rev) && frame.rev > 0) m.rev = Number(frame.rev);
   if (frame.msgId) m.msgId = String(frame.msgId);
   if (frame.kind === 'voice') m.kind = 'voice';
   if (frame.queued) m.queued = true;

@@ -246,7 +246,17 @@ export type EngineChatMessage = {
    *  changed seq is not painted twice. Absent on messages from an engine older
    *  than this field; those dedup by ts|role|text instead. */
   mid?: string;
+  /** The row's edit count (engine persistPatch): folded into the page
+   *  fingerprints, so a device holding a pre-edit copy sees its page differ.
+   *  Absent = 0. */
+  rev?: number;
 };
+
+/** Per-page fingerprints over pages [from, from + n.length): rows, chat
+ *  messages, and a position-weighted sum that folds each row's rev (engine
+ *  chat/attach.ts pagePrints). The app computes the same three from its own
+ *  seq index and refetches every page that differs. */
+export type EnginePagePrints = {from: number; n: number[]; m: number[]; h: number[]};
 
 /** One page of an agent's log as the wire carries it: the chat messages and
  *  the session records that share its seq range, split by the decoder. */
@@ -282,6 +292,9 @@ export type EngineAttachOk = {
   /* Lowest seq the engine actually covered in this delta. Absent on a
    * legacy have-attach. The app advances frontier to T after painting. */
   deltaBase?: number;
+  /* Fingerprints of the shown pages below the ones this answer carries,
+   * present when the attach named a verifyFrom page. */
+  fp?: EnginePagePrints;
 };
 
 // The engine's receipt for an utterance, sent before any delivery work.
@@ -385,9 +398,19 @@ export interface EngineClient {
   close(): void;
   on<K extends keyof EngineEvents>(ev: K, fn: EngineEvents[K]): void;
 
-  attach(sessionId: string, frontier?: number): void;
+  attach(sessionId: string, frontier?: number, verifyFrom?: number): void;
 
   fetchPage(sessionId: string, n: number): Promise<EnginePage | null>;
+
+  /* Fingerprints of pages [from, to] (at most 100 per answer), the same numbers
+   * an attach-ok's `fp` carries: the shown-page check for a window that reached
+   * pages the last attach did not fingerprint. null when the engine has no such
+   * route (older engine) or no such session. */
+  fetchPrints?(
+    sessionId: string,
+    from: number,
+    to: number
+  ): Promise<(EnginePagePrints & {tailPage: number}) | null>;
 
   // True when the frame was written to a sealed pipe.
   progress(sessionId: string, seq: number, explicit?: boolean): boolean;

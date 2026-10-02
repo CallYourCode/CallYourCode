@@ -1,5 +1,10 @@
 import {describe, expect, test, vi} from 'vitest';
-import {createReplicator, rowsFromPage, tailVersionOf} from '../engine/store/rows/replicator';
+import {
+  createReplicator,
+  FAILED_STEP_BACKOFF_MS,
+  rowsFromPage,
+  tailVersionOf
+} from '../engine/store/rows/replicator';
 import {cursorSeq} from '../engine/store/rows/cursor';
 import type {EnginePage} from '../engine/contract';
 import {
@@ -308,6 +313,41 @@ describe('the background backfill pauses while hidden and trickles for non-open 
     await bgRep.attachOk({sessionId: SID, pageSize: 100, tailPage: 3, total: 400, pages: []});
     bgRep.start();
     expect(bgGaps[0]).toBe(5000);
+  });
+});
+
+const settleMicrotasks = () => new Promise<void>((r) => setTimeout(r, 0));
+
+describe('a failing fetch is paced', () => {
+  test('a step that threw waits the cadence plus one fixed backoff, and success clears it', async () => {
+    const gaps: number[] = [];
+    const steps: Array<() => void> = [];
+    let fail = true;
+    const rep = createReplicator(SID, {
+      fetchPage: async (n) => {
+        if (fail) throw new Error('page failed: HTTP 500');
+        return page(n, (n + 1) * 100);
+      },
+      upsert: async () => ({loSeq: -1, hiSeq: -1}),
+      persistCursor: () => {},
+      now: () => 0,
+      schedule: (fn, ms) => {
+        gaps.push(ms);
+        steps.push(fn);
+      },
+      gapMs: () => 500
+    });
+    await rep.attachOk({sessionId: SID, pageSize: 100, tailPage: 3, total: 400, pages: []});
+    rep.start();
+    expect(gaps).toEqual([500]);
+    steps[0]();
+    await settleMicrotasks();
+    // main re-armed at 0 ms here: 60 failed fetches a second
+    expect(gaps).toEqual([500, 500 + FAILED_STEP_BACKOFF_MS]);
+    fail = false;
+    steps[1]();
+    await settleMicrotasks();
+    expect(gaps[2]).toBe(500);
   });
 });
 

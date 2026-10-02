@@ -27,6 +27,12 @@ export type CursorState = {
   islands: Set<number>;
   // pages the UI has asked for out of order, highest priority first.
   demand: number[];
+  // HOLES (fix-sync-gap): pages inside [coveredFrom, tailPage] the store is
+  // known NOT to hold whole: the middle a capped delta skipped, or a shown page
+  // whose fingerprint differed from the engine's. A hole is never "stored", is
+  // fetched before the ordered backfill (newest first), and leaves the set only
+  // when its fetch commits. Persisted in the meta, so a reload keeps the debt.
+  holes: Set<number>;
 };
 
 export function emptyCursor(pageSize: number): CursorState {
@@ -36,7 +42,8 @@ export function emptyCursor(pageSize: number): CursorState {
     tailVersion: 0,
     coveredFrom: Infinity,
     islands: new Set(),
-    demand: []
+    demand: [],
+    holes: new Set()
   };
 }
 
@@ -49,7 +56,7 @@ export function cursorSeq(st: CursorState): number {
 }
 
 export function isComplete(st: CursorState): boolean {
-  return st.tailPage >= 0 && st.coveredFrom <= 0;
+  return st.tailPage >= 0 && st.coveredFrom <= 0 && st.holes.size === 0;
 }
 
 // A page committed to the store. Fold it into the covered run: if it extends the
@@ -59,6 +66,7 @@ export function isComplete(st: CursorState): boolean {
 // Returns the state (mutated) for chaining.
 export function notePageCommitted(st: CursorState, page: number): CursorState {
   if (page < 0) return st;
+  st.holes.delete(page);
   if (!Number.isFinite(st.coveredFrom)) {
     // first covered page: it seeds the run only if it is the tail page (the
     // newest-first fill always starts at the tail). A demand-first page becomes
@@ -114,6 +122,9 @@ export function nextPage(st: CursorState): number | null {
     }
     return d;
   }
+  let hole = -1;
+  for (const p of st.holes) if (p > hole) hole = p;
+  if (hole >= 0) return hole;
   if (st.tailPage < 0) return null;
   if (!Number.isFinite(st.coveredFrom)) return st.tailPage;
   if (st.coveredFrom <= 0) return null;
@@ -121,6 +132,7 @@ export function nextPage(st: CursorState): number | null {
 }
 
 function isPageStored(st: CursorState, page: number): boolean {
+  if (st.holes.has(page)) return false;
   if (Number.isFinite(st.coveredFrom) && page >= st.coveredFrom && page <= st.tailPage) return true;
   return st.islands.has(page);
 }
@@ -160,4 +172,5 @@ export function resetCoverage(st: CursorState, tailPage: number, tailVersion: nu
   st.tailVersion = tailVersion;
   st.coveredFrom = Infinity;
   st.islands.clear();
+  st.holes.clear();
 }
