@@ -15,6 +15,30 @@ vi.mock('../shared/logging', async (orig) => ({
   newCid: () => 'c-test'
 }));
 vi.mock('../engine/store/audioDocs', () => ({openSttStream: vi.fn()}));
+// The player and its source, so a reply can be playing when the press lands.
+vi.mock('../audio/audioCache', () => ({
+  streamAudioUrl: (id: string) => Promise.resolve(`blob:${id}`)
+}));
+vi.mock('../audio/webAudioClip', async (orig) => ({
+  ...(await orig<typeof import('../audio/webAudioClip')>()),
+  unlockPlayback: () => Promise.resolve(),
+  WebAudioClip: class {
+    src = '';
+    volume = 1;
+    defaultPlaybackRate = 1;
+    playbackRate = 1;
+    currentTime = 0;
+    duration = NaN;
+    backend = 'element';
+    play = () => Promise.resolve();
+    pause() {}
+    clear() {
+      this.src = '';
+    }
+    unlock = () => Promise.resolve();
+    addEventListener() {}
+  }
+}));
 
 type Claims = {busyClaims: Set<string>};
 type P = Record<string, unknown> & {
@@ -40,8 +64,9 @@ beforeEach(async () => {
   );
 });
 
-// wiring.onVoiceStart claims the speaker, then starts the press.
+// wiring.onVoiceStart pauses the reply and claims the speaker, then starts the press.
 function press(): void {
+  speaker.pause();
   speaker.setBusy(true, 'press');
   pipeline.startPTT();
 }
@@ -99,5 +124,43 @@ describe('a refused press releases every claim it took', () => {
     await settle();
     expect(claims()).toEqual([]);
     expect(pipeline.pttDown).toBe(false);
+  });
+
+  // The reply the press paused comes back with the claim: the press that
+  // paused it is over and nothing was recorded over it.
+  test.each([
+    [
+      'the mic is not open',
+      () => {
+        pipeline.stream = null;
+        pipeline.actx = null;
+      }
+    ],
+    [
+      'dead track that cannot be re-acquired',
+      () => {
+        pipeline.stream = {getAudioTracks: () => [{readyState: 'ended', muted: false}]};
+        pipeline.actx = {state: 'running', currentTime: 0};
+        (pipeline as unknown as {reacquireStream: () => Promise<void>}).reacquireStream = () =>
+          Promise.reject(new Error('NotAllowedError'));
+      }
+    ]
+  ])('%s: the reply it paused plays again', async (_, refuse) => {
+    speaker.enqueue({
+      msgId: 'reply',
+      url: '/audio/reply.mp3',
+      text: 'reply',
+      sessionId: 's1',
+      manual: true
+    });
+    await settle();
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+    refuse();
+    press();
+    await settle();
+    await settle();
+    expect(pipeline.pttDown).toBe(false);
+    expect(claims()).toEqual([]);
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
   });
 });

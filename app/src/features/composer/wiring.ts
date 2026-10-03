@@ -625,8 +625,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
         })
         .catch(() => {
           pttHolding = false;
-          speaker.setBusy(false, 'press');
-          speaker.resumeInterrupted();
+          pipeline.refusePress('the microphone could not be opened (getUserMedia failed)');
           toast('Microphone unavailable');
         });
     },
@@ -670,7 +669,9 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           cid: pipeline.cidOf(undefined),
           capture: captureId,
           heldS: seconds,
-          why: 'the release beat getUserMedia: nothing was ever recorded, so no block was made'
+          why:
+            'nothing was ever recorded, so no block was made: the release beat ' +
+            'getUserMedia, or the press was refused (ptt.start.refused says why)'
         });
 
         if (interrupted) {

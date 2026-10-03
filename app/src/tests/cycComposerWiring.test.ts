@@ -93,6 +93,7 @@ const pipelineMock = vi.hoisted(() => ({
   pressCaptureId: 0,
   cidOf: () => '',
   startPTT: vi.fn(),
+  refusePress: vi.fn(),
   endPTT: vi.fn(),
   cancelCapture: vi.fn(),
   forceEnd: vi.fn()

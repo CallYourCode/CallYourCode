@@ -334,7 +334,8 @@ class Speaker {
   }
 
   /* The machine giving back what a capture or a press interrupted (pipeline
-   * release after a dropped take, a press the mic refused). Nobody asked anew:
+   * release after a dropped take, pipeline refusePress for a refused press,
+   * the mic failing to open included). Nobody asked anew:
    * the clip keeps the intent it had. */
   resumeInterrupted(): void {
     this.resumeCurrent();

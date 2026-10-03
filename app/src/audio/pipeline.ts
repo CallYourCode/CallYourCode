@@ -928,15 +928,17 @@ class Pipeline {
   }
 
   // The press is refused: give back everything it took (the press itself, its
-  // capture id, the recording state, and the speaker claim the composer took
-  // for it), so nothing waits behind a recording that never started. The
-  // release that follows finds no press down and does nothing.
-  private refusePress(why: string): void {
+  // capture id, the recording state, the speaker claim the composer took for
+  // it, and the reply it paused), so nothing waits behind a recording that
+  // never started. The release that follows finds no press down and does
+  // nothing. The composer refuses through here too when the mic cannot open.
+  refusePress(why: string): void {
     cyclog('ptt.start.refused', {why, micOpen: !!this.stream, pttDown: this.pttDown});
     this.pttDown = false;
     this.pttCaptureId = 0;
     speaker.setBusy(false, 'press');
     this.syncRecordingState();
+    speaker.resumeInterrupted();
   }
 
   private beginPress(): void {
