@@ -42,8 +42,10 @@ The spec refuses to run without `CYC_PAGE`, or against a live/offline-rig port.
 
 ### `voice/` -- the microphone in Chromium AND WebKit
 
-`voice-resume.spec.ts` (the mic after a background: a stalled capture graph is
-rebuilt, or reported when nothing revives it) and `lock-chip.spec.ts` (the lock
+`voice-resume.spec.ts` (the mic after a background: no AudioContext is left
+open, the next press delivers on its own, hands-free rebuilds a dead graph, an
+output nothing revives is reported), `mic-grace.spec.ts` (a second take reuses
+the granted mic; a background releases it) and `lock-chip.spec.ts` (the lock
 chip over the chat carries the theme surface). Both engines get a fake
 microphone, so this directory has its own config; it serves the built bundle
 like `offline/` and reuses the offline rig, on port 8296 by default.

@@ -10,17 +10,38 @@ import {CHAT} from '../offline/transferEngine';
 // own. These specs need the browser's fake microphone instead (a track that no
 // page AudioContext produces, as on a phone), so the native method is pinned
 // before the rig's init script runs; the rig's assignment lands on the setter
-// and is dropped.
+// and is dropped. Each call is counted (window.__vrGum) and its tracks kept
+// (window.__vrTracks), so a spec can see when the mic was asked for and
+// whether a track (the phone's mic indicator) is still live.
+// Pinned on the prototype: WebKit hands init scripts a mediaDevices object that
+// is not the one the page uses later, so an own property would be lost.
 const KEEP_NATIVE_MIC = () => {
-  const md = navigator.mediaDevices;
-  if (!md) return;
+  if (typeof MediaDevices === 'undefined') return;
   const native = MediaDevices.prototype.getUserMedia;
-  Object.defineProperty(md, 'getUserMedia', {
+  const w = window as unknown as {__vrGum: number; __vrTracks: MediaStreamTrack[]};
+  w.__vrGum = 0;
+  w.__vrTracks = [];
+  function counted(this: MediaDevices, c?: MediaStreamConstraints) {
+    w.__vrGum++;
+    return native.call(this, c).then((s) => {
+      w.__vrTracks.push(...s.getAudioTracks());
+      return s;
+    });
+  }
+  Object.defineProperty(MediaDevices.prototype, 'getUserMedia', {
     configurable: true,
-    get: () => native.bind(md),
+    get: () => counted,
     set: () => {}
   });
 };
+
+// How many times the page asked for the mic, and how many of its tracks are live.
+export function micState(page: Page): Promise<{gum: number; liveTracks: number}> {
+  return page.evaluate(() => {
+    const w = window as unknown as {__vrGum: number; __vrTracks: MediaStreamTrack[]};
+    return {gum: w.__vrGum, liveTracks: w.__vrTracks.filter((t) => t.readyState === 'live').length};
+  });
+}
 
 // Playwright's WebKit (the GTK build) has no MediaRecorder, so the app's
 // recorder ring cannot start there. This stand-in emits placeholder bytes on
