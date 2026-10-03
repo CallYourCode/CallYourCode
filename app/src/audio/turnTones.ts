@@ -55,6 +55,16 @@ function blip(from: number, to: number): boolean {
   return true;
 }
 
+// Close the tone context; the next tone makes a fresh one. It shares the page's
+// audio output with the microphone graph (see releasePlaybackContext), so the
+// microphone releases it with its own graph. A tone is 70ms; at worst one is
+// cut short.
+export function releaseToneContext(): Promise<void> {
+  const ac = ctx;
+  ctx = null;
+  return ac ? ac.close().catch(() => {}) : Promise.resolve();
+}
+
 export function turnOpened(): void {
   if (!blip(OPEN_HZ * 0.75, OPEN_HZ)) return;
   opened++;

@@ -1,10 +1,18 @@
 import {describe, expect, test} from 'vitest';
-import {applyMicFix, decideMicFix, isMicLive, type MicSnapshot} from '../audio/micLive';
+import {
+  applyMicFix,
+  canRecord,
+  decideMicFix,
+  isMicLive,
+  type MicRecovery,
+  type MicSnapshot
+} from '../audio/micLive';
 function snap(partial: Partial<MicSnapshot>): MicSnapshot {
   return {
     contextState: 'running',
     trackReadyState: 'live',
     trackMuted: false,
+    flow: 'flowing',
     visible: true,
     engaging: false,
     ...partial
@@ -14,7 +22,11 @@ type World = {
   contextState: MicSnapshot['contextState'];
   trackReadyState: MicSnapshot['trackReadyState'];
   trackMuted: boolean;
+  flow: MicSnapshot['flow'];
+  // The page's audio output itself is dead: no graph built on it delivers.
+  deadOutput: boolean;
   resumes: number;
+  rebuilds: number;
   reacquires: number;
 };
 function world(partial: Partial<World> = {}): World {
@@ -22,7 +34,10 @@ function world(partial: Partial<World> = {}): World {
     contextState: 'running',
     trackReadyState: 'live',
     trackMuted: false,
+    flow: 'flowing',
+    deadOutput: false,
     resumes: 0,
+    rebuilds: 0,
     reacquires: 0,
     ...partial
   };
@@ -32,13 +47,14 @@ function inspectOf(w: World, flags: Pick<MicSnapshot, 'visible' | 'engaging'>): 
     contextState: w.contextState,
     trackReadyState: w.trackReadyState,
     trackMuted: w.trackMuted,
+    flow: w.flow,
     ...flags
   });
 }
-async function recover(
+async function recoverWith(
   w: World,
   flags: Pick<MicSnapshot, 'visible' | 'engaging'>
-): Promise<boolean> {
+): Promise<MicRecovery> {
   return applyMicFix(inspectOf(w, flags), {
     resume: () => {
       w.resumes++;
@@ -46,14 +62,26 @@ async function recover(
         w.contextState = 'running';
       }
     },
+    rebuild: () => {
+      w.rebuilds++;
+      w.contextState = 'running';
+      w.flow = w.deadOutput ? 'stalled' : 'flowing';
+    },
     reacquire: () => {
       w.reacquires++;
       w.contextState = 'running';
       w.trackReadyState = 'live';
       w.trackMuted = false;
+      w.flow = w.deadOutput ? 'stalled' : 'flowing';
     },
     inspect: () => inspectOf(w, flags)
   });
+}
+async function recover(
+  w: World,
+  flags: Pick<MicSnapshot, 'visible' | 'engaging'>
+): Promise<boolean> {
+  return (await recoverWith(w, flags)).live;
 }
 describe('mic live state machine', () => {
   test('RED: a held stream that has died still looks ready to the old guard', () => {
@@ -148,9 +176,84 @@ describe('mic live state machine', () => {
   });
 });
 
+// 2026-10-03, iPhone web app: after a background, every take had a flat
+// waveform and sttSent=0 while the context said 'running' and the track said
+// live and unmuted. No mic.* line was logged: the old model read only those
+// reported states, so it judged the mic live. The graph's own output is the
+// only evidence that it is.
+describe('liveness is judged by audio flowing through the graph', () => {
+  test('RED: running, live and unmuted with nothing flowing is not live', () => {
+    const field = snap({flow: 'stalled', engaging: true});
+    expect(isMicLive(field)).toBe(false);
+    expect(isMicLive(snap({flow: 'unknown'}))).toBe(false);
+    expect(decideMicFix(field)).toBe('rebuild');
+  });
+  test('a press rebuilds a stalled graph on the same track, with no getUserMedia', async () => {
+    const w = world({flow: 'stalled'});
+    const r = await recoverWith(w, {visible: true, engaging: true});
+    expect(r.live).toBe(true);
+    expect(r.steps).toEqual(['rebuild']);
+    expect(w.rebuilds).toBe(1);
+    expect(w.reacquires).toBe(0);
+  });
+  test('a stalled graph with no press is left alone: nothing reads it', async () => {
+    const w = world({flow: 'stalled'});
+    expect(decideMicFix(inspectOf(w, {visible: true, engaging: false}))).toBe('none');
+    const r = await recoverWith(w, {visible: true, engaging: false});
+    expect(r.live).toBe(false);
+    expect(r.steps).toEqual([]);
+    expect(w.rebuilds).toBe(0);
+  });
+  test('a graph a rebuild did not revive is reported once, never rebuilt in a loop or re-acquired', async () => {
+    const w = world({flow: 'stalled', deadOutput: true});
+    const r = await recoverWith(w, {visible: true, engaging: true});
+    expect(r.live).toBe(false);
+    expect(r.steps).toEqual(['rebuild']);
+    expect(w.rebuilds).toBe(1);
+    expect(w.reacquires).toBe(0);
+    expect(r.after.flow).toBe('stalled');
+    // The recorder reads the track, not the graph: the press still records.
+    expect(canRecord(r.after)).toBe(true);
+  });
+  test('a resume that leaves the graph stalled goes on to rebuild it', async () => {
+    const w = world({contextState: 'interrupted', flow: 'stalled'});
+    const r = await recoverWith(w, {visible: true, engaging: true});
+    expect(r.live).toBe(true);
+    expect(r.steps).toEqual(['resume', 'rebuild']);
+    expect(w.reacquires).toBe(0);
+  });
+  test('a dead track is re-acquired, not rebuilt, even when nothing flows', async () => {
+    const w = world({trackMuted: true, flow: 'stalled'});
+    expect(decideMicFix(inspectOf(w, {visible: true, engaging: true}))).toBe('reacquire');
+    const r = await recoverWith(w, {visible: true, engaging: true});
+    expect(r.live).toBe(true);
+    expect(r.steps).toEqual(['reacquire']);
+    expect(w.rebuilds).toBe(0);
+  });
+  test('a re-acquired track on a dead output goes on to one rebuild, then stops', async () => {
+    const w = world({trackReadyState: 'ended', flow: 'stalled', deadOutput: true});
+    const r = await recoverWith(w, {visible: true, engaging: true});
+    expect(r.live).toBe(false);
+    expect(r.steps).toEqual(['reacquire', 'rebuild']);
+    expect(w.reacquires).toBe(1);
+    expect(w.rebuilds).toBe(1);
+  });
+  test('only a dead track stops a press from recording', () => {
+    expect(canRecord(snap({flow: 'stalled'}))).toBe(true);
+    expect(canRecord(snap({contextState: 'suspended', flow: 'unknown'}))).toBe(true);
+    expect(canRecord(snap({trackMuted: true}))).toBe(false);
+    expect(canRecord(snap({trackReadyState: 'ended'}))).toBe(false);
+    expect(canRecord(snap({trackReadyState: null}))).toBe(false);
+  });
+});
+
 describe('an idle mic never re-prompts (iPhone web apps prompt on every re-acquire)', () => {
   test('focus, mute or a context edge with no press leaves a muted, ended or closed mic alone', async () => {
-    for (const dead of [{trackMuted: true}, {trackReadyState: 'ended' as const}, {contextState: 'closed' as const}]) {
+    for (const dead of [
+      {trackMuted: true},
+      {trackReadyState: 'ended' as const},
+      {contextState: 'closed' as const}
+    ]) {
       const w = world(dead);
       expect(decideMicFix(inspectOf(w, {visible: true, engaging: false}))).toBe('none');
       expect(await recover(w, {visible: true, engaging: false})).toBe(false);

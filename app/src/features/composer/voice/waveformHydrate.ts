@@ -12,7 +12,10 @@ interface WaveformHydratorDeps {
 
 export function createWaveformHydrator(deps: WaveformHydratorDeps) {
   const {messageListInner} = deps;
-  let decodeCtx: AudioContext | null = null;
+  // Decoding needs no speaker. An offline context holds no audio output; a
+  // page-lifetime AudioContext here shared the page's output with the
+  // microphone graph and kept it alive (see Pipeline.rebuildGraph).
+  let decodeCtx: OfflineAudioContext | null = null;
   const hydrating = new Set<string>();
 
   const decodedDurations = new Map<string, number>();
@@ -100,7 +103,7 @@ export function createWaveformHydrator(deps: WaveformHydratorDeps) {
           const buf = /^https?:/i.test(src)
             ? await (await engineCapFetch(src)).arrayBuffer()
             : await (await fetch(src)).arrayBuffer();
-          decodeCtx ??= new AudioContext();
+          decodeCtx ??= new OfflineAudioContext(1, 1, 48000);
           const audio = await decodeCtx.decodeAudioData(buf);
           const ch = audio.getChannelData(0);
           const buckets = 120;
