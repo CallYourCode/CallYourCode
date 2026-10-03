@@ -84,8 +84,10 @@ export function updateVoiceNote(
     });
     return;
   }
-  m.text = text;
-  m.draftCommitted = Math.max(0, Math.min(committed ?? text.length, text.length));
+  const cut = Math.max(0, Math.min(committed ?? text.length, text.length));
+  const around = m.wordsAround;
+  m.text = around ? around.before + text + around.after : text;
+  m.draftCommitted = (around?.before.length ?? 0) + cut;
   notifyNow();
 }
 

@@ -20,8 +20,8 @@ import { markReadOnUtterance } from "../sessions/readstate.ts";
 import { audio, clipOnDisk, haveClip, adoptStagedClip } from "./clips.ts";
 import { attachmentsOf, attachmentFields, uploadIds, type ChatMsg, type UploadRec } from "./chatmsg.ts";
 import { persistPatch, type Session } from "../sessions/session-state.ts";
-import { transcribeStored, showPendingVoiceNote, readWords, fillWords,
-  raceInlineRescue, WORDS_TOKEN_RE, type SettledPartial } from "../voice/transcribe.ts";
+import { transcribeStored, showPendingVoiceNote, readWords, fillWords, fillNoteWords,
+  raceInlineRescue, WORDS_TOKEN_RE, NOTE_UNREAD, type SettledPartial } from "../voice/transcribe.ts";
 import { admitPartial, wordsOf, keptPrefix, release } from "../voice/transcript-record.ts";
 import type { ReplyDelivery } from "./reply-trace.ts";
 import type { OutgoingInput } from "../plugins/platform/core.ts";
@@ -390,13 +390,20 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
   const inBody = new Set([...text.matchAll(WORDS_TOKEN_RE)].map((x) => x[1]));
   const asked: string[] = Array.isArray(m.words)
     ? m.words.filter((x: unknown): x is string => typeof x === "string" && !!x) : [];
-  if (inBody.size && !asked.length && !ups.length) {
+  /* THE NOTE'S OWN MARKER ("note-words"): a voice note whose body is a reply
+   * quote or a caption with a marker naming THIS frame's cid, asked for in
+   * `words`. Its words come from the note's own clip (the rescue below), not
+   * from an upload, so the uploads pass leaves that one marker alone. Both
+   * conditions are the composer's: a marker he typed is not in `words`. */
+  const noteWords = m.kind === "voice" && inBody.has(cid) && asked.includes(cid);
+  const forUploads = noteWords ? new Set([...inBody].filter((id) => id !== cid)) : inBody;
+  if (forUploads.size && !asked.length && !ups.length) {
     D().log("words.typed", { cid, session: s.id, marker: [...inBody].join(","),
       chars: text.length,
       why: "the body contains a marker and the message carries no recording and asks for " +
         "no transcript, so nobody composed it: it is his own text and goes through " +
         "untouched" });
-  } else if (inBody.size) {
+  } else if (forUploads.size) {
     /* Only ids that are BOTH attached to this message and named by a marker in
      * this body. Anything else is a request to decode a recording that is not
      * part of what was sent. */
@@ -468,7 +475,10 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
   // audio safe and its transcript pending, and delivered to the agent once when
   // the chunked decode lands (#458). Nothing else in this function runs then:
   // showPendingVoiceNote owns the rest of this note's life.
-  if (!text && voice.msgId) {
+  //
+  // A note with a reply quote or a caption (noteWords) is the same read: the
+  // words go into its marker instead of being the whole body.
+  if (voice.msgId && (!text || noteWords)) {
     /* WHAT THE DEVICE ALREADY SETTLED, for the note's own clip (#442, extended
      * to voice notes). A voice note has no uploadId to hang a partial on, so
      * the frame names it by its own cid (the app may also name the msgId).
@@ -491,17 +501,33 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
      * clock that module already holds (see raceInlineRescue). */
     const inline = await raceInlineRescue(rescue);
     if (inline.ready) {
-      text = inline.t;
-      if (!text) {
+      let words = inline.t;
+      if (!words) {
         D().log("utterance.rescue-failed", { cid, session: s.id, msgId: voice.msgId,
           why: "the engine could not read its own copy either; delivering a placeholder" });
-        text = "(voice note: transcription failed)";
+        words = NOTE_UNREAD;
+      }
+      if (noteWords) {
+        const was = text.length;
+        text = fillNoteWords(text, cid, words);
+        D().log("words.note-filled", { cid, session: s.id, msgId: voice.msgId,
+          words: words.length, chars: text.length, was });
+      } else {
+        text = words;
       }
     } else {
       showPendingVoiceNote(s, { cid, how: m.kind === "voice" ? "VOICE" : "TEXT",
-        extra: voice, msgId: voice.msgId, takenAt }, rescue);
+        extra: voice, msgId: voice.msgId, takenAt,
+        ...(noteWords ? { into: text } : {}) }, rescue);
       return;
     }
+  } else if (noteWords) {
+    /* The marker names a clip this engine does not have (forgotten above):
+     * there is nothing to read, and a raw marker must never reach the pane. */
+    D().log("words.note-no-clip", { cid, session: s.id, msgId: m.msgId,
+      why: "the note's words marker names a recording this engine cannot find; the " +
+        "quote and caption go with the placeholder where the words would be" });
+    text = fillNoteWords(text, cid, NOTE_UNREAD);
   }
 
   /* Nothing was delivered. Say so ON THE ROW (F2): the row this device already
@@ -662,9 +688,10 @@ export function commitDelivery(s: Session, inj: Injection, ts: number, willQueue
     if (row) {
       row.text = text;
       delete row.transcriptPending;
+      delete row.wordsInto;
       if (willQueue) row.queued = true;
       persistPatch(s.id, row.ts,
-        { text, ...(willQueue ? { queued: true } : {}) }, ["transcriptPending"]);
+        { text, ...(willQueue ? { queued: true } : {}) }, ["transcriptPending", "wordsInto"]);
       broadcast({ t: "chat", ...row });
       return row;
     }

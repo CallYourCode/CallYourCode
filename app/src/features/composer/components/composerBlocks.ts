@@ -462,6 +462,11 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
       const note = h('span', 'cyc-block-voice-note block text-xs italic opacity-80');
       note.textContent = 'waiting for this recording before the message goes';
       transcript.append(note);
+    } else if (block.clip.wordsWait) {
+      card.classList.add('cyc-block-voice-unsure');
+      const note = h('span', 'cyc-block-voice-note block text-xs italic opacity-80');
+      note.textContent = 'sending once these words are in';
+      transcript.append(note);
     } else if (block.clip.restored) {
       card.classList.add('cyc-block-voice-unsure');
       const note = h('span', 'cyc-block-voice-note block text-xs italic opacity-80');

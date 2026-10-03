@@ -191,6 +191,13 @@ export type ChatMsg = {
    *
    * Absent everywhere else, so an older app renders exactly what it always did. */
   transcriptPending?: boolean;
+  /* THE BODY A PENDING NOTE'S WORDS GO INTO ("note-words"): set only beside
+   * transcriptPending, on a note sent with a reply quote or a caption. It is
+   * that text with the `{{cyc-words:<cid>}}` marker where the words belong, kept
+   * on the row so the completion (or its re-drive after a restart) delivers
+   * quote, words and caption as one message. Cleared with transcriptPending.
+   * Engine-internal: the app decodes a row field by field and never reads it. */
+  wordsInto?: string;
   /* THE MESSAGE'S PLACE IN THE CONVERSATION, monotonic within a session. It is
    * what the page contract counts by: page N holds seq in [N*100, N*100+99]
    * (pages.ts). Assigned at append (logChat) as lastSeq+1, and backfilled from

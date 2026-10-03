@@ -45,6 +45,18 @@ only the tail past `upToS` (`/stt?offset=`, contract 01) and prepends the
 settled text; the settled words are a floor a shorter or failed decode never
 replaces.
 
+A `kind:'voice'` note with text beside its words (the reply quote the app
+puts on top, a caption typed with the recording) is sent at once when the
+engine announced `note-words`: its body names where the note's own words go
+with `{{cyc-words:<cid>}}`, the frame's OWN cid, listed in `words`. The engine
+reads the note's clip into that marker (tail-only when a partial names the
+cid), so the agent gets quote, words and caption as one message, the same
+text the device's own transcript would have made. A decode past the inline
+deadline shows the row pending and keeps the body on the row (`wordsInto`,
+engine-internal) for the completion and its restart re-drive. An engine
+without `note-words` would deliver the marker as text, so against it the app
+waits for the device decoder and bakes the transcript in.
+
 ### Engine -> app frames
 
 The hello burst first (`sendHelloBurst`): `can {list}`, `plugins {list}`

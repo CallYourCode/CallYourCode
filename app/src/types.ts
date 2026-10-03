@@ -83,6 +83,12 @@ export type CycMessage = {
 
   draftCommitted?: number;
 
+  // A sent voice note whose words the engine fills into a caption: the text
+  // painted before and after the still-growing words, so the caption stays on
+  // the bubble while the device's partials grow it (updateVoiceNote). Local to
+  // the pending bubble; it goes when the engine's row lands.
+  wordsAround?: {before: string; after: string};
+
   clipLost?: boolean;
 
   // Why a failed send was refused, in the bubble's own words ("too large (over

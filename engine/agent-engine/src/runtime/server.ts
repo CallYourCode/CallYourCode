@@ -827,8 +827,12 @@ initAttach({
 /** Everything this engine will promise an app it can do. See the `can` frame.
  *  "plugins" (#479) says this engine speaks the plugin protocol: it may send a
  *  `{t:"plugins"}` frame and answer /plugin/<id>/* routes. Additive, per the
- *  CONTRACT.md back-compat rule -- an old app ignores an unknown capability. */
-const ENGINE_CAN = ["words", "plugins"];
+ *  CONTRACT.md back-compat rule -- an old app ignores an unknown capability.
+ *  "note-words" says a voice note's body may be a reply quote or a caption with
+ *  a `{{cyc-words:<cid>}}` marker naming the frame's own cid, and this engine
+ *  reads the note's clip into it (deliver.ts noteWords). An engine without it
+ *  would hand that marker to the agent as text, so the app waits instead. */
+const ENGINE_CAN = ["words", "plugins", "note-words"];
 
 /* THE PLUGINS THIS ENGINE LOADED, and their wire declarations, computed once at
  * start-up from the same list in the same statement (the sessionsFrame rule:

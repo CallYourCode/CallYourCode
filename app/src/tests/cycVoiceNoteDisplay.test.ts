@@ -84,4 +84,46 @@ describe('adoptEngineRow on a streaming voice display', () => {
     expect(local.draftCommitted).toBe(20);
     expect(local.transcriptPending).toBe(true);
   });
+
+  // A quoted note the engine filled ("note-words"): the engine's text is the
+  // quote this device's wire put on top, then the words, then the caption. The
+  // bubble already draws the quote as its reply panel, so it takes the body
+  // below the quote; the quote is never drawn twice.
+  const REPLY = {ts: 50, role: 'claude' as const, title: 'Claude', text: 'Done. Only remote roles.'};
+
+  test('a quoted note takes the words and caption below the quote, and its caption frame goes', () => {
+    const local = mkLocal({
+      text: 'This is not\n\nand a caption',
+      draftCommitted: 4,
+      replyTo: REPLY,
+      wordsAround: {before: '', after: '\n\nand a caption'}
+    });
+    const s = mkSession(local);
+    const full = '> Done. Only remote roles.\n\nThis is not what I asked.\n\nand a caption';
+    adoptEngineRow(s, local, engineRow({text: full}), full, 'k5');
+    expect(local.text).toBe('This is not what I asked.\n\nand a caption');
+    expect(local.draftCommitted).toBeUndefined();
+    expect(local.wordsAround).toBeUndefined();
+    expect(local.replyTo).toEqual(REPLY);
+  });
+
+  test('a quoted pending echo keeps the stream and its caption frame open', () => {
+    const local = mkLocal({
+      text: 'growing\n\ncaption',
+      draftCommitted: 7,
+      replyTo: REPLY,
+      wordsAround: {before: '', after: '\n\ncaption'}
+    });
+    const s = mkSession(local);
+    adoptEngineRow(s, local, engineRow({text: '', transcriptPending: true}), '', 'k6');
+    expect(local.text).toBe('growing\n\ncaption');
+    expect(local.wordsAround).toEqual({before: '', after: '\n\ncaption'});
+  });
+
+  test('text that does not start with the reply quote is taken whole', () => {
+    const local = mkLocal({text: '', replyTo: REPLY});
+    const s = mkSession(local);
+    adoptEngineRow(s, local, engineRow({text: 'just words'}), 'just words', 'k7');
+    expect(local.text).toBe('just words');
+  });
 });

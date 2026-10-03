@@ -47,6 +47,23 @@ export function wordsToken(uploadId: string): string {
   return `{{cyc-words:${uploadId}}}`;
 }
 
+/* What a voice note says when nobody could read its recording: the words the
+ * agent and the bubble get instead of an empty line. */
+export const NOTE_UNREAD = "(voice note: transcription failed)";
+
+/* A VOICE NOTE'S OWN WORDS, PUT WHERE THE COMPOSER LEFT THEM ("note-words").
+ *
+ * A note sent as a quoted reply, or with typed words beside it, carries text
+ * of its own; the body is that text with ONE marker naming the frame's cid
+ * where the recording's words belong (the reply quote above it, the caption
+ * below). The send did not wait for the words: this engine reads the note's
+ * clip, exactly as it does for an empty-bodied note, and the words go into
+ * that marker. The agent reads one message, quote and words together, in the
+ * same shape a send that waited for the device used to produce. */
+export function fillNoteWords(into: string, cid: string, words: string): string {
+  return into.split(wordsToken(cid)).join(words).trim();
+}
+
 /* How long a held message may wait for its transcripts before it goes anyway.
  * A bound and not a promise. */
 export const WORDS_WAIT_MS = Number(process.env.WORDS_WAIT_MS ?? 25_000);
@@ -86,8 +103,11 @@ export const STT_BUSY_BACKOFF_MAX_MS = Number(process.env.STT_BUSY_BACKOFF_MAX_M
  * read the whole clip. */
 export type SettledPartial = { text: string; upToS: number };
 
-/** What a pending note needs, to be shown now and completed later. */
-export type PendingNote = { cid: string; how: string; extra: Partial<ChatMsg>; msgId: string; takenAt: number };
+/** What a pending note needs, to be shown now and completed later. `into` is
+ *  the body the words fill (a note with a reply quote or a caption beside it,
+ *  fillNoteWords); absent, the words ARE the body. */
+export type PendingNote = { cid: string; how: string; extra: Partial<ChatMsg>; msgId: string; takenAt: number;
+  into?: string };
 
 export type TranscribeDeps = {
   voiceUrl(): Promise<string>;
@@ -370,8 +390,12 @@ export async function transcribeStored(msgId: string, cid?: string,
 export function showPendingVoiceNote(s: NoteSession, d: PendingNote, rescue: Promise<string>): void {
   const dd = D();
   const ts = stampTs(s);
+  /* The body the words go into is kept ON THE ROW, so a restart that loses the
+   * in-flight decode still completes the note with its quote and caption
+   * (sweepPendingTranscripts). The app reads frames field by field and never
+   * sees it. */
   const msg: ChatMsg = { id: s.id, role: "user", text: "", ts, cid: d.cid,
-    ...d.extra, transcriptPending: true };
+    ...d.extra, transcriptPending: true, ...(d.into ? { wordsInto: d.into } : {}) };
   logChat(s, msg);
   markReadOnUtterance(s, ts); // his own message reads everything above it (#452)
   dd.broadcast({ t: "chat", ...msg });
@@ -388,7 +412,8 @@ export async function completePendingVoiceNote(s: NoteSession, ts: number, d: Pe
   const dd = D();
   let words = "";
   try { words = await rescue; } catch { words = ""; }
-  const text = words || "(voice note: transcription failed)";
+  const said = words || NOTE_UNREAD;
+  const text = d.into ? fillNoteWords(d.into, d.cid, said) : said;
   if (!words) {
     dd.log("rescue.failed-late", { cid: d.cid, session: s.id, msgId: d.msgId, ts,
       why: "the pending note's decode returned nothing; completing it with the placeholder" });
@@ -423,7 +448,8 @@ export async function sweepPendingTranscripts(): Promise<void> {
         why: "a long note was shown with its transcript pending and the engine restarted before the decode landed" });
       const extra: Partial<ChatMsg> = { kind: "voice", msgId: m.msgId,
         ...(Number.isFinite(m.durationS) ? { durationS: m.durationS } : {}) };
-      void completePendingVoiceNote(s, m.ts, { cid, how: "VOICE", extra, msgId: m.msgId, takenAt: m.ts },
+      void completePendingVoiceNote(s, m.ts, { cid, how: "VOICE", extra, msgId: m.msgId, takenAt: m.ts,
+        ...(m.wordsInto ? { into: m.wordsInto } : {}) },
         transcribeStored(m.msgId, cid));
       redriven++;
     }

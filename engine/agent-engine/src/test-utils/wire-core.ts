@@ -481,7 +481,7 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
   let VOICE_PUBLIC_URL = "";
   let ENGINE_TABS: Grouping = groupingFrom(undefined);
   /** Everything this engine promises an app it can do (server.ts ENGINE_CAN). */
-  const ENGINE_CAN = ["words", "plugins"];
+  const ENGINE_CAN = ["words", "plugins", "note-words"];
 
   /* ---- the inline glue server.ts defines inside boot() -------------------
    *

@@ -43,7 +43,7 @@ import * as drain from '../engine/sync/drain';
 import * as sync from '../engine/sync';
 import {conns, renderSubs, sessions, type Conn} from '../engine/store/registry';
 import {sendVoiceClip, retryVoiceClip} from '../engine/store/voiceUpload';
-import {commitVoiceNote, discardVoiceNote} from '../engine/store/voiceNotes';
+import {commitVoiceNote, discardVoiceNote, updateVoiceNote} from '../engine/store/voiceNotes';
 import {hydrateSends, retrySend, __resetForTest as resetSends} from '../engine/store/sends';
 import type {CycEngineMessage, CycEngineSession} from '../engine/store';
 import type {TransferRow} from '../engine/transfers/rows';
@@ -372,6 +372,85 @@ describe('honest voice-clip send over the transfer queue', () => {
       text: '',
       wire: '',
       partials: [{id: m.cid, text: 'the settled start', upToS: 5.5}]
+    });
+  });
+
+  // A quoted or captioned note on an engine that can 'note-words': it goes at
+  // once, its body written around the marker naming its own cid, the reply
+  // quote on top exactly as a bodied note's wire has it. The engine fills the
+  // words in; the agent reads quote, words and caption as one message.
+  const NOTE_CID = '0b5e7c1a-4f3d-4c2e-9a1b-7d6e5f4a3b2c';
+  const REPLY = {ts: 50, role: 'claude' as const, title: 'Claude', text: 'Done. Only remote roles.'};
+  const quotedNote = () =>
+    sendVoiceClip(s.id, clip(), {
+      durationS: 12,
+      text: '',
+      cid: NOTE_CID,
+      into: `{{cyc-words:${NOTE_CID}}}\n\nand a caption`,
+      replyTo: REPLY,
+      partial: {text: 'This is not', upToS: 2},
+      display: {text: 'This is not what', committed: 11}
+    });
+
+  test('a quoted, captioned note ships at once around its marker; the wire is quote, marker, caption', async () => {
+    vi.mocked(transfers.rowOf).mockImplementation((k) => queuedRow(k, s.id));
+    const id = quotedNote();
+    const m = s.messages.find((x) => x.id === id) as CycEngineMessage;
+    // The bubble: the growing words with the caption below them, the quote as
+    // its reply panel.
+    expect(m.cid).toBe(NOTE_CID);
+    expect(m.text).toBe('This is not what\n\nand a caption');
+    expect(m.draftCommitted).toBe(11);
+    expect(m.replyTo).toEqual(REPLY);
+    const wire = `> Done. Only remote roles.\n\n{{cyc-words:${NOTE_CID}}}\n\nand a caption`;
+    expect(payloadOf(NOTE_CID)).toMatchObject({
+      text: '',
+      wire,
+      words: [NOTE_CID],
+      partials: [{id: NOTE_CID, text: 'This is not', upToS: 2}]
+    });
+    await flush();
+    const row = doneRow(NOTE_CID, s.id, 'srv-quoted-1');
+    vi.mocked(transfers.rowOf).mockReturnValue(row);
+    registeredOnResult(row);
+    await flush();
+    expect(planted.sent).toHaveLength(1);
+    expect(planted.sent[0][1]).toBe(wire);
+    expect(planted.sent[0][2]).toMatchObject({
+      kind: 'voice',
+      msgId: 'srv-quoted-1',
+      cid: NOTE_CID,
+      words: [NOTE_CID],
+      partials: [{id: NOTE_CID, text: 'This is not', upToS: 2}]
+    });
+  });
+
+  test("the device's later words grow a quoted note's bubble above its caption", () => {
+    vi.mocked(transfers.rowOf).mockImplementation((k) => queuedRow(k, s.id));
+    const id = quotedNote();
+    updateVoiceNote(s.id, id, 'This is not what I requested', 20);
+    const m = s.messages.find((x) => x.id === id) as CycEngineMessage;
+    expect(m.text).toBe('This is not what I requested\n\nand a caption');
+    expect(m.draftCommitted).toBe(20);
+  });
+
+  test('retry of a quoted note resends its marker body and words list, never the display', async () => {
+    vi.mocked(transfers.rowOf).mockImplementation((k) => queuedRow(k, s.id));
+    const id = quotedNote();
+    const m = s.messages.find((x) => x.id === id) as CycEngineMessage;
+    await flush();
+    m.status = 'failed';
+    vi.mocked(clipVault.get).mockResolvedValue({
+      blob: clip(),
+      mime: 'audio/webm',
+      durationS: 12
+    } as never);
+    expect(retryVoiceClip(s.id, id)).toBe(true);
+    await flush();
+    expect(payloadOf(NOTE_CID)).toMatchObject({
+      text: '',
+      wire: `> Done. Only remote roles.\n\n{{cyc-words:${NOTE_CID}}}\n\nand a caption`,
+      words: [NOTE_CID]
     });
   });
 

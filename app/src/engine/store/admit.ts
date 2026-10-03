@@ -3,7 +3,7 @@ import {markGrowing} from '../../audio/audioCache';
 import type {CycMessage} from '../../types';
 import {capSeen, seen} from './registry';
 import {stampRowId} from './rows/core';
-import {settleSend} from './sends';
+import {quoteForWire, settleSend} from './sends';
 import {reportSighting} from './readState';
 import {noteClip} from './voiceNotes';
 import {prefetchShownDoc} from './shownPrefetch';
@@ -83,6 +83,16 @@ export function findLocalFor(
   }) as CycEngineMessage | undefined;
 }
 
+// The engine's text for a reply starts with the quote this device's wire put
+// on top of it (quoteForWire). The bubble draws that quote as its reply panel,
+// so the body it takes from the engine is the text below the quote.
+function bodyBelowReply(local: CycEngineMessage, displayText: string): string {
+  const excerpt = (local.replyTo?.text ?? '').trim();
+  if (!excerpt) return displayText;
+  const quote = quoteForWire(excerpt) + '\n\n';
+  return displayText.startsWith(quote) ? displayText.slice(quote.length) : displayText;
+}
+
 // Fold the engine's row into the bubble: the send is delivered (its intent
 // goes), and the bubble takes the engine's timestamp, ids and text.
 export function adoptEngineRow(
@@ -116,11 +126,11 @@ export function adoptEngineRow(
   // no duplicate. A bubble with no text at all takes the engine's words as
   // before.
   if (displayText && (local.draftCommitted !== undefined || !local.text)) {
-    local.text = displayText;
+    local.text = bodyBelowReply(local, displayText);
   }
 
   if (local.wordsPending) {
-    local.text = displayText;
+    local.text = bodyBelowReply(local, displayText);
     const files = m.uploads?.length ? m.uploads : m.upload ? [m.upload] : [];
     if (files.length) {
       local.upload = files[0];
@@ -146,7 +156,10 @@ export function adoptEngineRow(
   // A pending echo (a long note shown before its transcript) carries no words
   // yet: the device's streaming display stands and keeps growing, so
   // draftCommitted stays until the completion row lands (settleTranscript).
-  if (!m.transcriptPending) delete local.draftCommitted;
+  if (!m.transcriptPending) {
+    delete local.draftCommitted;
+    delete local.wordsAround;
+  }
   noteClip(local);
 }
 
