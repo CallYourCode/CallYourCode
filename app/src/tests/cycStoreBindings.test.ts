@@ -1,4 +1,4 @@
-import {beforeEach, describe, expect, test, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 type Handler = (...a: never[]) => void;
 const fake = vi.hoisted(() => ({
   handlers: {} as Record<string, Handler>,
@@ -446,6 +446,62 @@ describe('the read sighting for a reply arriving in the open chat', () => {
     (fake.handlers.store as Handler)();
     fake.active = {id: 's1', messages: window(1, 300)};
     (fake.handlers.store as Handler)();
+    expect(deps.reportViewedThrough).not.toHaveBeenCalled();
+  });
+});
+describe('the new-below badge in a full window', () => {
+  // The same capped-window trap as the read sighting: a reply that slides the
+  // oldest row out leaves the count at 300, and the badge was gated on the count.
+  const window = (from: number, n: number) =>
+    Array.from({length: n}, (_, i) => ({id: `m${from + i}`, mid: `m${from + i}`, ts: from + i}));
+  test('a reply to a reader scrolled up raises the badge though the count does not grow', () => {
+    const {cs} = mk();
+    (cs as {nearBottom: () => boolean}).nearBottom = () => false;
+    sessionState.activeId = 's1';
+    fake.active = {id: 's1', messages: window(1, 300)};
+    (fake.handlers.store as Handler)();
+    fake.active = {id: 's1', messages: window(3, 300)}; // two in, two out
+    (fake.handlers.store as Handler)();
+    expect(cs.setNewBelow).toHaveBeenCalledWith(2);
+  });
+});
+describe('replies that arrived while the page was hidden', () => {
+  const window = (from: number, n: number) =>
+    Array.from({length: n}, (_, i) => ({id: `m${from + i}`, mid: `m${from + i}`, ts: from + i}));
+  const setHidden = (hidden: boolean) => {
+    Object.defineProperty(document, 'hidden', {configurable: true, get: () => hidden});
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => (hidden ? 'hidden' : 'visible')
+    });
+  };
+  const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+  afterEach(() => setHidden(false));
+  function arriveHidden(nearBottom: boolean) {
+    const made = mk();
+    (made.cs as {nearBottom: () => boolean}).nearBottom = () => nearBottom;
+    sessionState.activeId = 's1';
+    fake.active = {id: 's1', messages: window(1, 300)};
+    (fake.handlers.store as Handler)();
+    setHidden(true);
+    fake.active = {id: 's1', messages: window(2, 300)};
+    (fake.handlers.store as Handler)();
+    expect(made.deps.reportViewedThrough).not.toHaveBeenCalled(); // nobody was looking
+    setHidden(false);
+    document.dispatchEvent(new Event('visibilitychange'));
+    return made;
+  }
+  test('coming back to the open chat at the bottom marks them read', async () => {
+    const {deps} = arriveHidden(true);
+    await frame();
+    await frame();
+    expect(deps.reportViewedThrough).toHaveBeenCalledTimes(1);
+    expect(deps.reportViewedThrough).toHaveBeenCalledWith('s1');
+  });
+  test('coming back scrolled up leaves them unread', async () => {
+    const {deps} = arriveHidden(false);
+    await frame();
+    await frame();
     expect(deps.reportViewedThrough).not.toHaveBeenCalled();
   });
 });

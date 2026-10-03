@@ -280,6 +280,9 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
   );
 
   let lastActiveMsgCount = -1;
+  // The open chat that got new rows while the page was hidden (and so was not
+  // sighted), or null. Settled on the next return to visible.
+  let unsightedWhileHidden: string | null = null;
 
   // The newest message time already on screen: only rows past it are "new
   // below". A window load or backfill adds rows too, all of them older, and
@@ -425,17 +428,12 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       const prevScrollH = lastActiveScrollH;
       const wasNearBottom = cs.nearBottom();
       const prevNewestTs = lastNewestTs;
-      let newestTs = 0;
-      let newer = 0;
-      if (s) {
-        for (const m of s.messages) {
-          if (m.ts > newestTs) newestTs = m.ts;
-          if (prevNewestTs > 0 && m.ts > prevNewestTs) newer++;
-        }
-      }
-      // no baseline yet (a fresh open): nothing counts as new
-      const arrived = prevNewestTs > 0 ? newer : 0;
+      const {newestTs, arrived: newer} = rowsArrived(s ? s.messages : [], prevNewestTs);
       const sameSession = !!s && s.id === prevSessionId;
+      // THE ONE "A REPLY ARRIVED IN THE OPEN CHAT" FACT, read by the new-below
+      // badge and the read sighting alike: rows newer than the newest already
+      // shown, in the same chat (rowsArrived says why not a count that grew).
+      const arrived = sameSession ? newer : 0;
       // graceOpen/openOwned are store state, not layout; read them now so the
       // unread bookkeeping matches the branch the rAF will take.
       const ownedLike = owned || cs.graceOpen();
@@ -496,30 +494,16 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       // New rows raise "new below" when the chat is owned, or when the reader
       // is not pinned to the bottom (a pinned reader is scrolled down instead,
       // in the rAF, and owes no badge).
-      if (
-        sameSession &&
-        prevMsgCount >= 0 &&
-        count > prevMsgCount &&
-        arrived > 0 &&
-        (ownedLike || !wasNearBottom)
-      ) {
+      if (arrived > 0 && (ownedLike || !wasNearBottom)) {
         cs.setNewBelow(cs.newBelowCount() + arrived);
       }
 
-      // `arrived` (rows newer than the newest already shown), NOT a count that
-      // grew: the open window is capped (WINDOW, 300), so in a full window a
-      // reply slides the oldest row out and the count stays put. Gating on the
-      // count left a reply on screen unread until the owner left the chat
-      // (2026-10-03: rows=300 before and after the reply, read only on back).
-      if (
-        s &&
-        dataState.mode === 'live' &&
-        !cs.openOwned() &&
-        !cs.landingOwed() &&
-        sameSession &&
-        document.visibilityState === 'visible'
-      ) {
-        if (arrived > 0) deps.reportViewedThrough(s.id);
+      if (s && arrived > 0 && dataState.mode === 'live' && !cs.openOwned() && !cs.landingOwed()) {
+        // A hidden page that is still running gets the rows but must not sight
+        // them: nobody is looking. Remember the chat, and the return to visible
+        // sights it if the reader is at the bottom (onVisibility below).
+        if (document.visibilityState === 'visible') deps.reportViewedThrough(s.id);
+        else unsightedWhileHidden = s.id;
       }
     })
   );
@@ -614,6 +598,20 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       return;
     }
     const id = sessionState.activeId;
+    /* BACK ON THE OPEN CHAT, AT THE BOTTOM: what arrived while hidden is on
+     * screen now, so it is read, through the same sighting as a live arrival.
+     * One frame later, so the follow and the near-bottom measure the hidden page
+     * queued (rAF does not run while hidden) have settled first. A reader
+     * scrolled up keeps the new-below badge instead. */
+    const owed = unsightedWhileHidden;
+    unsightedWhileHidden = null;
+    if (owed && owed === id) {
+      requestAnimationFrame(() => {
+        if (document.hidden || sessionState.activeId !== owed || dataState.mode !== 'live') return;
+        if (cs.openOwned() || cs.landingOwed() || !cs.nearBottom()) return;
+        deps.reportViewedThrough(owed);
+      });
+    }
     if (
       id &&
       sessionState.chatConversationMode.has(id) &&
@@ -639,4 +637,23 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
     openFromNotification,
     tryRestoreActive
   };
+}
+
+/* ROWS NEWER THAN THE NEWEST ALREADY SHOWN, and the newest instant now. NOT a
+ * count that grew: the open window is capped (WINDOW, 300), so in a full window
+ * a reply slides the oldest row out and the count stays put. Gating on the count
+ * left a reply on screen unread until the owner left the chat, and raised no
+ * new-below badge (2026-10-03: rows=300 before and after the reply). No baseline
+ * yet (prevNewestTs 0, a fresh open): nothing counts as new. */
+export function rowsArrived(
+  messages: readonly {ts: number}[],
+  prevNewestTs: number
+): {newestTs: number; arrived: number} {
+  let newestTs = 0;
+  let arrived = 0;
+  for (const m of messages) {
+    if (m.ts > newestTs) newestTs = m.ts;
+    if (prevNewestTs > 0 && m.ts > prevNewestTs) arrived++;
+  }
+  return {newestTs, arrived};
 }
