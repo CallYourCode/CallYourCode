@@ -79,6 +79,7 @@ vi.mock('../audio/speaker', () => ({
     stopAll: vi.fn(),
     pause: vi.fn(),
     resume: vi.fn(),
+    resumeInterrupted: vi.fn(),
     setBusy: vi.fn(),
     state: {state: 'idle'}
   }
