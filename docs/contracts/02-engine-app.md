@@ -51,9 +51,12 @@ engine announced `note-words`: its body names where the note's own words go
 with `{{cyc-words:<cid>}}`, the frame's OWN cid, listed in `words`. The engine
 reads the note's clip into that marker (tail-only when a partial names the
 cid), so the agent gets quote, words and caption as one message, the same
-text the device's own transcript would have made. A decode past the inline
-deadline shows the row pending and keeps the body on the row (`wordsInto`,
-engine-internal) for the completion and its restart re-drive. An engine
+text the device's own transcript would have made. The marker is matched by
+its literal token, so any cid the engine accepts (a capture's `c-...` as well
+as a uuid) names it. A decode past the inline deadline shows the row pending:
+its `text` is the quote and caption without the marker (what other devices
+show meanwhile) and the body is kept on the row (`wordsInto`,
+engine-internal) for the completion and its re-drive. An engine
 without `note-words` would deliver the marker as text, so against it the app
 waits for the device decoder and bakes the transcript in.
 
@@ -97,7 +100,11 @@ sequenceDiagram
 
 ### Delivery guarantees (PRODUCT.md section 5)
 
-The engine acks every utterance by cid BEFORE delivery work; `dup:true` marks
+The engine acks every utterance by cid BEFORE delivery work, and only once the
+frame is on its disk (`state/intake/`, removed when delivery has run): a crash
+after the ack leaves the frame, and the session's next live pickup drives it
+again, deduped by cid against the chat log. A note shown with its words
+pending is completed at that same pickup. `dup:true` marks
 a re-sent cid; `err` / `send-failed` are definitive refusals that keep the
 cid retriable. The app arms a per-cid ack deadline (`store/sends.ts armAck`);
 a deadline reached with no ack redelivers the SAME cid (`drain.redeliver`)

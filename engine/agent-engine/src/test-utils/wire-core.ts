@@ -103,8 +103,8 @@ import { initAttach } from "../chat/attach.ts";
 import { initSessionsFrame, broadcastSessions, sessionsFrame, sendHelloBurst,
   resetForTest as resetSessionsFrame } from "../sessions/sessions-frame.ts";
 import { initDeliver, injectUserMessage, inOrder, deliverToAgent,
-  resetForTest as resetDeliver } from "../chat/deliver.ts";
-import { initTranscribe } from "../voice/transcribe.ts";
+  resetForTest as resetDeliver, redriveTaken } from "../chat/deliver.ts";
+import { initTranscribe, redrivePendingNotes, resetPendingForTest } from "../voice/transcribe.ts";
 import { initShowHandler } from "../chat/show-handler.ts";
 import { initSessionVerbs, compactSession } from "../sessions/session-verbs.ts";
 import { initMcp } from "../runtime/mcp.ts";
@@ -311,6 +311,11 @@ export type WireCoreOpts = {
   engineUser?: string;
   /** VOICE_PUBLIC_URL, as it rides the sessions frame */
   voicePublicUrl?: string;
+  /** the voice engine transcribe.ts decodes against (delivery layer); a
+   *  refusing url by default. Given here rather than re-pointed after boot,
+   *  because a boot drives what a session is owed the moment its pane
+   *  reconciles, before a test could re-point anything. */
+  voiceUrl?: () => Promise<string>;
   /** ENGINE_TABS, as groupingFrom() reads it */
   tabs?: string;
 
@@ -408,6 +413,7 @@ function resetAllModules(): void {
   resetIngest();
   resetPaneDeliver();
   resetDeliver();
+  resetPendingForTest();
   resetReplyTrace();
   resetSessionsFrame();
   resetPresence();
@@ -994,13 +1000,13 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
     if (has("delivery")) {
       // 25. Transcription: transcribe.ts, over a voice engine that refuses.
       initTranscribe({
-        voiceUrl: () => refusingVoiceUrl(),
+        voiceUrl: o.voiceUrl ?? (() => refusingVoiceUrl()),
         log: (e, f) => log(e, f),
         broadcast: (m) => broadcast(m),
         inOrder: (id, f) => inOrder(id, f),
         deliver: (s, opts) => injectUserMessage(s as Session, opts),
         sessionOf: (id) => sessions.get(id),
-        restoredChats: () => restoredChats,
+        clock,
       });
 
       // 26. Delivery: deliver.ts. THE one way a message gets into a session.
@@ -1068,6 +1074,11 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
       sweepTails: () => adapter.sweepTails(),
       broadcastSessions: () => broadcastSessions(),
       now: () => clock.now(),
+      // Mirrors server.ts: what a session is owed from before it came up live.
+      sessionLive: has("delivery") ? (s) => {
+        redrivePendingNotes(s);
+        void redriveTaken(s);
+      } : undefined,
     }));
     if (o.start !== false) adapter.start();
 

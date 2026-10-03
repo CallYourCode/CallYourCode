@@ -47,7 +47,6 @@ function pointTranscribeAtFake(): void {
     inOrder: (id, f) => inOrder(id, f),
     deliver: (s, opts) => injectUserMessage(s as Session, opts),
     sessionOf: (id) => sessions.get(id),
-    restoredChats: () => restoredChats,
     clock: core.clock,
   });
 }

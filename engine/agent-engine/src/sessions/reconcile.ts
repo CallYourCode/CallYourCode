@@ -71,6 +71,11 @@ export type ReconcileDeps = {
   now?: () => number;
   /** the engine log line writer (status.edge for mux-driven changes) */
   log?(event: string, fields: Record<string, unknown>): void;
+  /** A session's pane is live now and it was not a moment ago (the first poll
+   *  after a boot, or a dead row coming back): whatever this engine owes it
+   *  from before (a message taken and never delivered, a note shown with its
+   *  words pending) can be driven to it now. Called after the row is set. */
+  sessionLive?(s: Session): void;
 };
 
 /** What one pane's mux evidence says, normalised. */
@@ -537,6 +542,7 @@ export function makeReconcile(d: ReconcileDeps): (agents: MuxAgentInfo[]) => voi
     sessions.set(key, s);
     restoredChats.delete(key); // owned by the live session now
     restoredLogs.delete(key);
+    if (!prev?.alive) d.sessionLive?.(s);
     // the edge the log line above reported, as a record in the agent's own log
     if (prev && prev.status !== status) {
       logSession(s, { ts: now, kind: "status", text: `status: ${status}`, status });

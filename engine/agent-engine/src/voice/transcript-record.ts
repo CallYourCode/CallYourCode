@@ -160,6 +160,15 @@ export function release(id: string): void {
   released.add(id);
 }
 
+/** A NEW decode of a recording whose last one has finished: the re-drive of a
+ *  pending note its session did not take (transcribe.ts redrivePendingNotes).
+ *  The released mark guards against a LATE writer from a decode still in
+ *  flight; the re-drive runs only after the previous completion returned, so
+ *  there is none, and the fresh decode must be allowed a record of its own. */
+export function reopen(id: string): void {
+  released.delete(id);
+}
+
 /** Live record count. Test-only: lets the resurrection guard assert the map is
  *  empty after a released id takes a late write. */
 export function recordCount(): number {

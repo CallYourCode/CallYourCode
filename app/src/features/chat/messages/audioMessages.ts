@@ -37,23 +37,27 @@ export function audioMessage(
   const transcript = h('div', 'cyc-transcript' + (out ? '' : ' cyc-karaoke'));
 
   if (awaitingWords(m) || m.transcriptPending) {
-    const cut = Math.max(0, Math.min(m.draftCommitted ?? m.text.length, m.text.length));
-    const done = h('span', 'cyc-vb-done');
-    done.textContent = m.text.slice(0, cut);
-    const tail = h('span', 'cyc-vb-tail opacity-50');
-    tail.textContent = m.text.slice(cut);
-
-    transcript.append(
-      done,
-      tail,
-      (() => {
-        const dots = h('span', 'cyc-transcript-dots relative');
-        const bg = h('span', 'opacity-0 [.cyc-karaoke_&]:opacity-40!');
-        bg.textContent = '...';
-        dots.append(bg, transcriptDotWave());
-        return dots;
-      })()
-    );
+    const dots = (() => {
+      const d = h('span', 'cyc-transcript-dots relative');
+      const bg = h('span', 'opacity-0 [.cyc-karaoke_&]:opacity-40!');
+      bg.textContent = '...';
+      d.append(bg, transcriptDotWave());
+      return d;
+    })();
+    if (m.draftCommitted === undefined && m.transcriptPending && m.text) {
+      // The engine's pending row of a quoted or captioned note: its text is
+      // the quote and caption (formatted like any message), and the dots say
+      // the words are still being read.
+      setFormatted(transcript, m.text);
+      transcript.append(dots);
+    } else {
+      const cut = Math.max(0, Math.min(m.draftCommitted ?? m.text.length, m.text.length));
+      const done = h('span', 'cyc-vb-done');
+      done.textContent = m.text.slice(0, cut);
+      const tail = h('span', 'cyc-vb-tail opacity-50');
+      tail.textContent = m.text.slice(cut);
+      transcript.append(done, tail, dots);
+    }
   } else {
     setFormatted(transcript, m.text);
   }

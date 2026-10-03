@@ -63,7 +63,7 @@ import { sessions, sessionByHandle, resolveSession, loadSessionState, sessionSta
   scheduleAgentSave, scheduleHeardSave, nameOverrideOf, voiceOverrideOf, setVoiceOverride, adoptAgentId,
   globalVoice, setDefaultVoice, voiceFor, docDirFor, type Session } from "../sessions/session-state.ts";
 import { initPaneDeliver, onPaneKeyboard, deliverToPane } from "../chat/pane-deliver.ts";
-import { initDeliver, inOrder, injectUserMessage, deliverToAgent } from "../chat/deliver.ts";
+import { initDeliver, inOrder, injectUserMessage, deliverToAgent, redriveTaken } from "../chat/deliver.ts";
 import { initReply, deliverReply } from "../chat/reply.ts";
 import { initNotify, notifyUnlessWatched, notifyDevices, notifyEngineDevices, sendDismissal, flushUnread } from "../chat/notify.ts";
 import { initPresence } from "../sessions/presence.ts";
@@ -91,7 +91,7 @@ import { runBackfillSweep, resolveBackfillSources, type MetaLike } from "../chat
 import { initLineage, lineageOf } from "../sessions/lineage.ts";
 import { initAttach } from "../chat/attach.ts";
 import { voiceUrl, VOICE_URLS, listHostVoices } from "../voice/voice-proxy.ts";
-import { initTranscribe, sweepPendingTranscripts } from "../voice/transcribe.ts";
+import { initTranscribe, redrivePendingNotes } from "../voice/transcribe.ts";
 
 import { homedir, userInfo, hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -566,12 +566,9 @@ const CLAUDE_COMMAND = adapter.launchCommand("claude")!;
 /* SCHEDULES LIVE IN THE CRONS PLUGIN NOW (blueprint section 2). The store,
  * the cron math, the ticker, the fire wording and the seeding are all owned by
  * plugins/crons/, reached over the one /plugin/crons/rpc/<op> route; the
- * engine core keeps zero schedule knowledge. What used to ride the same 10s
- * boot delay as the first schedule tick stays on it: herdr has reported by
- * then, so the sessions a pending note must be delivered to exist (#458). */
-setTimeout(() => {
-  void sweepPendingTranscripts();
-}, 10_000);
+ * engine core keeps zero schedule knowledge. The pending-note re-drive that
+ * used to ride a 10s boot timer here runs at each session's live pickup now
+ * (reconcile sessionLive, below). */
 
 /* THE REPLY TRACE (#585 + blueprint row 26): the store is the plugin's own
  * (plugins/reply-dials/index.ts replyDialsStore); this engine keeps only the Stop
@@ -1066,7 +1063,6 @@ initTranscribe({
   inOrder: (id, f) => inOrder(id, f),
   deliver: (s, opts) => injectUserMessage(s as Session, opts),
   sessionOf: (id) => sessions.get(id),
-  restoredChats: () => restoredChats,
 });
 
 // Delivery: deliver.ts.
@@ -1507,6 +1503,15 @@ adapter.onAgents(makeReconcile({
   sweepTails: () => adapter.sweepTails(),
   broadcastSessions: () => broadcastSessions(),
   log: (e, f) => LOG.line(e, f),
+  /* What a session is owed from before it came up live: notes shown with their
+   * words pending (transcribe.ts) and messages taken but never delivered
+   * (deliver.ts intake). Here, at the pickup, not on a boot timer: the
+   * restored chat a timer would read is handed to the live row on the first
+   * poll and gone from where it looked. */
+  sessionLive: (s) => {
+    redrivePendingNotes(s);
+    void redriveTaken(s);
+  },
 }));
 adapter.start();
 

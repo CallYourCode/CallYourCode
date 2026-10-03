@@ -17,8 +17,9 @@
  *      quote stays, and no marker ever reaches the pane;
  *   4. a long note: shown at once, completed ONCE with quote + words, and the
  *      body it fills is cleared from the row with the pending flag;
- *   5. after a restart the re-drive completes the same note with its quote;
+ *   5. a capture cid ("c-...", not a uuid) names its marker and still fills;
  *   6. a marker naming the cid on a TEXT frame is his typing, left alone.
+ * The restart and crash cases go through a real reboot in note-restart.test.ts.
  *
  * WHAT IS REAL: the delivery path from the client frame down (onUtterance ->
  * the clip guard -> the rescue decode -> injectUserMessage -> the real pane),
@@ -28,11 +29,10 @@
 import { test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 
 import { cacheAudio } from "./clips.ts";
-import { logChat, stampTs } from "./chatlog.ts";
 import { inOrder, injectUserMessage, onUtterance } from "./deliver.ts";
-import { initTranscribe, sweepPendingTranscripts, RESCUE_INLINE_MS, NOTE_UNREAD,
+import { initTranscribe, RESCUE_INLINE_MS, NOTE_UNREAD,
   wordsToken } from "../voice/transcribe.ts";
-import { restoredChats, resolveSession, sessions, type Session } from "../sessions/session-state.ts";
+import { resolveSession, sessions, type Session } from "../sessions/session-state.ts";
 import { broadcast } from "../transport/wire.ts";
 import { PANE, defaultSessionIdOf } from "../test-utils/fake-herdr.ts";
 import { fakeVoice, type FakeVoice } from "../test-utils/fake-voice.ts";
@@ -57,7 +57,6 @@ function pointTranscribeAtFake(): void {
     inOrder: (id, f) => inOrder(id, f),
     deliver: (s, opts) => injectUserMessage(s as Session, opts),
     sessionOf: (id) => sessions.get(id),
-    restoredChats: () => restoredChats,
     clock: core.clock,
   });
 }
@@ -175,7 +174,9 @@ test("a long quoted note is shown at once and completed ONCE with quote and word
   const shown = rowsFor(cid);
   expect(shown.length).toBe(1);
   expect(shown[0].transcriptPending).toBe(true);
-  expect(shown[0].text, "the pending row shows words nobody has read yet").toBe("");
+  expect(shown[0].text,
+    "the pending row must show the quote (never the marker, never words nobody has read)")
+    .toBe(QUOTE);
   expect(shown[0].wordsInto, "the body the words fill was not kept on the row")
     .toBe(`${QUOTE}\n\n${wordsToken(cid)}`);
   expect(core.submitted.length, "something reached the agent before the words did").toBe(0);
@@ -193,29 +194,19 @@ test("a long quoted note is shown at once and completed ONCE with quote and word
   expect(core.submitted[0].text).toContain(`${QUOTE}\n\n${voice.transcript}`);
 });
 
-test("after a restart the re-drive completes a pending quoted note with its quote", async () => {
-  const msgId = await park(5);
-  const cid = crypto.randomUUID();
-  voice.transcript = "words read after the restart";
-  const s = resolveSession(PANE_SID)!;
-  /* The row a restart finds: shown pending with its body kept, the decode that
-   * was in flight gone with the old process. */
-  const row = { id: s.id, role: "user" as const, text: "", ts: stampTs(s), cid,
-    kind: "voice" as const, msgId, durationS: 12, transcriptPending: true,
-    wordsInto: `${QUOTE}\n\n${wordsToken(cid)}` };
-  logChat(s, row);
-  const was = restoredChats.get(s.id);
-  restoredChats.set(s.id, [row]);
-  try {
-    await sweepPendingTranscripts();
-    await until(() => has(cid, "rescue.completed"), { what: "the re-driven note to complete" });
-  } finally {
-    if (was) restoredChats.set(s.id, was);
-    else restoredChats.delete(s.id);
-  }
-  expect(rowsFor(cid).length).toBe(1);
+test("a capture's own cid (not a uuid) names its marker, and the engine still fills it", async () => {
+  /* commitVoiceNote names the marker by the note's cid, and a capture's cid is
+   * "c-<time>-<rand>" (newCid), not the upload id shape WORDS_TOKEN_RE reads.
+   * The note's own marker is found by its literal token, so it still fills. */
+  const msgId = await park(6);
+  const cid = "c-musqtm4z-4dpka";
+  voice.transcript = "words under a capture id";
+
+  await onUtterance(client.sock, noted(msgId, cid, `${QUOTE}\n\n${wordsToken(cid)}`));
+  await until(() => core.submitted.length > 0, { what: "the note to reach the pane" });
+
   expect(rowsFor(cid)[0].text).toBe(`${QUOTE}\n\n${voice.transcript}`);
-  expect(core.submitted[0].text).toContain(`${QUOTE}\n\n${voice.transcript}`);
+  expect(core.submitted[0].text, "the raw marker reached the pane").not.toContain("{{cyc-words:");
 });
 
 test("a marker naming the cid on a TEXT frame is his own typing and goes through untouched", async () => {

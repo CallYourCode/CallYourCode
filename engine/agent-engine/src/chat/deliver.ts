@@ -21,11 +21,12 @@ import { audio, clipOnDisk, haveClip, adoptStagedClip } from "./clips.ts";
 import { attachmentsOf, attachmentFields, uploadIds, type ChatMsg, type UploadRec } from "./chatmsg.ts";
 import { persistPatch, type Session } from "../sessions/session-state.ts";
 import { transcribeStored, showPendingVoiceNote, readWords, fillWords, fillNoteWords,
-  raceInlineRescue, WORDS_TOKEN_RE, NOTE_UNREAD, type SettledPartial } from "../voice/transcribe.ts";
+  raceInlineRescue, WORDS_TOKEN_RE, NOTE_UNREAD, wordsToken, type SettledPartial } from "../voice/transcribe.ts";
 import { admitPartial, wordsOf, keptPrefix, release } from "../voice/transcript-record.ts";
 import type { ReplyDelivery } from "./reply-trace.ts";
 import type { OutgoingInput } from "../plugins/platform/core.ts";
 import { broadcast, send } from "../transport/wire.ts";
+import { noteTaken, forgetTaken, takenFor } from "./intake.ts";
 import type { Sock } from "../transport/sock.ts";
 
 export type DeliverDeps = {
@@ -87,6 +88,8 @@ const D = (): DeliverDeps => {
  *  re-wires. */
 export function resetForTest(): void {
   utterQueue.clear();
+  ackQueue.clear();
+  redrivenTaken.clear();
   deps = null;
 }
 
@@ -173,16 +176,90 @@ export function onUtterance(ws: Sock, m: any): Promise<void> {
   const known = recentCids(s).get(cid);
   const dup = known !== undefined || cidsInFlight(s).has(cid);
   const msgId = known?.msgId ?? (typeof m.msgId === "string" ? m.msgId : undefined);
-  D().send(ws, { t: "ack", id: sid, cid, dup, ...(msgId ? { msgId } : {}) });
+  const ack = () => D().send(ws, { t: "ack", id: sid, cid, dup, ...(msgId ? { msgId } : {}) });
   if (dup) {
+    void inAckOrder(sid, async () => ack());
     D().log("utterance.dup", { cid, session: sid,
       why: "this cid was delivered already (or is being delivered); the frame is a " +
         "rewrite after a lost ack, so it is acked and not delivered twice" });
     return Promise.resolve();
   }
   cidsInFlight(s).add(cid);
-  return inOrder(sid, () => handleUtterance(ws, m, takenAt))
-    .finally(() => { cidsInFlight(s).delete(cid); });
+  /* TAKEN MEANS ON DISK (intake.ts). The app deletes its copy on the ack, so
+   * the frame is written before it: a crash anywhere after the ack (a
+   * recording being read, a message queued behind one) leaves the file, and
+   * the next boot drives it again (redriveTaken). Enqueued NOW, not after the
+   * write, so the chain still runs in socket order; the delivery waits for the
+   * write. A write that fails (a full disk) is logged and the message still
+   * goes, exactly as before this existed. */
+  const durable = inAckOrder(sid, async () => {
+    await noteTaken({ sessionId: sid, cid, takenAt, frame: m }).catch((e) => {
+      D().log("intake.unsaved", { cid, session: sid, err: String(e),
+        why: "the taken frame could not be written; it is delivered, but a crash before " +
+          "that would lose it" });
+    });
+    ack();
+  });
+  return inOrder(sid, async () => { await durable; return handleUtterance(ws, m, takenAt); })
+    .finally(() => {
+      cidsInFlight(s).delete(cid);
+      return forgetTaken(sid, cid);
+    });
+}
+
+/* THE ACKS GO OUT IN THE ORDER THE FRAMES CAME IN, per session. A taken
+ * frame's ack waits for its disk write; the rewrite of that same frame, acked
+ * as a dup, must not overtake it. */
+const ackQueue = new Map<string, Promise<void>>();
+function inAckOrder(sessionId: string, f: () => Promise<void>): Promise<void> {
+  const next = (ackQueue.get(sessionId) ?? Promise.resolve()).then(f, f);
+  ackQueue.set(sessionId, next.catch(() => {}));
+  return next;
+}
+
+/* THE TAKEN FRAMES A PREVIOUS PROCESS NEVER FINISHED (intake.ts), driven again
+ * when their session is picked up live. Once per (session, cid) per process,
+ * and never for a cid the chat log already holds (it was delivered, or shown
+ * pending, and that row has its own re-drive): a message is not delivered
+ * twice. A frame driven three times by three boots without finishing is
+ * given up on, logged: a message that kills the engine must not do it on
+ * every start. There is no socket to answer: a refusal is broadcast as
+ * send-failed on the cid, which the device that sent it acts on. */
+const redrivenTaken = new Set<string>();
+export async function redriveTaken(s: CidSession & { id: string }): Promise<number> {
+  let n = 0;
+  for (const t of await takenFor(s.id)) {
+    const k = `${s.id}|${t.cid}`;
+    if (redrivenTaken.has(k)) continue;
+    redrivenTaken.add(k);
+    if (recentCids(s).has(t.cid) || cidsInFlight(s).has(t.cid) ||
+      s.chat.some((r) => r.role === "user" && r.cid === t.cid)) {
+      D().log("intake.finished", { cid: t.cid, session: s.id,
+        why: "the chat log holds this cid: the message landed before the engine went down" });
+      await forgetTaken(s.id, t.cid);
+      continue;
+    }
+    const redrives = (t.redrives ?? 0) + 1;
+    if (redrives > 3) {
+      D().log("intake.given-up", { cid: t.cid, session: s.id, redrives: t.redrives,
+        why: "three boots drove this frame and none finished it; it is dropped rather " +
+          "than allowed to take the engine down on every start" });
+      await forgetTaken(s.id, t.cid);
+      continue;
+    }
+    await noteTaken({ ...t, redrives });
+    D().log("intake.redrive", { cid: t.cid, session: s.id, kind: t.frame.kind ?? "text",
+      takenAt: t.takenAt, redrives,
+      why: "this message was acked and the engine went down before it was delivered" });
+    cidsInFlight(s).add(t.cid);
+    n++;
+    void inOrder(s.id, () => handleUtterance(null, t.frame, Date.now()))
+      .finally(() => {
+        cidsInFlight(s).delete(t.cid);
+        return forgetTaken(s.id, t.cid);
+      });
+  }
+  return n;
 }
 
 /* The last USER_CIDS_KEEP user-role cids this session took, lazily rebuilt from
@@ -216,7 +293,11 @@ function cidsInFlight(s: CidSession): Set<string> {
   return s.inflightCids;
 }
 
-export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
+export async function handleUtterance(ws: Sock | null, m: any, takenAt: number) {
+  /* The sender's socket, or none for a frame driven again after a restart
+   * (redriveTaken): a refusal is then broadcast on its cid, and only the device
+   * holding that cid's row acts on it. */
+  const answer = (msg: unknown) => ws ? D().send(ws, msg) : D().broadcast(msg);
   /* The recording's correlation id, minted in the browser when the mic opened
    * and carried on the frame. Falls back to one of ours so that a message from
    * an older bundle still has SOMETHING to grep on. */
@@ -349,7 +430,7 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
      * row is the honest place for it. The refused MESSAGE is still not written
      * -- it never landed. */
     const names = missing.join(", ");
-    D().send(ws, { t: "send-failed", id: s.id, cid,
+    answer({ t: "send-failed", id: s.id, cid,
       reason: `${names} ${missing.length > 1 ? "are" : "is"} no longer on the engine; ` +
         `attach ${missing.length > 1 ? "them" : "it"} again` });
     return;
@@ -395,7 +476,11 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
    * `words`. Its words come from the note's own clip (the rescue below), not
    * from an upload, so the uploads pass leaves that one marker alone. Both
    * conditions are the composer's: a marker he typed is not in `words`. */
-  const noteWords = m.kind === "voice" && inBody.has(cid) && asked.includes(cid);
+  /* Found by its literal token, not by WORDS_TOKEN_RE: the regex is the upload
+   * id shape, and a note's cid is any id safeCid takes (a capture's
+   * "c-musqtm4z-4dpka" as well as a uuid). The cid was validated on the way
+   * in, so the token cannot smuggle anything the regex would have refused. */
+  const noteWords = m.kind === "voice" && text.includes(wordsToken(cid)) && asked.includes(cid);
   const forUploads = noteWords ? new Set([...inBody].filter((id) => id !== cid)) : inBody;
   if (forUploads.size && !asked.length && !ups.length) {
     D().log("words.typed", { cid, session: s.id, marker: [...inBody].join(","),
@@ -519,6 +604,10 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
       showPendingVoiceNote(s, { cid, how: m.kind === "voice" ? "VOICE" : "TEXT",
         extra: voice, msgId: voice.msgId, takenAt,
         ...(noteWords ? { into: text } : {}) }, rescue);
+      /* The row is in the log under this cid now: a rewrite of the frame (a
+       * lost ack) is that note, not a second one. Without this the cid left
+       * the in-flight set on return and a rewrite would be taken fresh. */
+      rememberCid(s, cid, voice.msgId);
       return;
     }
   } else if (noteWords) {
@@ -553,7 +642,7 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
     D().log("utterance.dropped", { cid, session: s.id, msgId: voice.msgId,
       chars: text.length, why: why ?? "the session is offline; nothing was delivered and " +
         "nothing was written to the chat log" });
-    D().send(ws, { t: "send-failed", id: s.id, cid,
+    answer({ t: "send-failed", id: s.id, cid,
       reason: failReason(tell ?? "(session is offline; message not delivered)") });
     /* THE ROW CHANNEL CANNOT WORK FOR THIS FRAME: it carried no usable cid, so
      * the send-failed above is keyed by a cid no app ever issued and lands on

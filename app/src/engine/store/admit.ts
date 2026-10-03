@@ -124,8 +124,11 @@ export function adoptEngineRow(
   // holds a PARTIAL: the engine's delivered text is the settled superset
   // (device words plus the decoded tail) and replaces it whole, one repaint,
   // no duplicate. A bubble with no text at all takes the engine's words as
-  // before.
-  if (displayText && (local.draftCommitted !== undefined || !local.text)) {
+  // before. A PENDING echo is not words: for a quoted or captioned note it
+  // carries the quote and caption alone (what another device shows while the
+  // engine reads the clip), and this bubble already shows those around its own
+  // growing words, so it keeps them.
+  if (displayText && !m.transcriptPending && (local.draftCommitted !== undefined || !local.text)) {
     local.text = bodyBelowReply(local, displayText);
   }
 

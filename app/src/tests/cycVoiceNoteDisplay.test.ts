@@ -15,6 +15,8 @@
  */
 import {describe, expect, test} from 'vitest';
 import {adoptEngineRow} from '../engine/store/admit';
+import {audioMessage} from '../features/chat/messages/audioMessages';
+import type {CycMessage} from '../types';
 import type {CycEngineMessage, CycEngineSession} from '../engine/store/types';
 import type {EngineChatMessage} from '../engine/contract';
 
@@ -125,5 +127,42 @@ describe('adoptEngineRow on a streaming voice display', () => {
     const s = mkSession(local);
     adoptEngineRow(s, local, engineRow({text: 'just words'}), 'just words', 'k7');
     expect(local.text).toBe('just words');
+  });
+
+  test("a quoted note's pending echo (its quote and caption) never replaces the device's growing words", () => {
+    const local = mkLocal({
+      text: 'not what I asked\n\ncaption',
+      draftCommitted: 8,
+      replyTo: REPLY,
+      wordsAround: {before: '', after: '\n\ncaption'}
+    });
+    const s = mkSession(local);
+    const pending = '> Done. Only remote roles.\n\ncaption';
+    adoptEngineRow(s, local, engineRow({text: pending, transcriptPending: true}), pending, 'k8');
+    expect(local.text).toBe('not what I asked\n\ncaption');
+    expect(local.draftCommitted).toBe(8);
+    expect(local.transcriptPending).toBe(true);
+  });
+});
+
+describe("the engine's pending row on another device", () => {
+  test('shows the quote and caption formatted, with the reading dots', () => {
+    const m = {
+      id: 'r1',
+      role: 'user',
+      kind: 'voice',
+      text: '> Done. Only remote roles.\n\nand a caption',
+      ts: 1,
+      msgId: 'clip-1',
+      durationS: 30,
+      transcriptPending: true
+    } as unknown as CycMessage;
+    const node = audioMessage(m, true, true, () => {});
+    const t = node.querySelector('.cyc-transcript')!;
+    expect(t.querySelector('.cyc-callout')?.textContent).toContain('Done. Only remote roles.');
+    expect(t.textContent).toContain('and a caption');
+    expect(t.textContent).not.toContain('{{cyc-words');
+    expect(t.textContent).not.toContain('> Done');
+    expect(t.querySelector('.cyc-transcript-dots')).not.toBeNull();
   });
 });
