@@ -193,7 +193,7 @@ function stand(engine: FakeEngine) {
       engine.fetched.push(n);
       return n >= 0 && n <= engine.tailPage() ? engine.page(n) : null;
     },
-    fetchPrints: async () => null,
+    fetchPrints: async (): Promise<null> => null,
     attach: (_pane: string, frontier: number, _verifyFrom?: number, axis?: string) => {
       // what the open had already put on screen when it asked the engine
       attaches.push({
