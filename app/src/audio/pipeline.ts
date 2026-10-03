@@ -1,6 +1,6 @@
 import {speaker} from './speaker';
-import {releasePlaybackContext, setCallPlayback} from './webAudioClip';
-import {releaseToneContext} from './turnTones';
+import {playbackContextOpen, releasePlaybackContext, setCallPlayback} from './webAudioClip';
+import {releaseToneContext, toneContextOpen} from './turnTones';
 import {Pcm16kChunker, PCM_TAP_PROCESSOR_NAME, PCM_TAP_WORKLET_JS, STT_RATE} from './pcm';
 import {openSttStream} from '../engine/store/audioDocs';
 import {transcriptAtRelease} from './releaseDecode';
@@ -269,7 +269,18 @@ class Pipeline {
   // tap, ticks on which the render clock advanced), counted per graph.
   private flowFrames = 0;
   private lastFlowAt = 0;
+  private firstFlowAt = 0;
   private graphBuiltAt = 0;
+  // Hands-free has no press to check the graph: a stall the voice detector
+  // sees gets one recovery, and the next frame (or a new turn edge: hands-free
+  // switched on, the app back in front) re-arms it.
+  private stallHandled = false;
+  // The app came back to the front at foregroundAt, and the first time the mic
+  // is read after that (a press, or hands-free listening) is logged once as
+  // mic.foreground: whether it delivered on its own or what healed it.
+  private wasHidden = false;
+  private foregroundAt = 0;
+  private foregroundJudged = true;
   private lastClock = -1;
   private flowWaiters = new Set<() => void>();
 
@@ -354,6 +365,7 @@ class Pipeline {
   private graphBuilt(): void {
     this.graphBuiltAt = performance.now();
     this.lastFlowAt = 0;
+    this.firstFlowAt = 0;
     this.flowFrames = 0;
     this.lastClock = -1;
   }
@@ -361,6 +373,8 @@ class Pipeline {
   private markFlow(): void {
     this.flowFrames++;
     this.lastFlowAt = performance.now();
+    if (!this.firstFlowAt) this.firstFlowAt = this.lastFlowAt;
+    this.stallHandled = false;
     if (this.flowWaiters.size) for (const w of [...this.flowWaiters]) w();
   }
 
@@ -388,16 +402,16 @@ class Pipeline {
     });
   }
 
-  ensureLive(engaging = false): Promise<MicSnapshot | null> {
+  ensureLive(engaging = false, listening = false): Promise<MicSnapshot | null> {
     if (!this.stream && !this.actx) return Promise.resolve(null);
     if (this.recoverWait) return this.recoverWait;
-    this.recoverWait = this.runRecover(engaging).finally(() => {
+    this.recoverWait = this.runRecover(engaging, listening).finally(() => {
       this.recoverWait = null;
     });
     return this.recoverWait;
   }
 
-  private readSnapshot(engaging: boolean): MicSnapshot {
+  private readSnapshot(engaging: boolean, listening = false): MicSnapshot {
     const track = this.stream?.getAudioTracks()[0];
     return {
       contextState: readContextState(this.actx?.state),
@@ -405,27 +419,57 @@ class Pipeline {
       trackMuted: !!track?.muted,
       flow: this.flowNow(),
       visible: typeof document !== 'undefined' && document.visibilityState === 'visible',
-      engaging
+      engaging,
+      listening
     };
   }
 
-  // The snapshot a decision is made on. A press waits for the graph's own
-  // output when the reported states are healthy: they cannot show a graph
-  // that renders nothing, only its frames can.
-  private async inspect(engaging: boolean): Promise<MicSnapshot> {
-    const s = this.readSnapshot(engaging);
-    if (!engaging || s.flow === 'flowing' || s.contextState !== 'running' || !canRecord(s)) {
+  // The snapshot a decision is made on. A reader of the graph (a press, or
+  // hands-free listening) waits for its own output when the reported states
+  // are healthy: they cannot show a graph that renders nothing, only its
+  // frames can.
+  private async inspect(engaging: boolean, listening = false): Promise<MicSnapshot> {
+    const s = this.readSnapshot(engaging, listening);
+    const reading = engaging || listening;
+    if (!reading || s.flow === 'flowing' || s.contextState !== 'running' || !canRecord(s)) {
       return s;
     }
     const flow = await this.awaitFlow();
-    return {...this.readSnapshot(engaging), flow};
+    return {...this.readSnapshot(engaging, listening), flow};
   }
 
-  private async runRecover(engaging: boolean): Promise<MicSnapshot> {
-    const snap = await this.inspect(engaging);
-    if (isMicLive(snap)) return snap;
+  // The first read of the mic after the app came back to the front, once:
+  // 'clean' when the graph delivered with no fix (no idle context was left to
+  // hold a dead output), 'healed' with the fixes that revived it, 'still-dead'
+  // when none did. This is the line that says on a real phone which path ran.
+  private judgeForeground(path: 'clean' | 'healed' | 'still-dead', by: string, steps = ''): void {
+    if (this.foregroundJudged) return;
+    this.foregroundJudged = true;
+    const now = performance.now();
+    cyclog('mic.foreground', {
+      path,
+      by,
+      fix: steps || undefined,
+      sinceVisibleMs: Math.round(now - this.foregroundAt),
+      graphNew: this.graphBuiltAt > this.foregroundAt,
+      firstFrameMs: this.firstFlowAt ? Math.round(this.firstFlowAt - this.graphBuiltAt) : null,
+      playbackOpen: playbackContextOpen(),
+      toneOpen: toneContextOpen()
+    });
+  }
+
+  private async runRecover(engaging: boolean, listening = false): Promise<MicSnapshot> {
+    const by = engaging ? 'press' : listening ? 'hands-free' : '';
+    const snap = await this.inspect(engaging, listening);
+    if (isMicLive(snap)) {
+      if (by) this.judgeForeground('clean', by);
+      return snap;
+    }
     const fix = decideMicFix(snap);
-    if (fix === 'none') return snap;
+    if (fix === 'none') {
+      if (by) this.judgeForeground('still-dead', by);
+      return snap;
+    }
     if (
       fix === 'reacquire' &&
       !engaging &&
@@ -439,12 +483,13 @@ class Pipeline {
         resume: () => this.resumeContext(),
         rebuild: () => this.rebuildGraph(),
         reacquire: () => this.reacquireStream(),
-        inspect: () => this.inspect(engaging)
+        inspect: () => this.inspect(engaging, listening)
       });
       const recorderOnly = !r.live && canRecord(r.after);
       cyclog(r.live ? 'mic.recovered' : 'mic.recover.still-dead', {
         fix: r.steps.join('>'),
         engaging,
+        listening: listening || undefined,
         visible: snap.visible,
         from: {
           contextState: snap.contextState,
@@ -464,9 +509,10 @@ class Pipeline {
             'from the clip'
           : undefined
       });
+      if (by) this.judgeForeground(r.live ? 'healed' : 'still-dead', by, r.steps.join('>'));
       return r.after;
     } catch (err) {
-      cyclog('mic.recover.failed', {err, fix, engaging});
+      cyclog('mic.recover.failed', {err, fix, engaging, listening: listening || undefined});
       return this.readSnapshot(engaging);
     }
   }
@@ -574,6 +620,12 @@ class Pipeline {
     this.watchTracks();
   }
 
+  constructor() {
+    // Bound for the page's life, mic open or not: a background with the mic
+    // released still has to be judged on the next press.
+    if (typeof document !== 'undefined') this.bindLifecycle();
+  }
+
   private bindLifecycle(): void {
     if (this.lifeBound) return;
     this.lifeBound = true;
@@ -581,7 +633,16 @@ class Pipeline {
   }
 
   private onVisibility = (): void => {
-    if (document.visibilityState !== 'visible') return;
+    if (document.visibilityState !== 'visible') {
+      this.wasHidden = true;
+      return;
+    }
+    if (this.wasHidden) {
+      this.wasHidden = false;
+      this.foregroundAt = performance.now();
+      this.foregroundJudged = false;
+      this.stallHandled = false;
+    }
     if (!this.stream && !this.actx) return;
     void this.ensureLive(this.pttDown);
   };
@@ -846,6 +907,7 @@ class Pipeline {
     }
     this.pttDown = true;
     if (isMicLive(this.readSnapshot(true))) {
+      this.judgeForeground('clean', 'press');
       this.beginPress();
       return;
     }
@@ -930,6 +992,7 @@ class Pipeline {
 
   enableHandsFree(sessionId: string): void {
     this.handsFreeId = sessionId;
+    this.stallHandled = false;
 
     setCallPlayback(true);
   }
@@ -964,6 +1027,7 @@ class Pipeline {
       if (this.lastClock >= 0 && clock > this.lastClock) this.markFlow();
       this.lastClock = clock;
     }
+    if (this.handsFreeId) this.listenForFlow();
     const db = this.rmsDb();
     this.emitLevel(db);
 
@@ -995,6 +1059,24 @@ class Pipeline {
     } else {
       this.above = 0;
     }
+  }
+
+  // Hands-free listening, every poll: the voice detector reads the analyser,
+  // and on a graph that renders nothing it reads zeros and never opens a turn.
+  // A graph at least FLOW_BOUND_MS old with no frame for FLOW_BOUND_MS goes
+  // through the same recovery as a press (rebuild on the same track), once per
+  // stall. Hidden pages are left alone, as for every other fix.
+  private listenForFlow(): void {
+    if (!this.srcNode || this.recoverWait) return;
+    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+    const now = performance.now();
+    if (!this.foregroundJudged && this.lastFlowAt > this.foregroundAt) {
+      this.judgeForeground('clean', 'hands-free');
+    }
+    if (this.stallHandled) return;
+    if (now - Math.max(this.graphBuiltAt, this.lastFlowAt) <= FLOW_BOUND_MS) return;
+    this.stallHandled = true;
+    void this.ensureLive(false, true);
   }
 
   private fire(): void {

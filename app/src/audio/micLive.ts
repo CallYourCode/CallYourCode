@@ -18,7 +18,10 @@ export type MicSnapshot = {
   trackMuted: boolean;
   flow: GraphFlow;
   visible: boolean;
+  // A press on the mic.
   engaging: boolean;
+  // Hands-free listening: the voice detector reads the graph with no press.
+  listening: boolean;
 };
 
 export type MicFix = 'none' | 'resume' | 'rebuild' | 'reacquire';
@@ -79,9 +82,10 @@ export function decideMicFix(s: MicSnapshot): MicFix {
   if (s.contextState !== 'running') return 'resume';
   // Every reported state is healthy and the graph still delivers nothing. The
   // track is good (the recorder records it), so the graph is rebuilt on it: no
-  // getUserMedia, no prompt. Only a press reads the graph, so only a press
-  // rebuilds it.
-  if (s.flow === 'stalled') return s.engaging ? 'rebuild' : 'none';
+  // getUserMedia, no prompt. A rebuild is for a reader of the graph: a press,
+  // or hands-free listening (its voice detector never opens a turn on a dead
+  // graph). With neither, nothing reads it.
+  if (s.flow === 'stalled') return s.engaging || s.listening ? 'rebuild' : 'none';
   return 'none';
 }
 
@@ -102,7 +106,12 @@ export async function applyMicFix(
   let now = snap;
   for (;;) {
     if (isMicLive(now)) return {live: true, steps, after: now};
-    const fix = decideMicFix({...now, engaging: snap.engaging, visible: snap.visible});
+    const fix = decideMicFix({
+      ...now,
+      engaging: snap.engaging,
+      listening: snap.listening,
+      visible: snap.visible
+    });
     if (fix === 'none' || steps.includes(fix)) return {live: false, steps, after: now};
     steps.push(fix);
     await ops[fix]();

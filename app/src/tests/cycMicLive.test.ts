@@ -15,6 +15,7 @@ function snap(partial: Partial<MicSnapshot>): MicSnapshot {
     flow: 'flowing',
     visible: true,
     engaging: false,
+    listening: false,
     ...partial
   };
 }
@@ -42,7 +43,8 @@ function world(partial: Partial<World> = {}): World {
     ...partial
   };
 }
-function inspectOf(w: World, flags: Pick<MicSnapshot, 'visible' | 'engaging'>): MicSnapshot {
+type Flags = Pick<MicSnapshot, 'visible' | 'engaging'> & Partial<Pick<MicSnapshot, 'listening'>>;
+function inspectOf(w: World, flags: Flags): MicSnapshot {
   return snap({
     contextState: w.contextState,
     trackReadyState: w.trackReadyState,
@@ -51,10 +53,7 @@ function inspectOf(w: World, flags: Pick<MicSnapshot, 'visible' | 'engaging'>): 
     ...flags
   });
 }
-async function recoverWith(
-  w: World,
-  flags: Pick<MicSnapshot, 'visible' | 'engaging'>
-): Promise<MicRecovery> {
+async function recoverWith(w: World, flags: Flags): Promise<MicRecovery> {
   return applyMicFix(inspectOf(w, flags), {
     resume: () => {
       w.resumes++;
@@ -244,6 +243,41 @@ describe('liveness is judged by audio flowing through the graph', () => {
     expect(canRecord(snap({trackMuted: true}))).toBe(false);
     expect(canRecord(snap({trackReadyState: 'ended'}))).toBe(false);
     expect(canRecord(snap({trackReadyState: null}))).toBe(false);
+  });
+});
+
+// Hands-free has no press: its voice detector reads the analyser, and on a
+// dead graph it reads zeros and never opens a turn. Listening is a reader, so
+// a stall while listening is rebuilt on the same track; it never re-acquires
+// (no press, so no iPhone prompt) and never acts while hidden.
+describe('hands-free listening reads the graph like a press', () => {
+  test('RED: a stalled graph while listening is not left alone', () => {
+    expect(decideMicFix(snap({flow: 'stalled', listening: true}))).toBe('rebuild');
+  });
+  test('listening rebuilds a stalled graph once, with no getUserMedia', async () => {
+    const w = world({flow: 'stalled'});
+    const r = await recoverWith(w, {visible: true, engaging: false, listening: true});
+    expect(r.live).toBe(true);
+    expect(r.steps).toEqual(['rebuild']);
+    expect(w.reacquires).toBe(0);
+  });
+  test('listening on a dead output rebuilds once and stops', async () => {
+    const w = world({flow: 'stalled', deadOutput: true});
+    const r = await recoverWith(w, {visible: true, engaging: false, listening: true});
+    expect(r.live).toBe(false);
+    expect(r.steps).toEqual(['rebuild']);
+  });
+  test('listening never re-acquires a dead track: that would prompt with no press', async () => {
+    const w = world({trackMuted: true, flow: 'stalled'});
+    expect(decideMicFix(inspectOf(w, {visible: true, engaging: false, listening: true}))).toBe(
+      'none'
+    );
+    const r = await recoverWith(w, {visible: true, engaging: false, listening: true});
+    expect(r.steps).toEqual([]);
+    expect(w.reacquires).toBe(0);
+  });
+  test('a hidden page is not rebuilt for listening', () => {
+    expect(decideMicFix(snap({flow: 'stalled', listening: true, visible: false}))).toBe('none');
   });
 });
 
