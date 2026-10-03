@@ -179,7 +179,8 @@ export function installStaleTabReload(): void {
       }
     },
     schedule: (fn, ms) => void window.setTimeout(fn, ms),
-    reload: (target) => reloadSoon(target)
+    reload: (target) => reloadSoon(target),
+    log: (event, fields) => cyclog(event, fields)
   });
 
   // A stamp check is a fetch: only while the sync is live (offline design v2,

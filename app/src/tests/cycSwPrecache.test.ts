@@ -40,9 +40,12 @@ function makeCaches() {
     return {
       match: async (k: unknown) => c.get(pathOf(k)),
       put: (k: unknown, v: unknown) => c.set(pathOf(k), v),
+      // All-or-nothing, like the real Cache.addAll: one failed fetch stores none.
       addAll: async (reqs: unknown[]) => {
+        const got: [string, unknown][] = [];
         for (const r of reqs)
-          c.set(pathOf(r), await (globalThis.fetch as (x: unknown) => Promise<unknown>)(r));
+          got.push([pathOf(r), await (globalThis.fetch as (x: unknown) => Promise<unknown>)(r)]);
+        for (const [k, v] of got) c.set(k, v);
       }
     };
   };
@@ -66,11 +69,21 @@ let handlers: Handlers;
 let fetched: string[];
 let caches: ReturnType<typeof makeCaches>;
 
-beforeAll(() => {
-  const code = readFileSync(resolve(process.cwd(), 'public/cyc-sw.js'), 'utf8');
-  handlers = {};
-  fetched = [];
-  caches = makeCaches();
+const SW_CODE = readFileSync(resolve(process.cwd(), 'public/cyc-sw.js'), 'utf8');
+
+// Evaluates the worker against a fresh fake `self`, a fresh CacheStorage and a
+// recording fetch, installing those as the bare globals the worker's helpers
+// call. `code` is the worker source (unbaked, or with a build stamp baked in the
+// way scripts/build-cyc.sh does).
+function bootWorker(code: string): {
+  sw: SwGlobals;
+  handlers: Handlers;
+  fetched: string[];
+  caches: ReturnType<typeof makeCaches>;
+} {
+  const handlers: Handlers = {};
+  const fetched: string[] = [];
+  const caches = makeCaches();
   const fakeSelf: Record<string, unknown> = {
     addEventListener: (type: string, fn: (ev: unknown) => void) => {
       (handlers[type] ||= []).push(fn);
@@ -94,7 +107,11 @@ beforeAll(() => {
   (globalThis as unknown as {fetch: unknown}).fetch = fakeSelf.fetch;
 
   new Function('self', code)(fakeSelf);
-  sw = fakeSelf as unknown as SwGlobals;
+  return {sw: fakeSelf as unknown as SwGlobals, handlers, fetched, caches};
+}
+
+beforeAll(() => {
+  ({sw, handlers, fetched, caches} = bootWorker(SW_CODE));
 });
 
 const req = (url: string, o: {method?: string} = {}) => ({
@@ -331,5 +348,69 @@ describe('service worker update handlers', () => {
     expect(after, 'cleanup must keep current + immediately previous only').toEqual(expectKept);
     expect(await caches.keys()).toContain('cyc-audio-not-a-precache');
     expect(claims, 'activate did not claim clients').toBe(1);
+  });
+});
+
+// THE STUCK BUILD (iPhone, 2026-10-03). An update worker whose precache failed
+// used to install anyway (the failure was swallowed), take control holding
+// nothing of its own build, and leave every launch on the previous build's
+// bucket; its bytes never changed again, so no update check re-ran the install.
+// An update install must now FAIL when it cannot fill its own build's bucket, so
+// the active worker stays and the browser retries the install on the next
+// update check. Only the very first install (nothing active to keep) may take
+// over without a precache.
+describe('service worker install fails an update it cannot precache', () => {
+  const STAMP = '1791000000';
+  const ASSETS = ['/index.html', '/assets/index-AAAA.js'].map((p) => ORIGIN + p);
+
+  const boot = (o: {active: boolean; manifestVersion?: string; failAsset?: string}) => {
+    const w = bootWorker(SW_CODE.replace('__CYC_BUILD__', STAMP));
+    const self = w.sw as unknown as Record<string, unknown>;
+    (self.registration as Record<string, unknown>).active = o.active ? {state: 'activated'} : null;
+    const manifest = {version: o.manifestVersion ?? STAMP, assets: ASSETS};
+    (globalThis as unknown as {fetch: unknown}).fetch = async (input: unknown) => {
+      const p = pathOf(input);
+      if (p === '/cyc-precache.json') return {ok: true, json: async () => manifest};
+      if (p === o.failAsset) throw new TypeError('Load failed');
+      return {precached: p};
+    };
+    const install = async () => {
+      const waited: Promise<unknown>[] = [];
+      w.handlers.install.forEach((h) => h({waitUntil: (p: Promise<unknown>) => waited.push(p)}));
+      await Promise.all(waited);
+    };
+    return {...w, install};
+  };
+
+  test('an update whose asset fetch dies rejects its install and leaves no bucket', async () => {
+    const w = boot({active: true, failAsset: '/assets/index-AAAA.js'});
+    await expect(w.install(), 'a failed update precache was swallowed').rejects.toThrow();
+    expect(await w.caches.keys(), 'the failed install left its empty bucket').toEqual([]);
+  });
+
+  test('an update whose precache completes installs and fills its own bucket', async () => {
+    const w = boot({active: true});
+    await w.install();
+    expect(await w.caches.keys()).toEqual(['cyc-precache-' + STAMP]);
+    expect(await w.sw.cycServeShell(req('/'))).toEqual({precached: '/index.html'});
+  });
+
+  test('a worker refuses to precache a manifest of another build', async () => {
+    const w = boot({active: true, manifestVersion: '1791000999'});
+    await expect(w.install()).rejects.toThrow(/not this worker/);
+    expect(await w.caches.keys()).toEqual([]);
+  });
+
+  test('the first install (nothing active) still takes over when its precache fails', async () => {
+    const w = boot({active: false, failAsset: '/assets/index-AAAA.js'});
+    await expect(w.install()).resolves.toBeUndefined();
+    expect(await w.caches.keys()).toEqual([]);
+  });
+
+  test('a failed fill never deletes a bucket that already holds its shell', async () => {
+    const w = boot({active: true, failAsset: '/assets/index-AAAA.js'});
+    (await w.caches.open('cyc-precache-' + STAMP)).put('/index.html', {shell: 'kept'});
+    await expect(w.install()).rejects.toThrow();
+    expect(await w.caches.keys()).toEqual(['cyc-precache-' + STAMP]);
   });
 });

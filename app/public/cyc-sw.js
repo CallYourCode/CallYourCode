@@ -21,8 +21,8 @@
 // updates: the served cyc-sw.js bytes change every build, so a browser's SW
 // update check finds the script byte-different, re-installs (new stamp cache) and
 // re-activates (drops old caches + clients.claim). In app/public it stays the
-// literal placeholder; nothing at runtime reads CYC_BUILD, it exists only to make
-// the bytes unique. cyc-precache.json's version still drives the cache name.
+// literal placeholder. cyc-precache.json's version drives the cache name, and
+// install checks that it is this build's (cycPrecacheInstall).
 const CYC_BUILD = '__CYC_BUILD__';
 
 const CYC_CACHE_PREFIX = 'cyc-precache-';
@@ -38,10 +38,25 @@ async function cycReadManifest() {
   return {version, assets};
 }
 
+// Fills THIS build's bucket, or throws. The manifest must name this worker's own
+// build: a deploy landing between the worker fetch and the manifest fetch would
+// otherwise fill another build's bucket under this worker. (Unbaked, in
+// app/public and the unit tests, CYC_BUILD is the placeholder and is not
+// checked.) addAll is all-or-nothing; when it fails, a bucket it left without
+// a shell is deleted, so a bucket name exists only for a build that is really
+// cached.
 async function cycPrecacheInstall() {
   const {version, assets} = await cycReadManifest();
-  const cache = await caches.open(CYC_CACHE_PREFIX + version);
-  await cache.addAll(assets.map((a) => new Request(a, {cache: 'reload'})));
+  if (/^\d+$/.test(CYC_BUILD) && version !== CYC_BUILD)
+    throw new Error('cyc-precache: manifest ' + version + ' is not this worker ' + CYC_BUILD);
+  const name = CYC_CACHE_PREFIX + version;
+  const cache = await caches.open(name);
+  try {
+    await cache.addAll(assets.map((a) => new Request(a, {cache: 'reload'})));
+  } catch (e) {
+    if (!(await cache.match('/index.html'))) await caches.delete(name);
+    throw e;
+  }
 }
 
 // The precache cache names, sorted. Build stamps are 10-digit epoch seconds, so
@@ -105,9 +120,24 @@ async function cycServeAsset(req) {
   return hit || fetch(req);
 }
 
+// An UPDATE whose precache fails must fail its install. The active worker then
+// stays, serving its own complete build, and because the registered script is
+// still byte-different from it, the browser re-runs this install on the next
+// update check (every navigation, and the page's registration.update() on each
+// foreground while build.txt says it is behind). Swallowing the failure instead
+// let a worker take control holding nothing of its own build: the shell serve
+// kept answering from the previous build's bucket, and with this worker's bytes
+// never changing again no update check ever re-ran the install, so the client
+// stayed on the old build until the next deploy (iPhone, 2026-10-03).
+// The FIRST install (no active worker) still takes over without a precache: it
+// displaces nothing, the shell then comes from the network, and the push worker
+// must not wait on a flaky radio.
 self.addEventListener('install', (event) => {
-  // A precache miss must never keep the push worker from taking over.
-  event.waitUntil(cycPrecacheInstall().catch(() => {}));
+  event.waitUntil(
+    cycPrecacheInstall().catch((e) => {
+      if (self.registration.active) throw e;
+    })
+  );
   self.skipWaiting();
 });
 

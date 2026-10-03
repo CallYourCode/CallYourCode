@@ -82,6 +82,11 @@ export type StaleReloadDeps = {
   // Given the target stamp so the departure breadcrumb can name the build it
   // crossed to.
   reload: (target: string) => void;
+  // app.log seam. build.behind names every edge on which this page learned it
+  // runs an older build than the server; build.not-ready names a sighting whose
+  // new build never became loadable (its worker install failed or is still
+  // retrying), so a client stuck behind a deploy is never a silent hole.
+  log?: (event: string, fields: Record<string, unknown>) => void;
 };
 
 export function createStaleReloadController(deps: StaleReloadDeps): {
@@ -149,11 +154,20 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
   // Ridden by the page's visibility/live edges (the caller keeps its own
   // "only while the sync is live" gate around this).
   const check = async (): Promise<void> => {
-    if (fired || polling) return;
+    if (fired) return;
+    if (polling) {
+      // A poll is already waiting on a known stale target, but the install it
+      // waits on may have failed since (a dropped radio); a failed install is
+      // retried only by another update check, so this edge still asks for one.
+      deps.nudgeWorker();
+      return;
+    }
     const target = staleTargetFor(deps.ownStamp(), await deps.fetchServedStamp());
     if (!target || fired || polling) return;
+    const controlled = deps.isControlled();
+    deps.log?.('build.behind', {own: deps.ownStamp(), served: target, controlled});
 
-    if (!deps.isControlled()) {
+    if (!controlled) {
       // No worker in the way: a reload is served by the network, so it lands
       // fresh. The once-per-stamp mark is the loop guard for the pathological
       // half-swapped dist where build.txt and the served bundle disagree.
@@ -184,6 +198,7 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
         tries -= 1;
         if (tries <= 0) {
           polling = false; // give up; the next visibility/live edge re-enters
+          deps.log?.('build.not-ready', {target, waited: READY_POLL_TRIES * READY_POLL_MS});
           return;
         }
         deps.schedule(poll, READY_POLL_MS);
@@ -205,7 +220,10 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
     void (async () => {
       const target = staleTargetFor(deps.ownStamp(), await deps.fetchServedStamp());
       if (!target || controllerReloadUsed || fired) return;
-      if (!(await ready(target))) return;
+      if (!(await ready(target))) {
+        deps.log?.('build.not-ready', {target, via: 'controllerchange'});
+        return;
+      }
       controllerReloadUsed = true;
       fire(target);
     })();
