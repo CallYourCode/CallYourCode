@@ -46,9 +46,7 @@ export interface StoreBindingsDeps {
   restoreVoiceBlock: ComposerWiring['restoreVoiceBlock'];
   clipCid: ComposerWiring['clipCid'];
   vaultKeyOf: ComposerWiring['vaultKeyOf'];
-  // `grace` keeps a just-used mic open for the next take (composer wiring's
-  // MIC_GRACE_MS); without it the mic is released at once.
-  releaseMicIfIdle(grace?: boolean): void;
+  releaseMicIfIdle(): void;
   markHeard: (sessionId: string, msgId: string) => void;
   reportViewedThrough(id: string): void;
   setSuppressAutoSpeak(v: boolean): void;

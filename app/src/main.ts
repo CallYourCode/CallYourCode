@@ -688,7 +688,7 @@ function buildApp() {
     restoreVoiceBlock,
     clipCid,
     vaultKeyOf,
-    releaseMicIfIdle: (grace) => releaseMicIfIdle(grace),
+    releaseMicIfIdle: () => releaseMicIfIdle(),
     markHeard: (sessionId, msgId) => markHeard(sessionId, msgId),
     reportViewedThrough: (id) => reportViewedThrough(id),
     setSuppressAutoSpeak: (v) => {
