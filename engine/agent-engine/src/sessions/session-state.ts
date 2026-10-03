@@ -682,6 +682,38 @@ export function chatRefFor(agentId: string): { aid: string; chatId: string } {
   return { aid: meta.agentId, chatId: meta.chat };
 }
 
+/* THE AXIS EPOCH (fix-log-epoch). A chat log's seq axis is a pure function of
+ * its chat FILE: appends only extend it (nextSeq), and a restart replays the
+ * same file into the same seqs (ensureSeqs repairs deterministically). The
+ * only way the axis changes under a session id is a NEW file whose rows were
+ * re-sequenced (carry.ts absorb, the trim route), so the file id IS the axis
+ * identity, and that is the epoch every device stamps its rows with. A device
+ * holding rows of another epoch holds a dead axis: its seqs, cursor, holes and
+ * fingerprints describe pages that no longer exist, and it must drop them
+ * rather than guess (SYNC-CONTRACT.md, the axis epoch).
+ *
+ * A rewrite renumbers the in-memory rows SYNCHRONOUSLY, but the new file is
+ * written and the meta pointer flipped only later (append-only discipline), so
+ * the new epoch is minted with the renumber (mintAxis) and served from here
+ * until the pointer catches up. A crash in between replays the old file under
+ * the old pointer: old epoch, old axis, still consistent. Undefined only for
+ * an agent with no chat file yet, which holds no rows to stamp. */
+const pendingAxis = new Map<string, string>();
+
+export function axisOf(agentId: string): string | undefined {
+  const aid = agentIdFor(agentId);
+  return pendingAxis.get(aid) ?? agentMetas.get(aid)?.chat ?? undefined;
+}
+
+/** Mint the id of the NEW chat file a rewrite is about to write, and serve it
+ *  as this agent's epoch from this instant. Call in the same synchronous step
+ *  that re-sequences the in-memory rows; pass the id to chatStore.writeNew. */
+export function mintAxis(agentId: string): string {
+  const cid = newChatId();
+  pendingAxis.set(agentIdFor(agentId), cid);
+  return cid;
+}
+
 /** One appended patch line: edit the message whose ts is `mts`. */
 export function persistPatch(agentId: string, mts: number,
   set?: Record<string, unknown>, del?: string[]): void {
@@ -910,6 +942,7 @@ export function resetForTest(): void {
   blobOwner.clear();
   restoredChats.clear();
   restoredLogs.clear();
+  pendingAxis.clear();
   paneBindings.clear();
   engineSettingsOnDisk = {};
   settingsWriteChain = Promise.resolve();

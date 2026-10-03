@@ -238,6 +238,32 @@ test("absorb folds the session records too, onto ONE seq axis with the messages,
   expect(loaded.msgs.map((m) => m.seq)).toEqual([0, 3]);
 });
 
+// ------------------------------------------------- the axis epoch (fix-log-epoch)
+
+test("a provisional row older than the target's newest re-sequences the log: a new epoch in the same tick", async () => {
+  const { agentId, chatId } = await seedAgent(root, U1, [row("x", "one", 1000, { seq: 0, mid: "mr-1" }),
+    row("x", "three", 3000, { seq: 1, mid: "mr-3" })]);
+  await S.loadSessionState(deps);
+  S.sessionStateReady();
+  const target = live(agentId, U1, S.restoredChats.get(agentId)!);
+
+  const pid = S.freshAgentId();
+  const prov = live(pid, null, [row(pid, "two", 2000, { msgId: "m-2", mid: "mr-2", seq: 0 })]);
+  S.metaFor(pid);
+  absorb(prov, agentId);
+
+  // the interleave can only be ordered by re-sequencing: the axis is new, and
+  // the epoch says so at once, before the new file exists
+  expect(target.chat.map((m) => [m.text, m.seq])).toEqual([["one", 0], ["two", 1], ["three", 2]]);
+  const fresh = S.axisOf(agentId)!;
+  expect(fresh).not.toBe(chatId);
+  expect(S.metaFor(agentId).chat, "the pointer still names the old file").toBe(chatId);
+  // and the new file, once written, carries exactly that id
+  await until(async () => S.metaFor(agentId).chat === fresh, { what: "the pointer flip to the epoch's file" });
+  expect((await S.chatStore.loadLog(agentId, fresh)).msgs.map((m) => m.seq)).toEqual([0, 1, 2]);
+  expect(S.axisOf(agentId)).toBe(fresh);
+});
+
 test("absorbing an agent into itself is a no-op", async () => {
   const { agentId } = await seedAgent(root, U1, []);
   await S.loadSessionState(deps);

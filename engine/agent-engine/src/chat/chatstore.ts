@@ -184,9 +184,10 @@ export class ChatStore {
   /** Write a whole log as a NEW chat file (merge, trim) and return its id.
    *  Never touches an existing file; the caller flips the meta pointer. The
    *  records, when given, are interleaved with the messages by seq so the new
-   *  file's line order is its storage order. */
-  async writeNew(agentId: string, msgs: StoredMsg[], recs: SessionRec[] = []): Promise<string> {
-    const chatId = newChatId();
+   *  file's line order is its storage order. A rewrite that re-sequenced the
+   *  rows passes the id it already serves as the axis epoch (mintAxis). */
+  async writeNew(agentId: string, msgs: StoredMsg[], recs: SessionRec[] = [],
+    chatId: string = newChatId()): Promise<string> {
     // both paths before the first await: dataDir() is read per call (agentmeta.ts saveAgentMeta)
     const dir = agentChatsDir(agentId);
     const path = agentChatFile(agentId, chatId);

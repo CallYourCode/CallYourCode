@@ -26,7 +26,7 @@ import { bumpRowsGen } from "../chat/wirecache.ts";
 import { evictContextFor } from "./context-cache.ts";
 import { sessions, restoredChats, restoredLogs, agentMetas, chatStore, metaFor, indexSession,
   sessionIndex, flushAgentSave, scheduleAgentSave, getManualOrder, setManualOrder,
-  bindingOf, purgeSessionState } from "./session-state.ts";
+  bindingOf, purgeSessionState, mintAxis } from "./session-state.ts";
 import type { ChatMsg } from "../chat/chatmsg.ts";
 import { srcKey, type SessionRec } from "../chat/sessionrec.ts";
 import type { Session } from "./session-state.ts";
@@ -173,13 +173,16 @@ export function absorb(provisional: Session, targetId: string): void {
   // any past ids the provisional gathered point at the survivor now
   for (const [sid, aid] of sessionIndex) if (aid === provisional.id) sessionIndex.set(sid, targetId);
   if (rows) {
+    // the merge re-sequenced the whole log: a new axis, so a new epoch, served
+    // from this same tick (session-state.ts axisOf)
+    const cid = mintAxis(targetId);
     if (target) { target.chat = rows.chat; target.log = rows.log; bumpRowsGen(target); }
     else { restoredChats.set(targetId, rows.chat); restoredLogs.set(targetId, rows.log); }
     void disk.then(async () => {
       try {
         const tm = metaFor(targetId);
-        const cid = await chatStore.writeNew(targetId,
-          rows.chat as unknown as Parameters<typeof chatStore.writeNew>[1], rows.log);
+        await chatStore.writeNew(targetId,
+          rows.chat as unknown as Parameters<typeof chatStore.writeNew>[1], rows.log, cid);
         tm.chat = cid;
         tm.chats = [...(tm.chats ?? []), { id: cid, createdAt: Date.now() }];
         scheduleAgentSave(targetId);

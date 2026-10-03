@@ -25,7 +25,7 @@
 import { test, expect, afterAll, afterEach } from "bun:test";
 
 import { wireCore, sessionsFrame, type WireCore, type FakeClient, wireId } from "../test-utils/wire-core.ts";
-import { chatStore, chatRefFor, persistPatch } from "../sessions/session-state.ts";
+import { chatStore, chatRefFor, persistPatch, axisOf, mintAxis } from "../sessions/session-state.ts";
 import { agentChatFile } from "../storage/datadir.ts";
 import { replayLogText } from "./chatstore.ts";
 import { PANE } from "../test-utils/fake-herdr.ts";
@@ -507,6 +507,46 @@ test("a frontier past the newest seq is a STALE AXIS: serve the cold tail, log t
   const mm = c.logs.find((l) => l.event === "attach.axis-mismatch")!;
   expect(mm.fields.frontier).toBe(133361);
   expect(mm.fields.tailVersion).toBe(12);
+});
+
+/* THE AXIS EPOCH (fix-log-epoch). Hunter, 2026-10-03: a carry absorb
+ * re-sequenced the whole log under the same session id (old axis 0..2645, new
+ * 0..2493). The phone still held the old axis and stated frontier 2600. The
+ * stale-axis test above caught it only because the new tail (2579) was still
+ * below 2600; a few hours of growth later the same frontier read as plausible
+ * and the engine would have served a delta onto a dead axis. The attach-ok now
+ * names the log's epoch, and a device naming another one attaches cold. */
+test("the attach-ok and every page name the chat log's epoch: its chat file", async () => {
+  const c = await boot();
+  await seedReplies(c, 3);
+  const id = c.byHandle(PANE)!.id;
+  const ok = await attach(c, PANE);
+  expect(ok.axis).toBe(chatRefFor(id).chatId);
+  expect(ok.axis).toBe(axisOf(id));
+  const row0 = (sessionsFrame().list as any[]).find((s) => s.id === wireId(PANE));
+  expect(row0.axis, "the roster row names it too").toBe(ok.axis);
+});
+
+test("a device naming another epoch attaches cold however plausible its frontier", async () => {
+  const c = await boot();
+  await seedReplies(c, 12); // T = 11
+  const id = c.byHandle(PANE)!.id;
+  const held = axisOf(id)!;
+  // same epoch, caught up: the usual metadata-only answer
+  const same = await attach(c, PANE, c.client(), { frontier: 11, axis: held });
+  expect(same.pages).toEqual([]);
+  expect(same.deltaBase).toBe(12);
+  // the log is re-sequenced (what absorb and the trim route do): a new epoch
+  const fresh = mintAxis(id);
+  const ok = await attach(c, PANE, c.client(), { frontier: 5, axis: held });
+  expect(ok.axis).toBe(fresh);
+  expect(ok.deltaBase, "cold: served from the bottom of the newest pages, not from 6").toBe(0);
+  expect(ok.pages[0].messages.length).toBe(12);
+  const mm = c.logs.find((l) => l.event === "attach.axis-epoch")!;
+  expect(mm.fields).toMatchObject({ frontier: 5, held, axis: fresh });
+  // a device that names no epoch (an app older than this) keeps today's rules
+  const old = await attach(c, PANE, c.client(), { frontier: 11 });
+  expect(old.pages).toEqual([]);
 });
 
 /* PAGE FINGERPRINTS (fix-sync-gap). The laptop's BZ Builder hole: the device's

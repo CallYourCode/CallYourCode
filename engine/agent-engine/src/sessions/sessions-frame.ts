@@ -19,7 +19,7 @@ import { isControlAnswer } from "../chat/chatmsg.ts";
 import { askOf } from "../chat/asks.ts";
 import { contextPctOf, modelOf, claudeTitleOf } from "./context-cache.ts";
 import { subagentsRunningOf } from "./subagent-count.ts";
-import { sessions, getManualOrder, nameOverrideOf, settingsOf, photoOf,
+import { sessions, getManualOrder, nameOverrideOf, settingsOf, photoOf, axisOf,
   type Session } from "./session-state.ts";
 import { clients, send } from "../transport/wire.ts";
 import type { Sock } from "../transport/sock.ts";
@@ -146,6 +146,13 @@ export function sessionList(ordered: readonly Session[] = orderedSessions()) {
        * or null while its pane has not said. An attribute of the row: it
        * changes in place on /clear, fork and resume while `id` stays. */
       harnessSessionId: s.harnessSessionId,
+      /* THE CHAT LOG'S AXIS EPOCH (session-state.ts axisOf), on the roster so a
+       * device learns a re-sequenced log the moment it happens (the rewrite
+       * changes this row, so it ships as a one-row patch) or on its next hello,
+       * BEFORE it opens the chat: it drops the dead axis's rows then, instead
+       * of painting them and swapping them out under the reader. Absent while
+       * the agent has no chat file (no rows to stamp). */
+      axis: axisOf(s.id),
       /* THE STABLE AGENT ID. Since adapters lane 2 `id` above IS this value
        * (rows are keyed by agent, never by pane or harness session); the
        * field stays because that name already rides this row and a client
