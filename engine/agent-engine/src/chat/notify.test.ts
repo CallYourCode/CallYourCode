@@ -31,9 +31,10 @@ import { wireCore, type WireCore, type WireCoreOpts, type FakeClient, wireId } f
 import { PANE } from "../test-utils/fake-herdr.ts";
 import { until, settle } from "../test-utils/wait.ts";
 import { onChat } from "./reply.ts";
-import { batchMs, ceilingMs, ceilingTickMs, sendDismissal } from "./notify.ts";
+import { batchMs, ceilingMs, ceilingTickMs, sendDismissal, msToBoundary } from "./notify.ts";
+import { dispatchClientFrame } from "../transport/frames.ts";
 import { onPresenceChange, graceMs, stableMs, recentUseMs } from "../sessions/presence.ts";
-import { unreadOf } from "../sessions/readstate.ts";
+import { unreadOf, markRead } from "../sessions/readstate.ts";
 import { deriveSessionKey, openPush } from "../../../shared/e2e";
 import { newestGen } from "../security/sec";
 import type { Sock } from "../transport/sock.ts";
@@ -818,4 +819,108 @@ test("a chat read INSIDE the window never buzzes at all", async () => {
 
   expect(hits()).toHaveLength(0);
   expect(sink().dismissals.map((d) => d.sessionId)).toEqual([`seam-host:${wireId(PANE)}`]);
+});
+
+/* ------------------------------------------------ re-asked at send time -- */
+
+/* THE OWNER, 2026-10-03: "I had the phone app open, sent a text, and got a
+ * notification for the reply." The phone said hidden for a few seconds, the
+ * reply was queued in that gap ("all say backgrounded", correctly), the phone
+ * came back to that very chat at 18:44:29.07, and the window at :30 sent the
+ * banner anyway: nothing between the queue and the POST asked again. */
+
+/** A phone that has been on the chat, then said hidden a moment ago, with the
+ *  clock put just past a wall boundary so a whole window is ahead of the reply. */
+/** Did a window carry a new banner? Read off the batch line, which flushBatch
+ *  writes BEFORE its POST, so a negative does not depend on the fetch landing. */
+const bannerLeft = () => said().some((l) => /\[notify\] batch \S+ new=[1-9]/.test(l));
+
+async function phoneJustHidden(): Promise<FakeClient> {
+  const c = core.client({ attach: wireId(PANE), visible: true, desktop: false });
+  await holdOpen(c);
+  await core.clock.advance(msToBoundary(batchMs(), 0, core.clock.now()) + 100);
+  c.setVisible(false, core.clock.now());
+  await core.clock.advance(1_000);
+  return c;
+}
+
+test("a banner queued while the phone was hidden is not sent once the phone is back on that chat", async () => {
+  const c = await phoneJustHidden();
+  await say("the reply that landed while you were away for a second");
+  expect(decision()).toContain("all say backgrounded");
+  expect(session().notified).toBe(true);
+
+  await core.clock.advance(5_000);
+  c.setVisible(true, core.clock.now()); // back on BZ Builder before the window
+  await quietWindow();
+
+  expect(bannerLeft()).toBe(false);
+  expect(hits()).toHaveLength(0);
+  expect(said().find((l) => l.includes("[notify] dropped"))).toContain("is visible on this chat");
+  // it never reached a device, so nothing is standing, and the phone is looking at it
+  expect(session().notified).toBe(false);
+  expect(unreadOf(session())).toBe(0);
+  expect(sink().dismissals).toHaveLength(0);
+});
+
+test("a visible frame on the chat cancels its pending banner at once, even if it hides again", async () => {
+  const c = await phoneJustHidden();
+  await say("on screen a second later");
+  expect(decision()).toContain("[notify] send");
+
+  await core.clock.advance(2_000);
+  await dispatchClientFrame(c.sock, { t: "visible", on: true, why: "visibilitychange" });
+  expect(said().find((l) => l.includes("[notify] dropped"))).toContain("said visible on this chat");
+  // and the presence change is in the log, with the frame and the page's own trigger
+  expect(lines.some((l) => l.includes(`[presence] c${c.sock.data.cid} visible (frame visible on=true why=visibilitychange`))).toBe(true);
+
+  await dispatchClientFrame(c.sock, { t: "visible", on: false, why: "blur" });
+  expect(lines.some((l) => l.includes(`[presence] c${c.sock.data.cid} hidden (frame visible on=false why=blur`))).toBe(true);
+  await quietWindow();
+  expect(bannerLeft()).toBe(false);
+  expect(hits()).toHaveLength(0);
+});
+
+test("a beat restating the same visibility is not a presence change, and is not logged", async () => {
+  const c = core.client({ attach: wireId(PANE), visible: true });
+  await dispatchClientFrame(c.sock, { t: "visible", on: true });
+  await dispatchClientFrame(c.sock, { t: "visible", on: true });
+  expect(lines.some((l) => l.includes("[presence]"))).toBe(false);
+});
+
+test("a phone back on ANOTHER chat does not take this chat's banner back", async () => {
+  const c = await phoneJustHidden();
+  await say("for the chat you are not on");
+  c.attached("some-other-chat");
+  await core.clock.advance(2_000);
+  c.setVisible(true, core.clock.now());
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+  expect(saidSomething("[notify] dropped")).toBe(false);
+});
+
+test("a page still claiming visible but silent since the banner was queued gets it (a frozen page)", async () => {
+  // The proof is a frame AFTER the queue. A frozen page's last word is older.
+  const c = await phoneJustHidden();
+  await say("while frozen");
+  c.sock.data.visible = true; // a stale claim, with no frame behind it
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+  expect(saidSomething("[notify] dropped")).toBe(false);
+});
+
+test("a banner whose row the marker has already passed is not sent", async () => {
+  /* Every route to read through markRead dismisses a queued banner when the chat
+   * reaches zero unread. This is the guard for a marker that moved past the row
+   * without that: re-read at send time, so the window never announces a row the
+   * marker says is read. */
+  await phoneJustHidden();
+  await say("already read");
+  const s = session();
+  s.notified = false; // the dismissal path is not what moved the marker here
+  markRead(s, s.chat[s.chat.length - 1].ts);
+  await quietWindow();
+  expect(bannerLeft()).toBe(false);
+  expect(hits()).toHaveLength(0);
+  expect(said().find((l) => l.includes("[notify] dropped"))).toContain("why=read");
 });

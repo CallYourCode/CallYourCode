@@ -8,7 +8,8 @@ import { TerminalHub, clampCols, clampRows, safeInput, safeScroll,
   type ScrollMode, type TerminalHandlers, type TerminalSession, type Viewer } from "../terminal/terminal.ts";
 import { clients, send } from "./wire.ts";
 import { sessions } from "../sessions/session-state.ts";
-import { onPresenceChange } from "../sessions/presence.ts";
+import { onPresenceChange, noteVisibility } from "../sessions/presence.ts";
+import { cancelForVisible } from "../chat/notify.ts";
 import { onHeard } from "../chat/reply.ts";
 import { onAttach, onProgress } from "../chat/attach.ts";
 import { onUtterance } from "../chat/deliver.ts";
@@ -262,6 +263,8 @@ export async function dispatchClientFrame(ws: Sock, m: any): Promise<void> {
      * old to say reads as NOT desktop (m.desktop !== true), so locking it buzzes
      * right away. A device constant, so restamping it each beat costs nothing. */
     ws.data.desktop = m.desktop === true;
+    noteVisibility(ws, wasVisible, m.why);
+    cancelForVisible(ws); // a banner queued for the chat this page is looking at is not owed
     return;
   }
   // The answer to pokeForProof: recording the frame above proves the page alive.

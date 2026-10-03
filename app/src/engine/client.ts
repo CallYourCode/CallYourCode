@@ -247,7 +247,7 @@ export class WsEngineClient implements EngineClient {
 
   // Visible again runs the liveness check at once (R4): a pipe that died while
   // the phone was in a pocket is found now, not on the next 5 s tick.
-  public setVisible(on: boolean) {
+  public setVisible(on: boolean, why?: string) {
     this.visible = on;
     // `desktop` rides the beat so the engine can tell a laptop apart from a
     // phone: only a laptop holds a push via recent use (owner, 2026-10-01). A
@@ -255,7 +255,9 @@ export class WsEngineClient implements EngineClient {
     // The beat rides the pipe sealed, so the idle probe cannot read it off the
     // wire; count it here the instant it actually leaves (a no-op unless the
     // probe is installed, i.e. under ?testhooks=1).
-    if (this.send({t: 'visible', on, desktop: desktopDevice})) {
+    // `why` names the page event behind the claim, so the engine's presence log
+    // can say what took the phone hidden (owner report, 2026-10-03).
+    if (this.send({t: 'visible', on, desktop: desktopDevice, ...(why ? {why} : {})})) {
       (
         window as unknown as {__cycIdle?: {notePresenceFrame?(): void}}
       ).__cycIdle?.notePresenceFrame?.();

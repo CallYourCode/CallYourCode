@@ -8,7 +8,9 @@ const fake = vi.hoisted(() => ({
   // Default true: the steady-state open where the reply is genuinely unheard. A
   // test flips it to false to model a say for a row already at/behind the
   // read-through (a stranded growing clip's frame reaching an open chat).
-  mayAutoplay: true
+  mayAutoplay: true,
+  // what sessionSelectors.active() answers: the open chat, or null
+  active: null as unknown
 }));
 vi.mock('../engine/store', () => ({
   onReplayed: (fn: Handler) => {
@@ -75,7 +77,7 @@ vi.mock('../speakerEvents', () => ({installSpeakerEvents: vi.fn()}));
 vi.mock('../features/composer/voice/capture', () => ({installVoiceCapture: vi.fn()}));
 vi.mock('../features/chat/surface/audioPlayback', () => ({transcriptOf: (): null => null}));
 vi.mock('../sessionSelectors', () => ({
-  active: (): unknown => null,
+  active: (): unknown => fake.active,
   selectTabFor: () => 'e1#t1'
 }));
 vi.mock('../features/settings/preferences', () => ({
@@ -173,6 +175,7 @@ beforeEach(() => {
   fake.handlers = {};
   fake.sessions.clear();
   fake.mayAutoplay = true;
+  fake.active = null;
   dataState.mode = 'live';
   sessionState.activeId = null;
   localStorage.clear();
@@ -417,5 +420,32 @@ describe('conversation-list keyboard nav walks only the visible rows', () => {
     press('ArrowDown');
     press('ArrowUp');
     expect(cs.openChat).not.toHaveBeenCalled();
+  });
+});
+describe('the read sighting for a reply arriving in the open chat', () => {
+  // The owner, 2026-10-03: a reply landed in the open BZ Builder, visible, and
+  // the chat stayed unread until the owner went back to the list. The open window is
+  // capped at 300 rows, so the reply slid the oldest row out and the count never
+  // grew; the sighting was gated on the count growing.
+  const window = (from: number, n: number) =>
+    Array.from({length: n}, (_, i) => ({id: `m${from + i}`, mid: `m${from + i}`, ts: from + i}));
+  test('a reply in a FULL window (the count does not grow) is still sighted', () => {
+    const {deps} = mk();
+    sessionState.activeId = 's1';
+    fake.active = {id: 's1', messages: window(1, 300)};
+    (fake.handlers.store as Handler)(); // the baseline: what is already shown
+    expect(deps.reportViewedThrough).not.toHaveBeenCalled();
+    fake.active = {id: 's1', messages: window(2, 300)}; // newest in, oldest out
+    (fake.handlers.store as Handler)();
+    expect(deps.reportViewedThrough).toHaveBeenCalledWith('s1');
+  });
+  test('a repaint with nothing newer sights nothing', () => {
+    const {deps} = mk();
+    sessionState.activeId = 's1';
+    fake.active = {id: 's1', messages: window(1, 300)};
+    (fake.handlers.store as Handler)();
+    fake.active = {id: 's1', messages: window(1, 300)};
+    (fake.handlers.store as Handler)();
+    expect(deps.reportViewedThrough).not.toHaveBeenCalled();
   });
 });

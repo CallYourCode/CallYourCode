@@ -506,13 +506,17 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
         cs.setNewBelow(cs.newBelowCount() + arrived);
       }
 
+      // `arrived` (rows newer than the newest already shown), NOT a count that
+      // grew: the open window is capped (WINDOW, 300), so in a full window a
+      // reply slides the oldest row out and the count stays put. Gating on the
+      // count left a reply on screen unread until the owner left the chat
+      // (2026-10-03: rows=300 before and after the reply, read only on back).
       if (
         s &&
         dataState.mode === 'live' &&
         !cs.openOwned() &&
         !cs.landingOwed() &&
         sameSession &&
-        count > prevMsgCount &&
         document.visibilityState === 'visible'
       ) {
         if (arrived > 0) deps.reportViewedThrough(s.id);

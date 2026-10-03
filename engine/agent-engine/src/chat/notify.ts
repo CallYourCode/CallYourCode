@@ -15,7 +15,7 @@
 import { unreadOf, markRead, filedAndQuiet } from "../sessions/readstate.ts";
 import { scheduleHeardSave, settingsOf, type Session } from "../sessions/session-state.ts";
 import { send } from "../transport/wire.ts";
-import { appConnected, recentlyUsed, isAway, BEAT_ASSUMED_MS, BEAT_SLACK_MS, graceMs } from "../sessions/presence.ts";
+import { appConnected, recentlyUsed, isAway, present, BEAT_ASSUMED_MS, BEAT_SLACK_MS, graceMs } from "../sessions/presence.ts";
 import { realClock, type Clock } from "../runtime/clock.ts";
 import type { Sock } from "../transport/sock.ts";
 
@@ -254,9 +254,11 @@ export async function notifyUnlessWatched(
     }
     console.log(`[notify] send ${key} ${msg} why=${why}${lateMs ? ` late=${secs(lateMs)}` : ""}`);
     s.silentSince = undefined; // a banner is going out: nothing is being held back
+    const standing = !!s.notified;
     s.notified = true; // one is standing on the devices now
     scheduleHeardSave(s.id);
-    queueNotify(key, { title: p.title, body: p.body, unread: unreadOf(s) });
+    queueNotify(key, { title: p.title, body: p.body, unread: unreadOf(s),
+      sid: s.id, ts: p.ts, at: clk.now(), standing });
   };
 
   const attached = [...C().clients()].filter((c) => c.data.attached === s.id);
@@ -590,7 +592,12 @@ const NOTIFY_BODY_MAX = 2000;
 /* No icon field: pushes stopped referencing engine photo URLs (sealed-transport
  * enforcement -- /session-photo is owner-gated, so an OS icon fetch could never
  * answer). The service worker keeps the app logo. */
-type Queued = { title: string; body: string; unread: number };
+/* `sid`, `ts`, `at` and `standing` never reach the wire (flushBatch builds the
+ * wire item field by field); they are what the send-time re-check below needs:
+ * the chat, the newest row the banner is about, when it was queued, and whether
+ * a banner from BEFORE this one was already standing on the devices. */
+type Queued = { title: string; body: string; unread: number;
+  sid: string; ts: number; at: number; standing: boolean };
 const queuedNew = new Map<string, Queued>();
 const queuedDismiss = new Set<string>();
 let batchTimer: unknown = null;
@@ -615,7 +622,69 @@ export function scheduleBatch() {
   }, msToBoundary(batchMs(), 0, clk.now()));
 }
 
+/* THE DECISION IS RE-ASKED AT SEND TIME (2026-10-03). The owner: "I had the
+ * phone app open, sent a text, and got a notification for the reply." The
+ * phone said hidden for a few seconds, the reply landed in that gap and was
+ * queued ("all say backgrounded", correctly), the phone came back to that very
+ * chat at 18:44:29.07 -- and the window fired at :30 and sent the banner
+ * anyway, because nothing between the queue and the POST asked again. A
+ * queued banner is a decision up to ten seconds old, so it is re-checked
+ * against now: a client looking at the chat with its javascript provably
+ * running, or a marker already past the row, and it is not owed any more.
+ *
+ * The proof is the one notifyUnlessWatched uses: attached to this chat, says
+ * visible, and a frame from it AFTER the banner was queued (a frozen page that
+ * last said "visible" cannot produce one), and still present() now. */
+function notOwed(q: Queued): string | null {
+  const s = sessionById(q.sid);
+  if (!s) return null;
+  if (s.heardTs >= q.ts) return "read (the marker is already past it)";
+  for (const c of C().clients()) {
+    if (c.data.attached !== q.sid || !c.data.visible) continue;
+    if (c.data.lastFrame <= q.at || !present(c)) continue;
+    return `c${c.data.cid} is visible on this chat (frame ${secs(clk.now() - c.data.lastFrame)} ago, ` +
+      `after the banner was queued)`;
+  }
+  return null;
+}
+
+function sessionById(sid: string): Session | undefined {
+  for (const s of C().sessions()) if (s.id === sid) return s;
+  return undefined;
+}
+
+/* Take a queued banner back before it leaves. It never reached a device, so
+ * the flag goes back to what it was before this banner set it, and a chat
+ * dropped because the owner is LOOKING at it is read, exactly as the proven-watching
+ * path in notifyUnlessWatched marks it: no banner, and no count of 1 on a chat
+ * open in front of the owner either. */
+function dropQueued(key: string, q: Queued, why: string): void {
+  queuedNew.delete(key);
+  console.log(`[notify] dropped ${key} unread=${q.unread} why=${why} ` +
+    `(queued ${secs(clk.now() - q.at)} ago, never sent)`);
+  const s = sessionById(q.sid);
+  if (!s) return;
+  s.notified = q.standing;
+  scheduleHeardSave(s.id);
+  if (markRead(s, q.ts)) C().broadcastSessions();
+}
+
+/* A VISIBLE FRAME ON A CHAT CANCELS ITS PENDING BANNER, at once rather than at
+ * the boundary: the frame is being handled now, so the page's javascript is
+ * running and it is on this chat. Called by the frame dispatcher on every
+ * visible claim; a no-op unless a banner for this chat is waiting. */
+export function cancelForVisible(ws: Sock): void {
+  if (!cfg || !ws.data.visible || !ws.data.attached) return;
+  const key = `${cfg.engineHost}:${ws.data.attached}`;
+  const q = queuedNew.get(key);
+  if (q) dropQueued(key, q, `c${ws.data.cid} said visible on this chat`);
+}
+
 export async function flushBatch() {
+  for (const [key, q] of [...queuedNew]) {
+    const why = notOwed(q);
+    if (why) dropQueued(key, q, why);
+  }
   if (!queuedNew.size && !queuedDismiss.size) return;
   /* THE WIRING THIS WINDOW BELONGS TO, captured before the first await.
    *
@@ -721,9 +790,14 @@ export async function flushBatch() {
  *  always the freshest, because it is the one the banner shows. */
 export function queueNotify(key: string, q: Queued) {
   queuedDismiss.delete(key); // it is unread again: a dismissal would be a lie
+  /* A second reply in the same window replaces the first, but what was standing
+   * BEFORE the window is the first one's answer: the second saw the flag the
+   * first had just set. */
+  const prev = queuedNew.get(key);
   // the preview, not the whole reply (NOTIFY_BODY_MAX): the one choke point every
   // queueNotify caller passes through, so the wire size is bounded here
-  queuedNew.set(key, { ...q, body: q.body.slice(0, NOTIFY_BODY_MAX) });
+  queuedNew.set(key, { ...q, body: q.body.slice(0, NOTIFY_BODY_MAX),
+    standing: prev ? prev.standing : q.standing });
   scheduleBatch();
 }
 
@@ -814,14 +888,16 @@ export function sweepCeiling() {
     }
     // the newest agent line is what the banner shows, as everywhere else
     let body = "";
+    let ts = 0;
     for (let i = s.chat.length - 1; i >= 0; i--) {
-      if (s.chat[i].role === "claude") { body = s.chat[i].text ?? ""; break; }
+      if (s.chat[i].role === "claude") { body = s.chat[i].text ?? ""; ts = s.chat[i].ts; break; }
     }
     console.log(`[notify] ceiling ${key} unread=${n} silent=${secs(silent)} ` +
       `(past the ${secs(ceilingMs())} ceiling, notifying whatever presence says)`);
     s.notified = true;
     scheduleHeardSave(s.id);
-    queueNotify(key, { title: C().sessionPushTitle(s), body: body || "New message", unread: n });
+    queueNotify(key, { title: C().sessionPushTitle(s), body: body || "New message", unread: n,
+      sid: s.id, ts, at: now, standing: false });
   }
   if (!waiting && ceilingTimer) { clk.clearInterval(ceilingTimer); ceilingTimer = null; }
 }
@@ -836,6 +912,7 @@ export function sweepCeiling() {
  * turned itself off exactly when it was needed. onPresenceChange has already
  * decided, on thirty seconds of evidence, that nobody is there. */
 export function flushUnread() {
+  const now = clk.now();
   for (const s of C().sessions()) {
     if (s.notified) continue;
     /* Everything unread here is something he filed himself,
@@ -859,13 +936,15 @@ export function flushUnread() {
     // the newest agent line is what the banner shows, the same text the live
     // path would have sent had he been away when it landed
     let body = "";
+    let ts = 0;
     for (let i = s.chat.length - 1; i >= 0; i--) {
-      if (s.chat[i].role === "claude") { body = s.chat[i].text ?? ""; break; }
+      if (s.chat[i].role === "claude") { body = s.chat[i].text ?? ""; ts = s.chat[i].ts; break; }
     }
     console.log(`[notify] flush ${key} unread=${n} (grace expired, nobody proved they were here)`);
     s.notified = true;
     scheduleHeardSave(s.id);
-    queueNotify(key, { title: C().sessionPushTitle(s), body: body || "New message", unread: n });
+    queueNotify(key, { title: C().sessionPushTitle(s), body: body || "New message", unread: n,
+      sid: s.id, ts, at: now, standing: false });
   }
 }
 /* THE LIMITS POLL LIVES IN THE USAGE-CARD PLUGIN NOW (blueprint section 3):

@@ -206,6 +206,22 @@ export function recentlyUsed(): Sock | null {
   return best;
 }
 
+/* EVERY PRESENCE CHANGE, ONE LINE, NAMING THE FRAME THAT CAUSED IT (2026-10-03).
+ * "Why did the engine think my phone was backgrounded?" had no answer in the log:
+ * the visible frame was only ever printed under NOTIFY_DEBUG, so the notify line
+ * "all say backgrounded" could not be traced to a frame, a time, or the page
+ * event behind it. Transitions only (a beat restating the same fact is not
+ * logged), so this is a handful of lines per app session. `why` is the page's
+ * own trigger (visibilitychange, blur, pagehide, focus, idle...) as the app
+ * names it on the frame; an app too old to say leaves it off. */
+export function noteVisibility(c: Sock, wasVisible: boolean, why: unknown): void {
+  if (c.data.visible === wasVisible) return;
+  const trigger = typeof why === "string" ? why.replace(/[^a-z0-9.-]/gi, "").slice(0, 32) : "";
+  console.log(`[presence] c${c.data.cid} ${c.data.visible ? "visible" : "hidden"} ` +
+    `(frame visible on=${c.data.visible}${trigger ? ` why=${trigger}` : ""} ` +
+    `chat=${c.data.attached ?? "-"} desktop=${c.data.desktop === true})`);
+}
+
 export function clearGrace() {
   if (!graceTimer) return;
   clk.clearTimeout(graceTimer);
