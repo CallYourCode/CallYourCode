@@ -609,6 +609,63 @@ describe('honest voice-clip send over the transfer queue', () => {
       expect(planted.sent).toHaveLength(1);
       expect(planted.sent[0][2]).toMatchObject({kind: 'voice', msgId: 'srv-msg-8'});
     });
+
+    // An empty-bodied commit answering a quote (the handoff after a decoder
+    // that never settled): the engine fills the words, and the quote must
+    // still ride the wire on top of them.
+    const QUOTED = {ts: 40, role: 'claude' as const, title: 'Claude', text: 'Only remote roles.'};
+    const engineCan = (list: string[]) => {
+      (planted.conn.client as unknown as {can: (f: string) => boolean}).can = (f) =>
+        list.includes(f);
+    };
+
+    test('an empty-bodied quoted commit keeps the quote on the wire around its words marker', async () => {
+      engineCan(['words', 'note-words']);
+      const m = plantDraft('505');
+      commitVoiceNote(s.id, '505', '', {
+        msgId: 'srv-msg-9',
+        cid: 'c-505',
+        durationS: 4,
+        replyTo: QUOTED,
+        partial: {text: 'not what', upToS: 1.5}
+      });
+      const wire = '> Only remote roles.\n\n{{cyc-words:c-505}}';
+      expect(m.replyTo).toEqual(QUOTED);
+      expect(payloadOf('c-505')).toMatchObject({
+        text: '',
+        wire,
+        words: ['c-505'],
+        replyTo: QUOTED,
+        partials: [{id: 'c-505', text: 'not what', upToS: 1.5}]
+      });
+      await flush();
+      expect(planted.sent).toHaveLength(1);
+      expect(planted.sent[0][1]).toBe(wire);
+      expect(planted.sent[0][2]).toMatchObject({
+        kind: 'voice',
+        msgId: 'srv-msg-9',
+        cid: 'c-505',
+        words: ['c-505']
+      });
+    });
+
+    test('a bodied quoted commit is unchanged: the quote on top of the words, no marker', async () => {
+      engineCan(['words', 'note-words']);
+      plantDraft('506');
+      commitVoiceNote(s.id, '506', 'the words', {msgId: 'srv-msg-10', cid: 'c-506', replyTo: QUOTED});
+      expect(payloadOf('c-506')).toMatchObject({wire: '> Only remote roles.\n\nthe words'});
+      expect(payloadOf('c-506')?.words).toBeUndefined();
+    });
+
+    test('without note-words an empty quoted commit goes empty-bodied (the words still come) and keeps replyTo', async () => {
+      engineCan(['words']);
+      const m = plantDraft('507');
+      commitVoiceNote(s.id, '507', '', {msgId: 'srv-msg-11', cid: 'c-507', replyTo: QUOTED});
+      expect(m.replyTo).toEqual(QUOTED);
+      expect(payloadOf('c-507')).toMatchObject({wire: '', replyTo: QUOTED});
+      expect(payloadOf('c-507')?.words).toBeUndefined();
+      expect(logged.some((l) => l.event === 'commit.quote-unwired')).toBe(true);
+    });
   });
 
   describe('the send-voice executor after a reload (defect #1)', () => {
