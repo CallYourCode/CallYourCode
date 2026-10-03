@@ -253,9 +253,9 @@ export function onPaneKeyboard<T>(fn: () => Promise<T>): Promise<T> {
  * (mux stays the adapter's own: the adapter was built over the same `mux`.) */
 export const deliverToPane =
   (paneId: string, text: string, deliveryId: string, takenAt?: number,
-    progress?: (stage: "typing" | "submitted") => Promise<void>): Promise<void> =>
+    o: Pick<DeliverDeps, "progress" | "resumed"> = {}): Promise<void> =>
   D().sendInput(paneId, text, deliveryId, takenAt, {
-    progress,
+    ...o,
     unsubmitted,
     onPaneKeyboard,
     sessionFor: (handle) => {

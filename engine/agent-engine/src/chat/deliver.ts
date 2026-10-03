@@ -13,7 +13,7 @@
 
 import { safeCid, newCid } from "../../../shared/logbook.ts";
 import { PaneNotReady, DeliveryStranded } from "../adapters/mux-adapter.ts";
-import { deliverToPane, unsubmitted } from "./pane-deliver.ts";
+import { deliverToPane } from "./pane-deliver.ts";
 import { stampTs, logChat, noticeChat, awaitingQueue, armAwaiting, clearAwaiting, armQueueClear,
   QUEUE_STUCK_MS } from "./chatlog.ts";
 import { markReadOnUtterance } from "../sessions/readstate.ts";
@@ -96,6 +96,7 @@ export function resetForTest(): void {
   ackQueue.clear();
   redrivenTaken.clear();
   ownTakes.clear();
+  stagedHere.clear();
   draining = false;
   inPane = 0;
   deps = null;
@@ -908,18 +909,21 @@ export async function injectUserMessage(
   return { ok: true, ts };
 }
 
-/* The keystroke half of injectUserMessage, for a live mux pane. HOW FAR A DEAD
- * PROCESS GOT is the cid's Stage (intake.ts): `submitted` means its Enter went
- * out, so nothing is typed again and only the missing row is written; `typing`
- * means the body may be sitting in the box, so the stranded-body note is set and
- * the guard presses Enter only when the box still holds it. The stage is written
- * before the first keystroke and right after the Enter, and goes once the row is
- * on disk. What is left: a stop in the few milliseconds between the Enter
- * reaching the pane and `submitted` reaching the disk types it again (the
- * SIGTERM drain takes ordinary restarts out of that window). */
+/* The keystroke half of injectUserMessage, for a live mux pane. HOW FAR A
+ * STOPPED PROCESS GOT is the cid's Stage (intake.ts), written before the body is
+ * typed (`typing`) and before the Enter (`entering`), and removed once the row
+ * is on disk. A drive after a restart hands it to the guard: the box still
+ * holding the body gets Enter only, and after `entering` an empty box means the
+ * Enter took it, so nothing is typed again and only the missing row is written.
+ * pi's direct send writes `submitted` after the send. What is left: a stop in
+ * the milliseconds between pi taking a direct send and `submitted` reaching the
+ * disk sends it again (the SIGTERM drain takes ordinary restarts out of it). */
+const stagedHere = new Set<string>();
 async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
   const { cid, text } = inj;
-  const stage = await stageFor(s.id, cid);
+  /* Only a stage a stopped process left steers this drive; a retry of an
+   * attempt this process made is the in-memory stranded note's, as before. */
+  const stage = stagedHere.has(cid) ? null : await stageFor(s.id, cid);
   /* The agent gets a real path per attachment, in the order they were
    * composed, and the caption (if any) rides along after them. ONE message:
    * several attachments make the line longer, they never
@@ -947,12 +951,6 @@ async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
     // the end of this turn asks the state file whether a reply went out.
     const noted = D().noteDelivery(s.id, inj.how);
     D().writeHookState();
-    /* A previous process typed it and stopped: the note it held in memory is
-     * set again, so the guard presses Enter only if the box still holds it. A
-     * note this process already holds for it (a stranded retry) is kept as is. */
-    if (stage === "typing" && unsubmitted.get(s.muxHandle)?.deliveryId !== cid) {
-      unsubmitted.set(s.muxHandle, { deliveryId: cid, at: Date.now() });
-    }
     /* PRE-ARM the consumption listener BEFORE the keystrokes go out. The
      * current claude journals the message's `user` record ~0.45s after it is
      * typed, which is usually WHILE deliverToPane's echo gate is still
@@ -967,8 +965,14 @@ async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
      * index off the delivered text is what the transcript echo matches on. */
     armAwaiting(cid, s.id, 0, delivered);
     try {
-      await deliverToPane(s.muxHandle, delivered, cid, inj.takenAt, (st) =>
-        noteStage(s.id, cid, st).catch((e) => D().log("intake.stage-unsaved", { cid, err: String(e) })));
+      await deliverToPane(s.muxHandle, delivered, cid, inj.takenAt, {
+        progress: (st) => {
+          stagedHere.add(cid);
+          return noteStage(s.id, cid, st).catch((e) =>
+            D().log("intake.stage-unsaved", { cid, err: String(e) }));
+        },
+        ...(stage ? { resumed: stage } : {}),
+      });
     } catch (e) {
       clearAwaiting(cid);
       // the stage follows what is in the box now: the body (stranded), or nothing
@@ -1050,6 +1054,7 @@ async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
     completing: inj.completesTs != null || undefined });
   await D().flushChat?.();
   await forgetStage(s.id, cid);
+  stagedHere.delete(cid);
   return { ok: true, ts };
 }
 

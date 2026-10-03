@@ -164,10 +164,18 @@ export async function runDeliveryMachine(
    * the typed tail stands in for box.hasContent -- it is all a foreign screen
    * can tell us. */
   const note = io.unsubmitted.get(paneId);
-  const believable = !!note && note.deliveryId === deliveryId && Date.now() - note.at < strandedTtlMs();
+  const believable = !!io.resumed ||
+    (!!note && note.deliveryId === deliveryId && Date.now() - note.at < strandedTtlMs());
   const stillThere = believable && (
     canParse ? box.kind === "input" && box.hasContent : tailVisible(pre, text));
   let typedThisAttempt = false;
+  if (!stillThere && io.resumed === "entering") {
+    /* A stopped process typed this and was pressing Enter: the box is empty, so
+     * the Enter took it. Typing it again would be a second message. */
+    console.log(`[deliver] ${paneId}: the body a stopped process was entering is gone from the ` +
+      `input; it was submitted, so nothing is typed again`);
+    return { kind: "delivered" };
+  }
   if (stillThere) {
     // STATE skipType (row 6, skip branch): the body is there, enter-only retry.
     console.log(`[deliver] ${paneId}: the body is still in the input from a failed attempt; ` +
@@ -237,13 +245,13 @@ export async function runDeliveryMachine(
   }
 
   // STATE enter (row 9): press enter, one retry on throw with a settle between.
+  await io.progress?.("entering");
   try {
     await io.mux.sendKeys(paneId, "enter");
   } catch {
     await new Promise((r) => setTimeout(r, settleMs()));
     await io.mux.sendKeys(paneId, "enter");
   }
-  await io.progress?.("submitted");
 
   /* STATE confirmSettle (row 10): so commitDelivery is reached only past a check
    * that the keystrokes were consumed. The deadline is NOT consulted from here

@@ -9,6 +9,7 @@
  * fake herdr is KEPT across the restart, as a real herdr outlives the engine.
  *
  *   D1 after_text   typed, Enter not pressed: Enter only, the body not doubled
+ *   D1 before_enter about to press Enter, the body in the box: Enter only
  *   D1 after_enter  Enter pressed, no row (after_keys, after_logchat): the row
  *                   is written, nothing typed again (claude and pi shapes)
  *   D1 completion   a pending note's completion stopped after its Enter
@@ -70,13 +71,13 @@ const typed = (c: WireCore, body: string) => c.herdr.rpcs.filter((r) => r.method
 /** What a process stopped at a delivery point leaves behind: its intake frame,
  *  the cid's Stage, and the pane as the keystrokes left it. */
 async function stoppedAt(c: WireCore, cid: string, text: string,
-  point: "acked" | "after_text" | "after_enter", o: { redrives?: number } = {}) {
+  point: "acked" | "after_text" | "before_enter" | "after_enter", o: { redrives?: number } = {}) {
   const delivered = `TEXT: ${text}`;
   await noteTaken({ sessionId: sid(), cid, takenAt: Date.now() - 60_000, attempt: "dead",
     frame: textFrame(cid, text), ...(o.redrives ? { redrives: o.redrives } : {}) });
-  const stage: Stage | null = point === "acked" ? null : point === "after_text" ? "typing" : "submitted";
+  const stage: Stage | null = point === "acked" ? null : point === "after_text" ? "typing" : "entering";
   if (stage) await noteStage(sid(), cid, stage);
-  if (point === "after_text") c.hooks.setInput!(PANE, delivered);
+  if (point === "after_text" || point === "before_enter") c.hooks.setInput!(PANE, delivered);
   if (point === "after_enter") c.submitted.push({ pane: PANE, text: delivered });
   return delivered;
 }
@@ -119,13 +120,23 @@ test("D1 after_enter (and after the row was made but not written): the row is wr
   await restart(c);
   await until(() => has(c, cid, "utterance.delivered"), { what: "the redrive to write the row" });
 
-  expect(has(c, cid, "delivery.already-submitted")).toBe(true);
   expect(c.submitted.map((x) => x.text), "a message the agent already had was sent again")
     .toEqual(["TEXT: the one before", delivered]);
   expect(typed(c, delivered), "the submitted body was typed again").toBe(0);
   expect(rowsFor(cid).length).toBe(1);
   expect(rowsFor(cid)[0].text).toBe("after enter");
   expect(rowsFor(done).length).toBe(1);
+});
+
+test("D1 before_enter: stopped between its Enter mark and the Enter, the body is entered once", async () => {
+  const c = await boot();
+  const cid = crypto.randomUUID();
+  const delivered = await stoppedAt(c, cid, "before enter", "before_enter");
+  await restart(c);
+  await until(() => has(c, cid, "utterance.delivered"), { what: "the redrive to deliver" });
+  expect(c.submitted.map((x) => x.text)).toEqual([delivered]);
+  expect(typed(c, delivered)).toBe(0);
+  expect(rowsFor(cid).length).toBe(1);
 });
 
 test("D1 acked, nothing typed yet: delivered once after the restart", async () => {
@@ -152,7 +163,7 @@ test("D1 completion: a pending note whose completion stopped after its Enter is 
   await until(() => has(c, cid, "utterance.shown-pending"), { what: "the note shown pending" });
   // the completion typed and entered, then the process stopped before the row
   const delivered = `VOICE: ${voice!.transcript}`;
-  await noteStage(sid(), cid, "submitted");
+  await noteStage(sid(), cid, "entering");
   c.submitted.push({ pane: PANE, text: delivered });
   gate = Promise.resolve();
 

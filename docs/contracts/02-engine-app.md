@@ -110,16 +110,17 @@ live pickup drives it again, deduped by cid against the chat log; a note shown
 with its words pending is completed at that same pickup.
 
 Exactly once across a stop. Each delivery keeps how far its keystrokes got,
-per cid: `typing` before the first keystroke, `submitted` right after the
-Enter returned (pi's direct input: around the send). A drive after a restart
-never types a `submitted` message again (it writes the missing row) and, for
-`typing`, presses Enter only when the box still holds the body. On SIGTERM or
+per cid: `typing` before the body is typed, `entering` before the Enter (pi's
+direct input: `typing` before the send, `submitted` after it). A drive after a
+restart presses Enter only when the box still holds the body; after
+`entering` an empty box means the Enter took it, so nothing is typed again and
+only the missing row is written; `submitted` is never sent again. On SIGTERM or
 SIGINT the engine drains: no new frame is taken (not acked, so the app sends it
 to the next process), nothing new starts typing (it stays on disk), and the
 deliveries already typing finish, rows on disk, within 10 s; a second signal
-exits at once. What remains: a kill -9 (or a drain past 10 s) in the few
-milliseconds between the Enter reaching the pane and `submitted` reaching the
-disk types the message again.
+exits at once. What remains: a kill -9 in the milliseconds between pi taking a
+direct send and `submitted` reaching the disk sends it again, and a box emptied
+by hand between `entering` and a restart is taken as submitted.
 
 Failures the sender is told: a frame driven by three boots without finishing,
 and a frame whose session is not picked up live within 10 minutes of boot,

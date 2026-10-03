@@ -41,10 +41,10 @@ export type Taken = {
 
 /* HOW FAR THE KEYSTROKES GOT, per (session, cid), for frames and for the
  * completion of a note shown pending alike. `typing` is written before the
- * first keystroke, `submitted` right after the Enter returned. A redrive reads
- * it: `submitted` is never typed again (only its missing row is written),
- * `typing` presses Enter only when the box still holds the body. */
-export type Stage = "typing" | "submitted";
+ * body is typed and `entering` before the Enter (keystroke panes); pi's direct
+ * input writes `typing` before the send and `submitted` after it. A redrive
+ * reads it (deliver.ts typeAndCommit, delivery-machine noteCheck). */
+export type Stage = "typing" | "entering" | "submitted";
 
 const dir = (): string => join(stateDir(), "intake");
 const enc = encodeURIComponent;
@@ -88,7 +88,7 @@ export async function noteStage(sessionId: string, cid: string, stage: Stage): P
 
 export async function stageFor(sessionId: string, cid: string): Promise<Stage | null> {
   const s = await readFile(stageOf(sessionId, cid), "utf8").catch(() => "");
-  return s === "typing" || s === "submitted" ? s : null;
+  return s === "typing" || s === "entering" || s === "submitted" ? s : null;
 }
 
 export async function forgetStage(sessionId: string, cid: string): Promise<void> {
