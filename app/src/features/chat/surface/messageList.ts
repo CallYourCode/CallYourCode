@@ -1154,6 +1154,13 @@ export function messageListBanked(inner: HTMLElement): boolean {
   return (renderStates.get(inner)?.bank ?? 0) !== 0;
 }
 
+// The model offset of the viewport top: the scroll box's offset plus any
+// correction banked while a reader drives (DOM = model - bank). 0 is the start of
+// the loaded history, whatever rows the window and its spacers hold right now.
+export function messageModelTop(inner: HTMLElement): number {
+  return (scrollBoxOf(inner)?.scrollTop ?? 0) + (renderStates.get(inner)?.bank ?? 0);
+}
+
 // A scan-key fragment that changes whenever the visible window moves, so the
 // render hub re-runs its DOM sweeps for the rows a scroll just revealed.
 export function messageVisibleRangeKey(inner: HTMLElement): string {

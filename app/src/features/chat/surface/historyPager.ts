@@ -2,30 +2,30 @@ import * as engine from '@/engine/store';
 import {active} from '@/sessionSelectors';
 import {cyclog} from '@/shared/logging';
 
-// A wheel/touch flick that leaves the viewport within this many px of the top
-// counts as a request for older history.
-const START_LOAD_PX = 100;
-
 interface HistoryPagerOptions {
   container: HTMLElement;
-  messages: HTMLElement;
   render(): void;
   ownsOpening(): boolean;
   isAnchoring(): boolean;
+  // The ScrollOwner's answers (R7): was this offset a machine write, and does the
+  // view sit at the top of the loaded history (read off the offsets)?
   isMachineScroll(top: number): boolean;
+  atTop(): boolean;
 }
 
 export function installHistoryPager(options: HistoryPagerOptions) {
-  const {container, messages, render, ownsOpening, isAnchoring, isMachineScroll} = options;
+  const {container, render, ownsOpening, isAnchoring, isMachineScroll, atTop} = options;
   let prepending = false;
   // The rendered window is virtual now: reaching the top no longer extends an
   // in-memory floor (every loaded row is already in the model). It only pulls
   // older STORE pages, below (loadEarlier), which prepend to the model; the
-  // render bracket preserves the reader's anchor across the prepend.
+  // render bracket preserves the reader's anchor across the prepend. Whatever
+  // asks, older history loads only at the top of the loaded history, as the
+  // owner reads it.
 
   const loadEarlier = () => {
     const session = active();
-    if (!session || prepending || ownsOpening() || isAnchoring()) return;
+    if (!session || prepending || ownsOpening() || isAnchoring() || !atTop()) return;
     if (!engine.canOlder(session.id)) return;
     prepending = true;
     void engine
@@ -72,33 +72,34 @@ export function installHistoryPager(options: HistoryPagerOptions) {
       const up = top < lastCoverTop;
       lastCoverTop = top;
       if (!up) return;
-      // The upward move is the APP'S OWN re-seat, not a reader flick: the render
-      // bracket, the anchored re-window, the open landing all write scrollTop and
-      // tag it here (machineScroll). Loading older history off a machine re-seat
-      // is the go-to-bottom runaway -- the field saw go-to-bottom's re-window
-      // yank scrollTop up ~8k px, which the pager read as reaching the top and
-      // answered with a loadEarlier burst (history.older dozens of times, the
-      // model grown far past its window) while the view was nowhere near the top.
-      // A real reader scroll is untagged, so it still loads older at the top.
+      // Only a reader's scroll reaching the top loads older history, and the
+      // owner answers both halves. The upward move is the APP'S OWN re-seat,
+      // not a reader flick: the render bracket, the anchored re-window, the open
+      // landing all write scrollTop and tag it (machineScroll). Loading older
+      // history off a machine re-seat is the go-to-bottom runaway (the field saw
+      // go-to-bottom's re-window yank scrollTop up ~8k px and the pager answer
+      // with a burst of history.older far from the top). And "the top" is the
+      // start of the loaded history as the owner reads it, never the first
+      // MOUNTED row meeting the viewport: that is the virtual window's own
+      // edge, met anywhere whenever the view outruns the window (BZ
+      // Distributor, 2026-10-03: a browser clamp, untagged, read as the top at
+      // 56k px).
       if (isMachineScroll(top)) return pagerSay('machine');
       if (prepending) return pagerSay('prepending');
       const session = active();
       if (!session) return pagerSay('no-active');
       if (ownsOpening() || isAnchoring()) return pagerSay('owned');
       if (!engine.canOlder(session.id)) return pagerSay('no-older', {session: session.id});
-      const first = messages.querySelector('.cyc-message:not(.cyc-msg-system)');
-      const containerTop = container.getBoundingClientRect().top;
-      if (first && first.getBoundingClientRect().top < containerTop - 200)
-        return pagerSay('covered');
+      if (!atTop()) return pagerSay('covered');
       pagerSay('fetch', {session: session.id, top});
       loadEarlier();
     },
     {passive: true}
   );
 
-  const topInput = () => {
-    if (container.scrollTop <= START_LOAD_PX) loadEarlier();
-  };
+  // A wheel/touch pull toward the top while already there (no scroll event
+  // follows at offset 0) is the reader asking for older history.
+  const topInput = () => loadEarlier();
   container.addEventListener(
     'wheel',
     (event) => {
