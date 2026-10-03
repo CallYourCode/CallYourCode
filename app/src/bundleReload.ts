@@ -3,7 +3,13 @@ import {onSyncStatus, syncStatus} from './engine/store';
 import {pipeline} from './audio/pipeline';
 import {toast} from './components/widgets';
 import {unsentWork, vaultHolds} from './sessionState';
-import {createStaleReloadController, parseServedStamp, CACHE_PREFIX} from './staleReload';
+import {
+  createStaleReloadController,
+  parseServedStamp,
+  reloadHold,
+  CACHE_PREFIX,
+  type ReloadHolds
+} from './staleReload';
 import {markSelfReload, markReloadDeparture, readReloadDeparture} from './shared/selfReload';
 
 export const bundleInfo = {stamp: ''};
@@ -35,6 +41,7 @@ export function installStaleTabReload(): void {
       gap: Date.now() - departed.at,
       from: departed.from,
       to: departed.to,
+      hidden: departed.hidden,
       build: cycBuildStamp || 'dev'
     });
 
@@ -61,78 +68,112 @@ export function installStaleTabReload(): void {
   });
   if (syncStatus() === 'live') void readBootStamp();
 
-  const busy = () => {
-    const input = document.querySelector('.cyc-composer');
-    if (input?.hasAttribute('data-cyc-recording') || input?.classList.contains('cyc-pressing'))
-      return true;
-    const typed = document.querySelector('.cyc-composer-input')?.textContent?.trim();
-    if (typed) return true;
-
-    if (document.querySelector('.cyc-attach-chip')) return true;
-
-    if (document.querySelector('.cyc-block-voice')) return true;
+  const composer = () => document.querySelector('.cyc-composer');
+  const recordingNow = () => {
+    const i = composer();
+    return (
+      pipeline.captureBusy ||
+      (!!i && (i.hasAttribute('data-cyc-recording') || i.classList.contains('cyc-pressing')))
+    );
+  };
+  const draftInBox = () =>
+    !!document.querySelector('.cyc-composer-input')?.textContent?.trim() ||
+    !!document.querySelector('.cyc-attach-chip') ||
+    !!document.querySelector('.cyc-block-voice');
+  const audioPlaying = () => {
     const audio = document.querySelector('audio');
-    if (audio && !audio.paused && !audio.ended) return true;
-    if (unsentWork.busy()) return true;
-    return false;
+    return !!audio && !audio.paused && !audio.ended;
   };
 
-  const RELOAD_PATIENCE_MS = 45_000;
-  /* The hard ceiling on every hold except a live recording. vaultHolds and
-   * unsentWork used to defer FOREVER: one stuck hold (a failed transfer that
-   * never settled) meant the toast showed and the reload silently never came
-   * (2026-09-06 report). Unsent intents are durable (IndexedDB) and survive
-   * the reload, so past this ceiling waiting protects nothing. A recording in
-   * progress is the one hold that genuinely cannot be reloaded away. */
-  const RELOAD_CEILING_MS = 5 * 60_000;
+  const swSupported = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
+  const pendingWorker = async (): Promise<'' | 'installing' | 'waiting'> => {
+    if (!swSupported) return '';
+    try {
+      const r = await navigator.serviceWorker.getRegistration();
+      return r?.installing ? 'installing' : r?.waiting ? 'waiting' : '';
+    } catch {
+      return '';
+    }
+  };
+  const askActivate = () => {
+    if (!swSupported) return;
+    void navigator.serviceWorker
+      .getRegistration()
+      .then((r) => r?.waiting?.postMessage({t: 'skip-waiting'}))
+      .catch(() => {});
+  };
+
   const reloadSoon = (target: string) => {
     if (reloading) return;
     reloading = true;
     const since = Date.now();
-    toast('New version, reloading…', 2500);
+    // Announce only a reload that is about to happen; one held by a draft
+    // comes later, when the box is empty or the app is in the background.
+    if (!draftInBox()) toast('New version, reloading…', 2500);
     let lastLogged = 0;
-    const tick = () => {
-      const recording =
-        pipeline.captureBusy ||
-        (() => {
-          const i = document.querySelector('.cyc-composer');
-          return (
-            !!i && (i.hasAttribute('data-cyc-recording') || i.classList.contains('cyc-pressing'))
-          );
-        })();
-
-      const holds = {
-        recording,
-        vault: vaultHolds.writing > 0,
-        unsent: unsentWork.busy(),
-        busy: busy()
-      };
-      const waited = Date.now() - since;
-      const cannotLose = holds.recording || holds.vault || holds.unsent;
-      const defer = recording
-        ? true // a live recording waits as long as it runs
-        : (cannotLose && waited < RELOAD_CEILING_MS) ||
-          (holds.busy && waited < RELOAD_PATIENCE_MS);
-      if (defer) {
-        if (waited - lastLogged >= 15_000) {
-          lastLogged = waited;
-          cyclog('reload.deferred', {...holds, waited});
-        }
-        window.setTimeout(tick, 3000);
+    let timer = 0;
+    let ticking = false;
+    let again = false;
+    let going = false;
+    const tick = async (): Promise<void> => {
+      if (going) return;
+      if (ticking) {
+        again = true; // e.g. the background edge arrived mid-tick: decide again
         return;
       }
-
-      cyclog('reload.go', {waited, from: cycBuildStamp || bootStamp, to: target});
-      const url = new URL(location.href);
-      url.searchParams.set('b', String(Date.now()));
-      markSelfReload();
-      markReloadDeparture(cycBuildStamp || bootStamp, target);
-      location.replace(url.toString());
+      ticking = true;
+      window.clearTimeout(timer);
+      try {
+        // Never navigate while a new worker is installing or waiting: in
+        // Chromium the navigation can be what triggers the parked activation,
+        // and it then hangs (staleReload pendingWorker).
+        const pending = await pendingWorker();
+        const holds: ReloadHolds = {
+          recording: recordingNow(),
+          vault: vaultHolds.writing > 0,
+          unsent: unsentWork.busy(),
+          draft: draftInBox(),
+          audio: audioPlaying()
+        };
+        const waited = Date.now() - since;
+        const hidden = document.hidden;
+        const hold = reloadHold(holds, waited, hidden) || (pending ? 'sw-' + pending : '');
+        if (hold) {
+          if (pending === 'waiting') askActivate();
+          if (waited - lastLogged >= 15_000) {
+            lastLogged = waited;
+            cyclog('reload.deferred', {...holds, hold, hidden, waited});
+          }
+          timer = window.setTimeout(() => {
+            void tick();
+          }, 3000);
+          return;
+        }
+        going = true;
+        cyclog('reload.go', {waited, hidden, from: cycBuildStamp || bootStamp, to: target});
+        const url = new URL(location.href);
+        url.searchParams.set('b', String(Date.now()));
+        markSelfReload();
+        markReloadDeparture(cycBuildStamp || bootStamp, target, hidden);
+        location.replace(url.toString());
+      } finally {
+        ticking = false;
+        if (again && !going) {
+          again = false;
+          void tick();
+        }
+      }
     };
-    window.setTimeout(tick, 1200);
+    // Going to the background is the moment a draft stops holding the reload:
+    // decide at once, before the page is suspended.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) void tick();
+    });
+    timer = window.setTimeout(() => {
+      void tick();
+    }, 1200);
   };
 
-  const swSupported = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
   const controller = createStaleReloadController({
     ownStamp: () => cycBuildStamp || bootStamp,
     fetchServedStamp: fetchStamp,
@@ -153,6 +194,8 @@ export function installStaleTabReload(): void {
       }
     },
     isControlled: () => swSupported && !!navigator.serviceWorker.controller,
+    pendingWorker,
+    askActivate,
     nudgeWorker: () => {
       if (!swSupported) return;
       try {

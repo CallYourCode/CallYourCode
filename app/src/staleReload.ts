@@ -49,6 +49,39 @@ export function newestBucketDeliversTarget(names: string[], target: string): boo
   return buckets[buckets.length - 1] >= CACHE_PREFIX + target;
 }
 
+// What may hold an update reload back, sampled by the page on every tick.
+export type ReloadHolds = {
+  recording: boolean; // a live recording
+  vault: boolean; // a composition/clip vault write in flight
+  unsent: boolean; // a send the engine has not taken yet
+  draft: boolean; // anything in the composer: typed text, an attachment, a voice block
+  audio: boolean; // a clip playing
+};
+
+export const RELOAD_PATIENCE_MS = 45_000;
+/* The hard ceiling on the durable holds. vaultHolds and unsentWork used to
+ * defer FOREVER: one stuck hold (a failed transfer that never settled) meant
+ * the toast showed and the reload silently never came (2026-09-06 report).
+ * Unsent intents are durable (IndexedDB) and survive the reload, so past this
+ * ceiling waiting protects nothing. */
+export const RELOAD_CEILING_MS = 5 * 60_000;
+
+// The hold that defers an update reload right now, or '' to go. A recording
+// waits as long as it runs. A composer with anything in it is never reloaded
+// under the user: the reload waits until the box is empty (sent or cleared) or
+// the app goes to the background, whichever comes first; the draft is on disk
+// either way, so a reload in the background or the next launch restores it.
+// (The old 45 s patience reloaded mid-typing.) A playing clip gets the
+// patience; the durable holds get the ceiling.
+export function reloadHold(h: ReloadHolds, waited: number, hidden: boolean): string {
+  if (h.recording) return 'recording';
+  if (h.vault && waited < RELOAD_CEILING_MS) return 'vault';
+  if (h.unsent && waited < RELOAD_CEILING_MS) return 'unsent';
+  if (h.draft && !hidden) return 'draft';
+  if (h.audio && waited < RELOAD_PATIENCE_MS) return 'audio';
+  return '';
+}
+
 export const READY_POLL_MS = 500;
 export const READY_POLL_TRIES = 30; // 15s per stale sighting; the next edge re-arms
 
@@ -71,6 +104,16 @@ export type StaleReloadDeps = {
   shellCached: () => Promise<boolean>;
   // Whether a service worker currently controls this page.
   isControlled: () => boolean;
+  // A new worker that is installing or installed-but-waiting ('' when none).
+  // A reload must never navigate while one is: in Chromium the navigation can
+  // be what triggers the pending activation, it is dispatched to the old
+  // worker as that worker is stopped, and it never completes (the hung reload,
+  // proven 2026-10-03). Installing settles by itself in seconds.
+  pendingWorker: () => Promise<'' | 'installing' | 'waiting'>;
+  // Ask the waiting worker to take over (postMessage {t: 'skip-waiting'}).
+  // Chromium can park a skip-waiting worker when a request restarts the old
+  // worker mid-swap; a second skipWaiting() retries the activation.
+  askActivate: () => void;
   // registration.update(): force the worker update check without a navigation.
   nudgeWorker: () => void;
   // The once-per-target-stamp reload mark (sessionStorage in the real page).
@@ -97,15 +140,27 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
   let polling = false; // a readiness poll is in flight
   let controllerReloadUsed = false; // controllerchange reloads at most ONCE per page
 
+  let askedFor = ''; // the target a waiting worker was last asked to take over for
   const ready = async (target: string): Promise<boolean> => {
     try {
       if (!newestBucketDeliversTarget(await deps.cacheNames(), target)) return false;
       // The bucket NAME is newest, but a reload only lands non-blank once that
       // bucket really holds the shell (and so, atomically, every chunk).
-      return await deps.shellCached();
+      if (!(await deps.shellCached())) return false;
     } catch {
-      return true;
+      // unreadable caches: fall through to the worker check
     }
+    // And only once the new worker has taken over: its activation, not the
+    // reload, is what swaps the worker (see pendingWorker).
+    const pending = await deps.pendingWorker().catch((): '' => '');
+    if (pending === 'waiting') {
+      if (askedFor !== target) {
+        askedFor = target;
+        deps.log?.('sw.waiting', {target, why: 'asked the new worker to take over'});
+      }
+      deps.askActivate();
+    }
+    return !pending;
   };
 
   // Verify-after-write on the once-per-stamp mark. writeMark may throw

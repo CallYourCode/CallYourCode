@@ -25,6 +25,13 @@ describe('reload departure breadcrumb', () => {
     expect(d!.at).toBeLessThanOrEqual(Date.now());
   });
 
+  test('names a reload that left from the background (its gap is not a stuck reload)', () => {
+    markReloadDeparture('100', '200', true);
+    expect(readReloadDeparture()?.hidden).toBe(true);
+    markReloadDeparture('100', '200');
+    expect(readReloadDeparture()?.hidden).toBe(false);
+  });
+
   test('is spent on read: the next boot does not re-log the same reload', () => {
     markReloadDeparture('100', '200');
     expect(readReloadDeparture()).not.toBeNull();

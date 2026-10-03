@@ -42,19 +42,43 @@ async function cycReadManifest() {
 // build: a deploy landing between the worker fetch and the manifest fetch would
 // otherwise fill another build's bucket under this worker. (Unbaked, in
 // app/public and the unit tests, CYC_BUILD is the placeholder and is not
-// checked.) addAll is all-or-nothing; when it fails, a bucket it left without
-// a shell is deleted, so a bucket name exists only for a build that is really
-// cached.
+// checked.) The whole build is fetched before anything is stored, so a failed
+// fetch (a dead radio, a 503) leaves no bucket at all, and the shell is stored
+// LAST, so a bucket that holds index.html holds every file it names: the
+// invariant cycServeShell and the page's readiness gate rely on. A store that
+// fails part way (quota) drops the half-filled bucket.
+// Every fetch SETTLES before the install fails. Cache.addAll (and Promise.all)
+// reject at the first failure with the rest still loading, the failed install
+// discards this worker with its own loads in flight, and in WebKit that took
+// the network process down (Playwright WebKit, 2026-10-03: 16 crashes in 190
+// failing update installs that way, 0 in 90 with every fetch settled first).
+// A network process crash costs the page its worker connection and its sockets.
 async function cycPrecacheInstall() {
   const {version, assets} = await cycReadManifest();
   if (/^\d+$/.test(CYC_BUILD) && version !== CYC_BUILD)
     throw new Error('cyc-precache: manifest ' + version + ' is not this worker ' + CYC_BUILD);
+  const settled = await Promise.allSettled(
+    assets.map(async (a) => {
+      const req = new Request(a, {cache: 'reload'});
+      const res = await fetch(req);
+      if (!res || !res.ok) throw new Error('cyc-precache: ' + a + ' ' + (res && res.status));
+      return {req, res};
+    })
+  );
+  const failed = settled.find((r) => r.status === 'rejected');
+  if (failed) throw failed.reason;
+  const got = settled.map((r) => r.value);
+  const isShell = (req) => {
+    const p = new URL(req.url, self.location.origin).pathname;
+    return p === '/' || p === '/index.html';
+  };
   const name = CYC_CACHE_PREFIX + version;
   const cache = await caches.open(name);
   try {
-    await cache.addAll(assets.map((a) => new Request(a, {cache: 'reload'})));
+    for (const {req, res} of got) if (!isShell(req)) await cache.put(req, res);
+    for (const {req, res} of got) if (isShell(req)) await cache.put(req, res);
   } catch (e) {
-    if (!(await cache.match('/index.html'))) await caches.delete(name);
+    await caches.delete(name);
     throw e;
   }
 }
@@ -88,21 +112,39 @@ function cycRouteRequest(req) {
   const p = url.pathname;
   if (p === '/' || p === '/index.html') return 'shell';
   // The boot watchdog is a non-hashed shell file (precached by name alongside
-  // index.html; see scripts/build-cyc.sh). addAll is all-or-nothing, so any
+  // index.html; see scripts/build-cyc.sh). The shell is stored last, so any
   // bucket that holds the shell holds this too, and cycServeAsset's cross-
   // bucket match keeps it present on an offline boot exactly like a chunk.
   if (p.startsWith('/assets/') || p === '/boot-watchdog.js') return 'asset';
   return 'network';
 }
 
+// The same split, declared to the browser (the Static Routing API, Chromium):
+// only the shell and asset paths ever wake this worker; every other request
+// goes straight to the network without a fetch event, exactly the answer
+// cycRouteRequest gives it. Without this, every API call, log POST and stamp
+// check dispatched a fetch event to the worker that then did nothing with it,
+// and in Chromium one landing while the old worker is being stopped for a new
+// build's activation restarts the old worker and loses the activation: the new
+// build sits "waiting" (proven 2026-10-03, sw-activation-race.spec.ts). Rules
+// match in order; a non-GET on a shell path still reaches the handler, which
+// sends it to the network as before.
+const CYC_ROUTES = [
+  {condition: {urlPattern: {pathname: '/'}}, source: 'fetch-event'},
+  {condition: {urlPattern: {pathname: '/index.html'}}, source: 'fetch-event'},
+  {condition: {urlPattern: {pathname: '/boot-watchdog.js'}}, source: 'fetch-event'},
+  {condition: {urlPattern: {pathname: '/assets/*'}}, source: 'fetch-event'},
+  {condition: {urlPattern: {pathname: '/*'}}, source: 'network'}
+];
+
 async function cycServeShell(req) {
   // Newest bucket FIRST, but only a bucket that actually HOLDS the shell. A
-  // bucket name appears the instant install calls caches.open, before addAll
-  // stores anything and even if addAll later fails/hangs; serving the network's
-  // new index.html from that empty bucket points the page at a hashed entry
-  // chunk that is not cached either, and with no network it paints nothing (the
-  // black screen). addAll is all-or-nothing, so a bucket that has index.html has
-  // every chunk that shell names. Falling back to the newest FULLY-cached shell
+  // bucket name appears when install starts storing, before the shell is in it
+  // (and a worker from before 2026-10-03 left empty ones behind when its
+  // precache failed); serving the network's new index.html past such a bucket
+  // points the page at a hashed entry chunk that is not cached either, and with
+  // no network it paints nothing (the black screen). The shell is stored last,
+  // so a bucket that has index.html has every chunk that shell names. Falling back to the newest FULLY-cached shell
   // keeps the page booting (stale but alive) until the new bucket really fills;
   // the reload flow re-fires once it does. Only when no bucket holds the shell
   // do we go to the network.
@@ -133,12 +175,28 @@ async function cycServeAsset(req) {
 // displaces nothing, the shell then comes from the network, and the push worker
 // must not wait on a flaky radio.
 self.addEventListener('install', (event) => {
+  // Best effort: a browser without the API (WebKit) or a rule it rejects
+  // leaves every request to the fetch handler, which routes it the same way.
+  if (typeof event.addRoutes === 'function')
+    event.waitUntil(Promise.resolve(event.addRoutes(CYC_ROUTES)).catch(() => {}));
   event.waitUntil(
     cycPrecacheInstall().catch((e) => {
       if (self.registration.active) throw e;
     })
   );
   self.skipWaiting();
+});
+
+// A page that finds this worker installed but still WAITING asks it to take
+// over again. Chromium can park a skip-waiting worker: the old worker is
+// stopped to make way, a request then restarts it, and the activation is not
+// retried until the old worker idles (30 s with no events, 5 min at most). A
+// second skipWaiting() retries it. The page also never reloads while a worker
+// waits: a navigation that triggers the parked activation is dispatched to the
+// old worker as it is stopped, and never completes (the hung reload).
+self.addEventListener('message', (event) => {
+  // On a worker that is already active this is a no-op.
+  if (event.data && event.data.t === 'skip-waiting') self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
@@ -746,3 +804,4 @@ self.cycPrecacheInstall = cycPrecacheInstall;
 self.cycPrecacheActivate = cycPrecacheActivate;
 self.cycServeShell = cycServeShell;
 self.cycServeAsset = cycServeAsset;
+self.CYC_ROUTES = CYC_ROUTES;

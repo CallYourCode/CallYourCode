@@ -33,11 +33,13 @@ export function consumeSelfReload(now: number = Date.now()): boolean {
 // stuck reload names itself instead of being a silent hole in app.log.
 const DEPART_KEY = 'cyc-reload-depart';
 
-export type ReloadDeparture = {at: number; from: string; to: string};
+// `hidden`: the reload left from the background (a draft held it until then),
+// so its gap includes the time the app spent there and is not a stuck reload.
+export type ReloadDeparture = {at: number; from: string; to: string; hidden: boolean};
 
-export function markReloadDeparture(from: string, to: string): void {
+export function markReloadDeparture(from: string, to: string, hidden = false): void {
   try {
-    localStorage.setItem(DEPART_KEY, JSON.stringify({at: Date.now(), from, to}));
+    localStorage.setItem(DEPART_KEY, JSON.stringify({at: Date.now(), from, to, hidden}));
   } catch {}
 }
 
@@ -49,7 +51,12 @@ export function readReloadDeparture(): ReloadDeparture | null {
     if (!raw) return null;
     const p = JSON.parse(raw) as Partial<ReloadDeparture>;
     if (typeof p?.at !== 'number' || !Number.isFinite(p.at)) return null;
-    return {at: p.at, from: String(p.from ?? ''), to: String(p.to ?? '')};
+    return {
+      at: p.at,
+      from: String(p.from ?? ''),
+      to: String(p.to ?? ''),
+      hidden: p.hidden === true
+    };
   } catch {
     return null;
   }

@@ -5,6 +5,9 @@ import {
   newestBucketDeliversTarget,
   parseServedStamp,
   READY_POLL_TRIES,
+  RELOAD_CEILING_MS,
+  RELOAD_PATIENCE_MS,
+  reloadHold,
   staleTargetFor,
   type StaleReloadDeps
 } from '@/staleReload';
@@ -72,8 +75,10 @@ type Rig = {
       names: string[];
       controlled: boolean;
       shellCached: boolean;
+      pending: '' | 'installing' | 'waiting';
     }>
   ) => void;
+  asks: number;
   reloadTargets: string[];
   logs: [string, Record<string, unknown>][];
   controller: ReturnType<typeof createStaleReloadController>;
@@ -93,13 +98,16 @@ function makeRig(init: {
   markWriteThrows?: boolean;
   // ... or the page wiring swallowed the error, so the write silently no-ops.
   markWriteNoops?: boolean;
+  // A new worker installing or parked waiting (not yet taken over).
+  pending?: '' | 'installing' | 'waiting';
 }): Rig {
   const state = {
     own: init.own ?? '100',
     served: init.served ?? 'Build stamp: 200\n',
     names: init.names ?? [],
     controlled: init.controlled ?? false,
-    shellCached: init.shellCached ?? true
+    shellCached: init.shellCached ?? true,
+    pending: init.pending ?? ''
   };
   const mark = {value: init.mark ?? ''};
   const rig: Rig = {
@@ -108,6 +116,7 @@ function makeRig(init: {
     mark,
     reloadTargets: [],
     logs: [],
+    asks: 0,
     scheduled: [],
     runScheduled: () => {
       const fns = rig.scheduled.splice(0);
@@ -120,6 +129,10 @@ function makeRig(init: {
       cacheNames: async () => state.names,
       shellCached: async () => state.shellCached,
       isControlled: () => state.controlled,
+      pendingWorker: async () => state.pending,
+      askActivate: () => {
+        rig.asks += 1;
+      },
       nudgeWorker: () => {
         rig.nudges += 1;
       },
@@ -453,5 +466,76 @@ describe('diagnostics: a page behind the server says so', () => {
     await settle();
     expect(rig.reloads).toBe(0);
     expect(rig.logs).toEqual([['build.not-ready', {target: '200', via: 'controllerchange'}]]);
+  });
+});
+
+// The parked worker (Chromium, 2026-10-03): a new worker installed but still
+// WAITING. A reload must not navigate into it (the navigation triggers the
+// activation, is dispatched to the old worker as it is stopped, and hangs), so
+// readiness also needs the new worker to have taken over, and a waiting one is
+// asked to.
+describe('a new worker that has not taken over yet', () => {
+  test('waiting: no reload, the worker is asked to take over; it does, the reload lands', async () => {
+    const rig = makeRig({
+      controlled: true,
+      names: [CACHE_PREFIX + '100', CACHE_PREFIX + '200'],
+      pending: 'waiting'
+    });
+    await rig.controller.check();
+    await settle();
+    expect(rig.reloads, 'reloaded into a waiting worker').toBe(0);
+    expect(rig.asks).toBeGreaterThanOrEqual(1);
+    expect(rig.logs.map(([e]) => e)).toContain('sw.waiting');
+
+    rig.set({pending: ''}); // the activation went through
+    rig.runScheduled();
+    await settle();
+    expect(rig.reloads).toBe(1);
+    expect(rig.reloadTargets).toEqual(['200']);
+  });
+
+  test('installing: no reload and no ask until the install settles', async () => {
+    const rig = makeRig({controlled: true, names: [CACHE_PREFIX + '200'], pending: 'installing'});
+    await rig.controller.check();
+    await settle();
+    expect(rig.reloads).toBe(0);
+    expect(rig.asks).toBe(0);
+    rig.set({pending: ''});
+    rig.runScheduled();
+    await settle();
+    expect(rig.reloads).toBe(1);
+  });
+
+  test('controllerchange with another worker already waiting behind it: no reload', async () => {
+    const rig = makeRig({controlled: true, names: [CACHE_PREFIX + '200'], pending: 'waiting'});
+    rig.controller.onControllerChange();
+    await settle();
+    expect(rig.reloads).toBe(0);
+    expect(rig.asks).toBe(1);
+  });
+});
+
+describe('reloadHold: what holds an update reload back', () => {
+  const none = {recording: false, vault: false, unsent: false, draft: false, audio: false};
+  test('nothing held: go', () => {
+    expect(reloadHold(none, 0, false)).toBe('');
+  });
+  test('a draft holds the reload for as long as the app is in front: never mid-typing', () => {
+    expect(reloadHold({...none, draft: true}, 0, false)).toBe('draft');
+    expect(reloadHold({...none, draft: true}, RELOAD_PATIENCE_MS + 1, false)).toBe('draft');
+    expect(reloadHold({...none, draft: true}, RELOAD_CEILING_MS * 10, false)).toBe('draft');
+  });
+  test('a draft stops holding the moment the app goes to the background', () => {
+    expect(reloadHold({...none, draft: true}, 0, true)).toBe('');
+  });
+  test('a recording holds even in the background; durable holds up to the ceiling', () => {
+    expect(reloadHold({...none, recording: true}, RELOAD_CEILING_MS * 10, true)).toBe('recording');
+    expect(reloadHold({...none, vault: true}, RELOAD_CEILING_MS - 1, true)).toBe('vault');
+    expect(reloadHold({...none, vault: true}, RELOAD_CEILING_MS, true)).toBe('');
+    expect(reloadHold({...none, unsent: true}, 1000, false)).toBe('unsent');
+  });
+  test('a playing clip gets the patience window', () => {
+    expect(reloadHold({...none, audio: true}, RELOAD_PATIENCE_MS - 1, false)).toBe('audio');
+    expect(reloadHold({...none, audio: true}, RELOAD_PATIENCE_MS, false)).toBe('');
   });
 });
