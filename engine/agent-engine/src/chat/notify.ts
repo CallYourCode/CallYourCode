@@ -12,7 +12,7 @@
  *   bun test agent-engine/src/chat/notify-unit.test.ts
  */
 
-import { unreadOf, markRead, filedAndQuiet } from "../sessions/readstate.ts";
+import { unreadOf, filedAndQuiet } from "../sessions/readstate.ts";
 import { scheduleHeardSave, settingsOf, type Session } from "../sessions/session-state.ts";
 import { send } from "../transport/wire.ts";
 import { appConnected, recentlyUsed, isAway, present, BEAT_ASSUMED_MS, BEAT_SLACK_MS, graceMs } from "../sessions/presence.ts";
@@ -322,11 +322,15 @@ export async function notifyUnlessWatched(
       `[notify] suppress ${key} ${msg} c${proof.cid} is watching ` +
       `(proof=${proof.kind} after ${secs(proof.ms)}, ${pong})`,
     );
-    /* A message you were PROVABLY looking at is read, and the marker is the
-     * only place that can be said. Without this the suppressed notification and
-     * the row disagreed: no banner, but a count of 1 on a chat open in front of
-     * you, which is exactly the class of read-marker bug this guards against. */
-    if (markRead(s, p.ts)) C().broadcastSessions();
+    /* NO BANNER, AND NOT READ EITHER (owner, 2026-10-03: a row is read only
+     * when it has actually been on screen). This proof says a page is open on
+     * the chat with its javascript running; it says nothing about whether the
+     * reply is in the viewport -- he can be scrolled a screen up. The app sights
+     * what is on screen and the marker moves from that, which is also what
+     * takes the count to 0 on every device when he IS at the bottom. It used to
+     * markRead here, scroll-blind. The reply goes on the ceiling clock like any
+     * held one; sweepCeiling never fires while a page is on this chat. */
+    startSilence(s, at);
     return;
   }
   const gone = claimants.filter((c) => !C().clients().has(c)).length;
@@ -622,29 +626,25 @@ export function scheduleBatch() {
   }, msToBoundary(batchMs(), 0, clk.now()));
 }
 
-/* THE DECISION IS RE-ASKED AT SEND TIME (2026-10-03). The owner: "I had the
- * phone app open, sent a text, and got a notification for the reply." The
- * phone said hidden for a few seconds, the reply landed in that gap and was
- * queued ("all say backgrounded", correctly), the phone came back to that very
- * chat at 18:44:29.07 -- and the window fired at :30 and sent the banner
- * anyway, because nothing between the queue and the POST asked again. A
- * queued banner is a decision up to ten seconds old, so it is re-checked
- * against now: a client looking at the chat with its javascript provably
- * running, or a marker already past the row, and it is not owed any more.
+/* A QUEUED BANNER CAN STOP BEING OWED BEFORE IT LEAVES (2026-10-03). The
+ * owner: "I had the phone app open, sent a text, and got a notification for
+ * the reply." The phone said hidden for a few seconds, the reply landed in that
+ * gap and was queued ("all say backgrounded", correctly), the phone came back
+ * to that very chat at 18:44:29.07 -- and the window fired at :30 and sent the
+ * banner anyway, because nothing between the queue and the POST asked again.
  *
- * The proof is the one notifyUnlessWatched uses: attached to this chat, says
- * visible, and a frame from it AFTER the banner was queued (a frozen page that
- * last said "visible" cannot produce one), and still present() now. */
+ * Two things take it back, and only two:
+ *   - an EXPLICIT visible frame from a page on this chat (cancelForVisible, at
+ *     the moment the frame is handled). Not "any frame": a page whose flag
+ *     still says visible from before it went to the background can send a pong
+ *     or an attach from resumed javascript, and that is not him on the chat.
+ *   - the marker already past the row, re-read here at the boundary.
+ * Neither MARKS anything read. Read state comes only from the app's sighting
+ * of a row that was actually on screen; "the chat is open" is not that. */
 function notOwed(q: Queued): string | null {
   const s = sessionById(q.sid);
   if (!s) return null;
   if (s.heardTs >= q.ts) return "read (the marker is already past it)";
-  for (const c of C().clients()) {
-    if (c.data.attached !== q.sid || !c.data.visible) continue;
-    if (c.data.lastFrame <= q.at || !present(c)) continue;
-    return `c${c.data.cid} is visible on this chat (frame ${secs(clk.now() - c.data.lastFrame)} ago, ` +
-      `after the banner was queued)`;
-  }
   return null;
 }
 
@@ -654,19 +654,21 @@ function sessionById(sid: string): Session | undefined {
 }
 
 /* Take a queued banner back before it leaves. It never reached a device, so
- * the flag goes back to what it was before this banner set it, and a chat
- * dropped because the owner is LOOKING at it is read, exactly as the proven-watching
- * path in notifyUnlessWatched marks it: no banner, and no count of 1 on a chat
- * open in front of the owner either. */
+ * the flag goes back to what it was before this banner set it. The row is NOT
+ * marked read: he is in the chat, which is not the same as having seen the row
+ * (he may be scrolled up). What is still unread goes back on the ceiling clock,
+ * exactly as a reply held by presence does, so a row he never scrolls to is
+ * still announced once he is not on the chat any more (sweepCeiling), and the
+ * app's sighting settles it the moment it is on screen (markRead clears it). */
 function dropQueued(key: string, q: Queued, why: string): void {
   queuedNew.delete(key);
   console.log(`[notify] dropped ${key} unread=${q.unread} why=${why} ` +
-    `(queued ${secs(clk.now() - q.at)} ago, never sent)`);
+    `(queued ${secs(clk.now() - q.at)} ago, never sent; read state untouched)`);
   const s = sessionById(q.sid);
   if (!s) return;
   s.notified = q.standing;
   scheduleHeardSave(s.id);
-  if (markRead(s, q.ts)) C().broadcastSessions();
+  if (unreadOf(s)) startSilence(s, q.at);
 }
 
 /* A VISIBLE FRAME ON A CHAT CANCELS ITS PENDING BANNER, at once rather than at
@@ -826,9 +828,10 @@ export function queueNotify(key: string, q: Queued) {
  * the other 111 silent because he genuinely read them, and costs 18 extra
  * banners in 32 hours of which one was arguably unwanted.
  *
- * It can never buzz for a message he is looking at, and that is structural, not
- * lucky: a chat he provably watches is markRead'd by notifyUnlessWatched, and a
- * chat with no unread is not a chat this sweep can fire for. */
+ * It never buzzes for a chat he is in: the sweep skips any chat a live page is
+ * visibly on (sweepCeiling), and a row he has seen is read, which settles the
+ * clock. (It used to rely on notifyUnlessWatched marking the chat read, which
+ * was scroll-blind; read now comes only from the app's on-screen sighting.) */
 /* Read per call, for the reason batchMs() is: the value never changes in a
  * running engine, so production is unchanged, and a seam test on the manual
  * clock can prove the real ten minutes instead of a four second stand-in. */
@@ -865,6 +868,14 @@ export function sweepCeiling() {
      * A banner already stands: the device is showing this chat, and a second
      * one for it would be the stacked second banner the one-banner-per-chat rule forbids. */
     if (s.notified) { waiting += 1; continue; }
+    /* HE IS IN THE CHAT, so not now -- skipped, not settled, for the reason
+     * above. A page visibly on this chat with its javascript running holds the
+     * ceiling: the suppress and drop paths above put an unseen reply on this
+     * clock without marking it read, and a backstop that buzzes him about the
+     * chat in his hand is the noise this whole module avoids. present() keeps a
+     * frozen page from holding it forever. Once he leaves the chat, the next
+     * sweep past the ceiling announces it. */
+    if (watchClaimants(s.id).some(present)) { waiting += 1; continue; }
     /* AND NO GUARD HERE FOR A CHAT HE FILED, because this sweep cannot reach
      * one. It only ever looks at a session with a clock running, the clock is
      * only ever armed by a message being held back (startSilence, and it has one

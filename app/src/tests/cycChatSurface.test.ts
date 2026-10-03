@@ -427,3 +427,49 @@ describe('pinned to the bottom across late growth', () => {
     expect(g.top()).toBe(4350);
   });
 });
+describe('what has been on screen (the one read rule)', () => {
+  // A viewport 800 px tall at the top of the page; rows placed by their top.
+  function rowsAt(cs: ReturnType<typeof mk>['cs'], tops: Record<string, number>) {
+    const scroll = cs.messageListScroll;
+    Object.defineProperty(scroll, 'clientHeight', {get: () => 800, configurable: true});
+    scroll.getBoundingClientRect = () => ({top: 0}) as DOMRect;
+    cs.messageListInner.dataset.cycChat = 's1';
+    for (const [mid, top] of Object.entries(tops)) {
+      const row = mkEl('cyc-message');
+      row.dataset.mid = mid;
+      row.getBoundingClientRect = () => ({top}) as DOMRect;
+      cs.messageListInner.append(row);
+    }
+  }
+  test('the newest row whose top has come into view, not the reply below the fold', () => {
+    const {cs} = mk();
+    rowsAt(cs, {a: 100, b: 500, c: 795, d: 1400});
+    expect(cs.newestOnScreen('s1')).toBe('b'); // c peeks 5 px: not seen yet
+  });
+  test('another chat painted, or the page hidden: nothing is on screen', () => {
+    const {cs} = mk();
+    rowsAt(cs, {a: 100});
+    expect(cs.newestOnScreen('s2')).toBeUndefined();
+    Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'hidden'});
+    try {
+      expect(cs.newestOnScreen('s1')).toBeUndefined();
+    } finally {
+      Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'visible'});
+    }
+  });
+  test('a scroll is a read path: one sighting of the open chat once it pauses', () => {
+    vi.useFakeTimers();
+    try {
+      const {cs, deps} = mk();
+      sessionState.activeId = 's1';
+      cs.messageListScroll.dispatchEvent(new Event('scroll'));
+      cs.messageListScroll.dispatchEvent(new Event('scroll'));
+      expect(deps.reportViewedThrough).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(200);
+      expect(deps.reportViewedThrough).toHaveBeenCalledTimes(1);
+      expect(deps.reportViewedThrough).toHaveBeenCalledWith('s1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

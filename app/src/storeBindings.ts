@@ -280,9 +280,9 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
   );
 
   let lastActiveMsgCount = -1;
-  // The open chat that got new rows while the page was hidden (and so was not
-  // sighted), or null. Settled on the next return to visible.
-  let unsightedWhileHidden: string | null = null;
+  // The cids of the rows last shown in the open chat: an own send's pending
+  // bubble carries its cid, and so does the engine's echo that replaces it.
+  let lastShownCids = new Set<string>();
 
   // The newest message time already on screen: only rows past it are "new
   // below". A window load or backfill adds rows too, all of them older, and
@@ -428,8 +428,12 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       const prevScrollH = lastActiveScrollH;
       const wasNearBottom = cs.nearBottom();
       const prevNewestTs = lastNewestTs;
-      const {newestTs, arrived: newer} = rowsArrived(s ? s.messages : [], prevNewestTs);
       const sameSession = !!s && s.id === prevSessionId;
+      const {
+        newestTs,
+        arrived: newer,
+        cids
+      } = rowsArrived(s ? s.messages : [], prevNewestTs, sameSession ? lastShownCids : new Set());
       // THE ONE "A REPLY ARRIVED IN THE OPEN CHAT" FACT, read by the new-below
       // badge and the read sighting alike: rows newer than the newest already
       // shown, in the same chat (rowsArrived says why not a count that grew).
@@ -437,6 +441,11 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       // graceOpen/openOwned are store state, not layout; read them now so the
       // unread bookkeeping matches the branch the rAF will take.
       const ownedLike = owned || cs.graceOpen();
+      // A new row in the open chat is sighted, but only once the frame below has
+      // laid it out and followed it: the sighting asks what is ON SCREEN, and
+      // before the follow the reply sits under the fold.
+      const sightArrival =
+        !!s && arrived > 0 && dataState.mode === 'live' && !cs.openOwned() && !cs.landingOwed();
 
       hub.render(true);
 
@@ -446,6 +455,7 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       lastNewestTs = s && s.id === prevSessionId ? Math.max(prevNewestTs, newestTs) : newestTs;
       lastActiveEvCount = evCount;
       lastActiveSessionId = s ? s.id : null;
+      lastShownCids = cids;
 
       requestAnimationFrame(() => {
         const scrollEl = cs.messageListScroll;
@@ -487,23 +497,18 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
         if (s && dataState.mode === 'live' && cs.landingOwed()) cs.settleNow(s.id);
         lastActiveScrollH = s ? scrollEl.scrollHeight : -1;
         cs.recomputeNearBottom();
+        // Hidden, a browser holds this frame until the page comes back, so a
+        // reply that landed while hidden is sighted here once it is in view (and
+        // the return to visible below sights it too).
+        if (s && sightArrival && !document.hidden) deps.reportViewedThrough(s.id);
       });
 
-      // The unread counter and the read report are store facts, not layout:
-      // they stay synchronous so a burst of pushes accumulates them exactly.
-      // New rows raise "new below" when the chat is owned, or when the reader
-      // is not pinned to the bottom (a pinned reader is scrolled down instead,
-      // in the rAF, and owes no badge).
+      // The unread counter is a store fact, not layout: it stays synchronous so
+      // a burst of pushes accumulates it exactly. New rows raise "new below"
+      // when the chat is owned, or when the reader is not pinned to the bottom
+      // (a pinned reader is scrolled down instead, in the rAF, and owes no badge).
       if (arrived > 0 && (ownedLike || !wasNearBottom)) {
         cs.setNewBelow(cs.newBelowCount() + arrived);
-      }
-
-      if (s && arrived > 0 && dataState.mode === 'live' && !cs.openOwned() && !cs.landingOwed()) {
-        // A hidden page that is still running gets the rows but must not sight
-        // them: nobody is looking. Remember the chat, and the return to visible
-        // sights it if the reader is at the bottom (onVisibility below).
-        if (document.visibilityState === 'visible') deps.reportViewedThrough(s.id);
-        else unsightedWhileHidden = s.id;
       }
     })
   );
@@ -598,18 +603,15 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       return;
     }
     const id = sessionState.activeId;
-    /* BACK ON THE OPEN CHAT, AT THE BOTTOM: what arrived while hidden is on
-     * screen now, so it is read, through the same sighting as a live arrival.
-     * One frame later, so the follow and the near-bottom measure the hidden page
-     * queued (rAF does not run while hidden) have settled first. A reader
-     * scrolled up keeps the new-below badge instead. */
-    const owed = unsightedWhileHidden;
-    unsightedWhileHidden = null;
-    if (owed && owed === id) {
+    /* BACK ON THE OPEN CHAT: whatever of it is on screen now is seen, under the
+     * one rule (a reader scrolled up sights only what is in view; the rows
+     * below keep the new-below badge). One frame later, so the follow the
+     * hidden page queued (rAF does not run while hidden) has placed first. */
+    if (id && dataState.mode === 'live') {
       requestAnimationFrame(() => {
-        if (document.hidden || sessionState.activeId !== owed || dataState.mode !== 'live') return;
-        if (cs.openOwned() || cs.landingOwed() || !cs.nearBottom()) return;
-        deps.reportViewedThrough(owed);
+        if (document.hidden || sessionState.activeId !== id || dataState.mode !== 'live') return;
+        if (cs.openOwned() || cs.landingOwed()) return;
+        deps.reportViewedThrough(id);
       });
     }
     if (
@@ -644,16 +646,26 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
  * a reply slides the oldest row out and the count stays put. Gating on the count
  * left a reply on screen unread until the owner left the chat, and raised no
  * new-below badge (2026-10-03: rows=300 before and after the reply). No baseline
- * yet (prevNewestTs 0, a fresh open): nothing counts as new. */
+ * yet (prevNewestTs 0, a fresh open): nothing counts as new.
+ *
+ * AND NOT AN ECHO. An own send shows at once as a pending bubble stamped with
+ * the device's clock; the engine's echo replaces it under the engine's later
+ * instant, so by ts alone the same message arrived twice (a second badge, a
+ * second read report). Both carry the send's cid: a row whose cid was already
+ * shown is the same message settling, not a new one. `cids` is what is shown
+ * now, for the next call. */
 export function rowsArrived(
-  messages: readonly {ts: number}[],
-  prevNewestTs: number
-): {newestTs: number; arrived: number} {
+  messages: readonly {ts: number; cid?: string}[],
+  prevNewestTs: number,
+  prevCids: ReadonlySet<string> = new Set()
+): {newestTs: number; arrived: number; cids: Set<string>} {
   let newestTs = 0;
   let arrived = 0;
+  const cids = new Set<string>();
   for (const m of messages) {
     if (m.ts > newestTs) newestTs = m.ts;
-    if (prevNewestTs > 0 && m.ts > prevNewestTs) arrived++;
+    if (m.cid) cids.add(m.cid);
+    if (prevNewestTs > 0 && m.ts > prevNewestTs && !(m.cid && prevCids.has(m.cid))) arrived++;
   }
-  return {newestTs, arrived};
+  return {newestTs, arrived, cids};
 }

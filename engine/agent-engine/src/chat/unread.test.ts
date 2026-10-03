@@ -410,7 +410,7 @@ test("marking it unread never notifies, not even when his screen goes off", asyn
   const page = core.client({ attach: wireId(PANE), visible: true });
   await holdOpen(page);
   await say("the reply he read on his phone");
-  await proves(page); // he is looking at it: suppressed, and marked read
+  await proves(page); // he is in the chat: suppressed (read comes from openAndLeave)
   openAndLeave(page);
   expect(row().unread).toBe(0);
   const before = sink().hits.length;
@@ -474,7 +474,10 @@ test("a reply landing after the mark is announced, with an app connected", async
   expect(saidSomething("[notify] present")).toBe(true);
   expect(session().silentSince).toBeDefined();
 
-  await core.clock.advance(ceilingMs() + ceilingTickMs());
+  /* Plus a window: the sweep's tick phase is wherever its interval was armed
+   * (the suppressed first reply arms it too, now that it is not marked read),
+   * and the announcement leaves on the next wall boundary after the sweep. */
+  await core.clock.advance(ceilingMs() + ceilingTickMs() + batchMs());
   await until(() => sink().hits.length > before, { what: "the ceiling to announce it" });
   expect(sink().hits.at(-1)!.unread).toBe(2);
 });

@@ -184,7 +184,7 @@ async function openSealed(hit: { sessionId: string; enc?: string }) {
 
 /* --------------------------------------------------------- watched or not -- */
 
-test("a page that is really watching gets no notification, and the row goes read", async () => {
+test("a page that is really watching gets no notification, and the row stays unread until it is seen", async () => {
   const c = core.client({ attach: wireId(PANE), visible: true });
   await say("still here");
 
@@ -199,9 +199,12 @@ test("a page that is really watching gets no notification, and the row goes read
   expect(decision()).toContain("is watching");
   await quietWindow();
   expect(hits()).toHaveLength(0);
-  /* AND THE MARKER MOVED. Without this the suppressed notification and the row
-   * disagree: no banner, but a count of 1 on a chat open in front of you. */
-  expect(unreadOf(session())).toBe(0);
+  /* AND THE MARKER DID NOT MOVE (owner, 2026-10-03): a page open on the chat is
+   * not the reply having been on screen -- he can be scrolled up. The app's
+   * sighting of the on-screen row is what reads it. It goes on the ceiling
+   * clock instead, which the open page holds (next test). */
+  expect(unreadOf(session())).toBe(1);
+  expect(session().silentSince).toBeDefined();
 });
 
 test("a page that freezes still gets the notification, late rather than never", async () => {
@@ -621,18 +624,49 @@ test("a message held back by presence is announced once it passes the ceiling", 
   expect(line).toContain("silent=");
 });
 
-test("the ceiling never fires for a chat he is looking at", async () => {
+/** A live page's heartbeat for `ms` of logical time: one visible beat every
+ *  ten seconds, as presenceBeat sends while the page is visible. */
+async function beatFor(c: FakeClient, ms: number): Promise<void> {
+  for (let left = ms; left > 0; left -= 10_000) {
+    await core.clock.advance(Math.min(10_000, left));
+    c.setVisible(true, core.clock.now());
+  }
+}
+
+test("the ceiling never fires for a chat he is in, and fires once he leaves it unseen", async () => {
   /* The half of this that must not break. A backstop that buzzes him about the
-   * message on his screen trades a silent miss for noise, and he would report
-   * that within the hour. It cannot happen by construction: a chat he provably
-   * watches is marked read, and a chat with no unread is not one the sweep can
-   * fire for. This is that construction, asserted. */
+   * chat in his hand trades a silent miss for noise, and he would report that
+   * within the hour. It used to hold by the watched reply being MARKED READ,
+   * which was scroll-blind; now the reply stays unread (it may be a screen
+   * below him) and a live page on the chat holds the sweep instead. */
   const c = core.client({ attach: wireId(PANE), visible: true });
-  await say("he is reading this one");
+  await say("he is in this chat, scrolled up");
   c.sock.data.lastFrame = core.clock.now() + 1;
   await core.clock.advance(200);
   expect(decision()).toContain("is watching");
 
+  await beatFor(c, ceilingMs() * 2);
+  await settle();
+  expect(saidSomething("[notify] ceiling")).toBe(false);
+  expect(hits()).toHaveLength(0);
+  expect(unreadOf(session())).toBe(1);
+
+  // he leaves for another chat without ever scrolling to it: now it is owed
+  c.attached("some-other-chat");
+  await core.clock.advance(ceilingTickMs() + batchMs());
+  await until(() => sink().batches.length > 0, { what: "the ceiling's window" });
+  expect(saidSomething("[notify] ceiling")).toBe(true);
+  expect(hits()).toHaveLength(1);
+});
+
+test("a row he saw settles the ceiling: no banner after he leaves", async () => {
+  const c = core.client({ attach: wireId(PANE), visible: true });
+  await say("seen at the bottom");
+  c.sock.data.lastFrame = core.clock.now() + 1;
+  await core.clock.advance(200);
+  const s = session();
+  markRead(s, s.chat[s.chat.length - 1].ts); // the app's on-screen sighting
+  c.attached("some-other-chat");
   await core.clock.advance(ceilingMs() * 2);
   await settle();
   expect(saidSomething("[notify] ceiling")).toBe(false);
@@ -851,15 +885,18 @@ test("a banner queued while the phone was hidden is not sent once the phone is b
   expect(session().notified).toBe(true);
 
   await core.clock.advance(5_000);
-  c.setVisible(true, core.clock.now()); // back on BZ Builder before the window
+  // back on BZ Builder before the window: the visible frame the app sends
+  await dispatchClientFrame(c.sock, { t: "visible", on: true, why: "visibilitychange" });
   await quietWindow();
 
   expect(bannerLeft()).toBe(false);
   expect(hits()).toHaveLength(0);
-  expect(said().find((l) => l.includes("[notify] dropped"))).toContain("is visible on this chat");
-  // it never reached a device, so nothing is standing, and the phone is looking at it
+  expect(said().find((l) => l.includes("[notify] dropped"))).toContain("said visible on this chat");
+  // it never reached a device, so nothing is standing; and the phone being on
+  // the chat is not the row being on screen, so it is still unread
   expect(session().notified).toBe(false);
-  expect(unreadOf(session())).toBe(0);
+  expect(unreadOf(session())).toBe(1);
+  expect(session().silentSince).toBeDefined();
   expect(sink().dismissals).toHaveLength(0);
 });
 
@@ -904,6 +941,22 @@ test("a page still claiming visible but silent since the banner was queued gets 
   const c = await phoneJustHidden();
   await say("while frozen");
   c.sock.data.visible = true; // a stale claim, with no frame behind it
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+  expect(saidSomething("[notify] dropped")).toBe(false);
+});
+
+test("any frame but a visible one does not take a banner back (a background page with a stale flag)", async () => {
+  /* The proof is an EXPLICIT visible frame for the chat. A page whose flag still
+   * says visible from before it went to the background can answer a ping or
+   * re-attach from resumed javascript; that is not him on the chat, and it used
+   * to count (the boundary re-check took "any frame after queueing"). */
+  const c = await phoneJustHidden();
+  await say("while the page is in the background");
+  c.sock.data.visible = true; // the stale flag
+  await core.clock.advance(1_000);
+  await dispatchClientFrame(c.sock, { t: "pong", n: 1 });
+  await dispatchClientFrame(c.sock, { t: "ping", n: 7 });
   await flushWindow();
   expect(hits()).toHaveLength(1);
   expect(saidSomething("[notify] dropped")).toBe(false);

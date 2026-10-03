@@ -594,6 +594,7 @@ function buildApp() {
     isLive: () => dataState.mode === 'live',
     activeId: () => sessionState.activeId,
     isChatViewOpen: () => mainColumns.dataset.view === 'chat',
+    onScreenThrough: (id) => cs.newestOnScreen(id),
     onHeardMarked: (sessionId, marker) => noteHeardMarked(sessionId, marker)
   });
 

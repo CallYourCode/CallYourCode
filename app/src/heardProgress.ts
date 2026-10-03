@@ -6,9 +6,18 @@ import type {ReadMarker} from './engine/store/readState';
  * second persisted clock (fix-unread; the old localStorage marker and the
  * max()-of-timestamps reconcile are gone). The engine broadcasts the marker
  * IDENTITY; readState.ts overlays this device's own pending sightings; this
- * module is where the surface reads that marker and where the four sighting
- * triggers (open, a new row while open, a clip played through, the explicit
- * paths) fire. */
+ * module is where the surface reads that marker and where the sighting
+ * triggers (open, a new row while open, a scroll, a return to the page, a clip
+ * played through, the explicit paths) fire.
+ *
+ * ONE RULE FOR EVERY ONE OF THEM (owner, 2026-10-03): a row is READ only when it
+ * has actually been on screen. "The chat is open and visible" is not read -- the
+ * reader can be a screen up while a reply lands below him, and the old sighting
+ * of the newest row in the window marked it read on every device while this one
+ * showed "1 new below". So every trigger asks the surface for the newest row
+ * that has come into the viewport (onScreenThrough) and sights that. A clip
+ * played through is the one sighting of a row that need not be in view: he heard
+ * it, which is the voice equivalent of seeing it. */
 
 type EngineFields = {msgId?: string; mid?: string; seq?: number};
 
@@ -23,6 +32,11 @@ interface HeardProgressDeps {
   isLive(): boolean;
   activeId(): string | null;
   isChatViewOpen(): boolean;
+  /* The surface's answer to "what has been on screen": the row id (data-mid) of
+   * the newest message row whose top has come into the chat viewport, or
+   * undefined when the viewport is not showing this chat (another chat painted,
+   * the page hidden, nothing laid out). */
+  onScreenThrough(sessionId: string): string | undefined;
   /* Playing a clip through advances where the divider sits in the OPEN chat, so
    * the surface pins the newly heard row. Given the row identity, never a ts. */
   onHeardMarked(sessionId: string, marker: ReadMarker): void;
@@ -39,10 +53,11 @@ export function createHeardProgress(deps: HeardProgressDeps) {
    * a client clock, so it cannot drift the way the old heardTs did. */
   const heardTsOf = (s: CycSession): number => readMarkerOf(s)?.ts ?? 0;
 
-  /* The newest MESSAGE this device has rendered, as a sighting: its durable
-   * identity plus instant. Undefined when the log holds no message.
+  /* The newest MESSAGE at or before the row `rowId` (the newest row on screen),
+   * as a sighting: its durable identity plus instant. Undefined when that row is
+   * not in this session's log, or nothing at or before it has an identity.
    *
-   * NOT simply the newest row. The rendered log interleaves messages with
+   * NOT simply the row on screen. The rendered log interleaves messages with
    * SESSION RECORDS (the faint activity rows: status, tool, prompt), and a
    * record carries no `mid` and is not in the engine's message log, so a
    * sighting that names one resolves to nothing and is ignored ("heard
@@ -51,12 +66,20 @@ export function createHeardProgress(deps: HeardProgressDeps) {
    * reply, so the newest row is routinely a record (live 2026-09-23: CC
    * Vision stuck at 1 unread, newest row `status: done`). The marker is a
    * position among MESSAGES (unreadOf counts only those), so sight the
-   * newest message and let the records ride along behind it. */
-  const newestSighting = (
-    s: CycSession & {messages: CycMessage[]}
+   * newest message at or before the on-screen row, records riding along. */
+  const sightingThrough = (
+    s: CycSession & {messages: CycMessage[]},
+    rowId: string
   ): {mid?: string; msgId?: string; ts: number} | undefined => {
     const rows = s.messages as (CycMessage & EngineFields)[];
+    let at = -1;
     for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].id === rowId) {
+        at = i;
+        break;
+      }
+    }
+    for (let i = at; i >= 0; i--) {
       const row = rows[i];
       if (!row.mid) continue; // a session record: no durable identity to sight
       return {mid: row.mid, msgId: row.msgId, ts: row.ts};
@@ -64,25 +87,30 @@ export function createHeardProgress(deps: HeardProgressDeps) {
     return undefined;
   };
 
-  /* A new row rendered while the chat is open, or the chat being closed: sight
-   * the newest row so the optimism holds without waiting for the round trip. */
-  function markSeen(id: string) {
+  /* THE ONE SIGHTING: whatever of this chat has been on screen, and nothing
+   * more. No liveness gate -- reportSighting queues a durable intent the drain
+   * delivers on reconnect, so a sighting made while the pipe is reconnecting
+   * still lands the moment the engine is reachable again. */
+  function sightOnScreen(id: string) {
     const s = deps.store.get(id);
     if (!s) return;
-    const sighting = newestSighting(s);
+    const through = deps.onScreenThrough(id);
+    if (!through) return;
+    const sighting = sightingThrough(s, through);
     if (sighting) deps.store.reportSighting(id, sighting);
   }
 
-  /* CHAT OPEN, visible: sight the newest fully-rendered row. No liveness gate --
-   * reportSighting queues a durable intent the drain delivers on reconnect, so
-   * an open that lands from cache while the pipe is reconnecting still marks the
-   * chat read the moment the engine is reachable again. */
+  /* The chat being left (back to the list, another chat, a send): sight what is
+   * on screen as it goes, under the same rule. */
+  function markSeen(id: string) {
+    sightOnScreen(id);
+  }
+
+  /* CHAT OPEN, visible: the open landing, a live arrival, a scroll, a return to
+   * the page. Only the open chat in the chat view. */
   function reportViewedThrough(id: string) {
     if (id !== deps.activeId() || !deps.isChatViewOpen()) return;
-    const s = deps.store.get(id);
-    if (!s) return;
-    const sighting = newestSighting(s);
-    if (sighting) deps.store.reportSighting(id, sighting);
+    sightOnScreen(id);
   }
 
   /* A clip played through to the end: sight its row, and pin it in the open

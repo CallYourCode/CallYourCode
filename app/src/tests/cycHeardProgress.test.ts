@@ -19,7 +19,11 @@ function msg(over: Omit<Partial<Msg>, 'id'> & {id?: number}): Msg {
 // SIGHTINGS and RENDERS the marker. The store is faked: `broadcast` stands in
 // for the engine's readThrough, `sightings` records what this device reported,
 // and effectiveMarkerOf overlays the newest sighting on the broadcast.
-function makeWorld(over: {messages?: Msg[]; broadcast?: ReadMarker} = {}) {
+// `onScreen` is the surface's answer to "what has been on screen" (the newest
+// row id that came into the viewport); by default the whole log is in view.
+function makeWorld(
+  over: {messages?: Msg[]; broadcast?: ReadMarker; onScreen?: string | null} = {}
+) {
   const session = {
     id: 's1',
     name: 's1',
@@ -44,6 +48,8 @@ function makeWorld(over: {messages?: Msg[]; broadcast?: ReadMarker} = {}) {
     isLive: () => true,
     activeId: () => 's1',
     isChatViewOpen: () => true,
+    onScreenThrough: () =>
+      over.onScreen === null ? undefined : (over.onScreen ?? session.messages.at(-1)?.id),
     onHeardMarked: (sid, marker) => heardMarked.push([sid, marker])
   });
   return {session, hp, sightings, heardMarked};
@@ -103,6 +109,40 @@ describe('markSeen', () => {
   });
 });
 
+describe('the one rule: read only what has been on screen (owner, 2026-10-03)', () => {
+  const log = () => [
+    msg({id: 1, ts: 100, mid: 'mr-1'}),
+    msg({id: 2, ts: 200, mid: 'mr-2'}),
+    msg({id: 3, ts: 300, mid: 'mr-3'})
+  ];
+  test('a reader scrolled up sights only the rows in view, not the reply below', () => {
+    // The verifier's B1: the arrival raised "1 new below" AND marked the chat
+    // read on every device, because the sighting named the newest row.
+    const {hp, sightings} = makeWorld({messages: log(), onScreen: '2'});
+    hp.reportViewedThrough('s1');
+    expect(sightings).toEqual([{mid: 'mr-2', msgId: undefined, ts: 200}]);
+  });
+  test('leaving the chat sights what is on screen as it goes, no further', () => {
+    const {hp, sightings} = makeWorld({messages: log(), onScreen: '1'});
+    hp.markSeen('s1');
+    expect(sightings).toEqual([{mid: 'mr-1', msgId: undefined, ts: 100}]);
+  });
+  test('nothing on screen (another chat painted, the page hidden): nothing is read', () => {
+    const {hp, sightings} = makeWorld({messages: log(), onScreen: null});
+    hp.reportViewedThrough('s1');
+    hp.markSeen('s1');
+    expect(sightings).toEqual([]);
+  });
+  test('a pending own bubble on screen sights the newest message with an identity above it', () => {
+    const {hp, sightings} = makeWorld({
+      messages: [...log(), msg({id: 4, ts: 400, mid: undefined, role: 'user'})],
+      onScreen: '4'
+    });
+    hp.reportViewedThrough('s1');
+    expect(sightings).toEqual([{mid: 'mr-3', msgId: undefined, ts: 300}]);
+  });
+});
+
 describe('markHeard', () => {
   test('sights the played row and pins it in the open chat', () => {
     const {hp, sightings, heardMarked} = makeWorld({
@@ -147,6 +187,7 @@ describe('reportViewedThrough', () => {
       isLive: () => true,
       activeId: () => 'other',
       isChatViewOpen: () => true,
+      onScreenThrough: () => '1',
       onHeardMarked: () => {}
     });
     hp.reportViewedThrough('s1');
@@ -164,6 +205,7 @@ describe('reportViewedThrough', () => {
       isLive: () => false,
       activeId: () => 's1',
       isChatViewOpen: () => true,
+      onScreenThrough: () => '1',
       onHeardMarked: () => {}
     });
     hp.reportViewedThrough('s1');

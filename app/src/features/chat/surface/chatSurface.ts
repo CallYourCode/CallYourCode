@@ -609,6 +609,44 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     return null;
   };
 
+  /* WHAT HAS BEEN ON SCREEN, the one answer every read path asks (owner,
+   * 2026-10-03: a row is read only when it has actually been on screen; the
+   * chat being open and visible is not that). The newest message row whose top
+   * has come SEEN_PX into the viewport, as its row id; rows above it were
+   * scrolled past to get here. Undefined when the viewport is not showing this
+   * chat: another chat painted, the page hidden, or the box not laid out (the
+   * list view on a phone). Found by SCREEN rect, for the reason holdAcrossPaint
+   * gives above. */
+  const SEEN_PX = 16;
+  const newestOnScreen = (id: string): string | undefined => {
+    if (messageListInner.dataset.cycChat !== id) return undefined;
+    if (document.visibilityState !== 'visible') return undefined;
+    const clientH = messageListScroll.clientHeight;
+    if (clientH <= 0) return undefined;
+    const fold = messageListScroll.getBoundingClientRect().top + clientH - SEEN_PX;
+    const rows = messageListScroll.querySelectorAll<HTMLElement>('.cyc-message[data-mid]');
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].getBoundingClientRect().top < fold) return rows[i].dataset.mid;
+    }
+    return undefined;
+  };
+
+  /* A SCROLL brings rows on screen, so it is a read path like any other: the
+   * reader scrolling down to a reply sights it, and so does the machine's own
+   * follow to the end. Coalesced to one sighting per pause; never while the
+   * open landing still owns the chat (it reports when it places). */
+  const SCROLL_SIGHT_MS = 150;
+  let scrollSightTimer: ReturnType<typeof setTimeout> | undefined;
+  const sightAfterScroll = () => {
+    clearTimeout(scrollSightTimer);
+    scrollSightTimer = setTimeout(() => {
+      const id = sessionState.activeId;
+      if (!id || dataState.mode !== 'live' || openOwned() || openLanding) return;
+      deps.reportViewedThrough(id);
+    }, SCROLL_SIGHT_MS);
+  };
+  deps.onTeardown(() => clearTimeout(scrollSightTimer));
+
   let bracketMoves = 0;
   const bracketMessageRender = (id: string, paint: () => void) => {
     const keep = messageListInner.dataset.cycChat === id && messageListInner.childElementCount > 0;
@@ -919,6 +957,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       readerTrackClientH = clientH;
       listHeightSeen = height;
       boxHeightSeen = clientH;
+      sightAfterScroll();
     },
     {passive: true}
   );
@@ -1406,6 +1445,8 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     // property storeBindings had locally.
     nearBottom: scrollOwner.nearBottom,
     recomputeNearBottom: scrollOwner.recomputeNearBottom,
+    // The one "what has been on screen" answer every read path sights through.
+    newestOnScreen,
     bracketMessageRender,
     scrollToBottom,
     releaseBottomPin,
