@@ -57,9 +57,12 @@ import {
 import {
   attachFrontier,
   demand as replDemand,
+  heldAxis,
   replicatorFor,
   running as replBackfilling,
   seedCursor,
+  setAxisResync,
+  settleAxis,
   stopAllReplicators,
   verifyShown as replVerifyShown
 } from './store/rows/repl';
@@ -665,6 +668,15 @@ export function attach(sessionId: string) {
     // attach epoch. The openSeq guard stays on the wire-facing replay below,
     // where a stale network replay must not paint over a newer open.
     if (attachedId !== sessionId) return;
+    // Rows of a re-sequenced log are on an axis that no longer exists: drop
+    // them BEFORE the first paint, so the open shows the loading state and the
+    // engine's tail rather than a dead window it then swaps out under the
+    // reader (fix-log-epoch). The epoch to compare is the roster's, persisted,
+    // so this holds offline too; with none known the cached rows paint as ever.
+    if (s.axis) {
+      await settleAxis(sessionId, s.axis, 'open');
+      if (attachedId !== sessionId) return;
+    }
     // Open the chat onto the store: one indexed read of the newest window,
     // projected into s.messages/s.events. The network is not consulted here, so
     // this is offline-first by construction, cold or warm.
@@ -725,13 +737,23 @@ function askEngine(s: CycEngineSession, owner: Conn, openSeq: number) {
   s.awaitingChatStart = true;
   s.historyAskedAt = Date.now();
   const held = rowStore.highestHeldSeq(sessionId);
-  const frontier = attachFrontier(sessionId, held);
+  const frontier = attachFrontier(sessionId, held, s.axis);
+  // the epoch the held rows were served under: an engine on another one
+  // answers cold however plausible the frontier looks
+  const axis = heldAxis(sessionId);
   // The lowest page the open window shows: the engine fingerprints every shown
   // page it is not serving inline, so a hole or a stale copy there is found.
   const low = rowStore.shownLowSeq(sessionId);
   const verifyFrom = low >= 0 ? Math.floor(low / (s.pageSize ?? PAGE_SIZE)) : undefined;
-  cyclog('sync.frontier', {session: sessionId, held, frontier, verifyFrom: verifyFrom ?? -1});
-  owner.client.attach(s.paneId, frontier, verifyFrom);
+  cyclog('sync.frontier', {
+    session: sessionId,
+    held,
+    frontier,
+    verifyFrom: verifyFrom ?? -1,
+    ...(axis ? {axis} : {})
+  });
+  if (axis) owner.client.attach(s.paneId, frontier, verifyFrom, axis);
+  else owner.client.attach(s.paneId, frontier, verifyFrom);
   window.setTimeout(() => {
     if (openSeq !== attachSeq || attachedId !== sessionId) return;
     const st = sessions.get(sessionId);
@@ -1309,6 +1331,15 @@ const handlerCtx: HandlerCtx = {
 };
 for (const conn of conns) wireConnHandlers(conn, handlerCtx);
 wirePlugins({liveEngineKeys: () => new Set(tabs().map((t) => t.engineKey))});
+
+// The open chat's rows turned out to be on a re-sequenced log while on screen
+// (rows/repl.ts settleAxis): ask again, cold, so the attach-ok replaces them
+// with the new tail in one turn.
+setAxisResync((sessionId) => {
+  const s = attachedId === sessionId ? sessions.get(sessionId) : undefined;
+  const owner = s ? connOf(s.engineKey) : undefined;
+  if (s && owner && sync.engineReachable(s.engineKey)) askEngine(s, owner, attachSeq);
+});
 
 // The connected-edge order, after step 1 (sessions frame
 // applied, roster persisted) which fires this: (2) re-attach the active chat,

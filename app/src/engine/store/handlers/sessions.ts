@@ -11,6 +11,7 @@ import {
   type Conn
 } from '../registry';
 import {noteRosterSynced, persistRoster} from '../roster';
+import {settleAxis} from '../rows/repl';
 import {pruneNotifAvatars, syncNotifAvatars} from '@/features/media/notifAvatars';
 import * as sync from '../../sync';
 import type {HandlerCtx} from './types';
@@ -152,6 +153,15 @@ function applySessionRow(
         s.claudeSessionId !== es.claudeSessionId;
       const gained = s.claudeSessionId === null && es.claudeSessionId !== null;
       s.claudeSessionId = es.claudeSessionId;
+
+      /* THE CHAT LOG'S AXIS EPOCH (fix-log-epoch). A new one means the engine
+       * re-sequenced this log (an absorb, a trim): rows this device holds under
+       * the old one are dropped now, in the background, so opening the chat
+       * never paints a dead axis and then swaps it out under the reader. */
+      if (es.axis && es.axis !== s.axis) {
+        s.axis = es.axis;
+        void settleAxis(s.id, es.axis, 'roster');
+      }
 
       /* A rotation or a newly minted session id changes nothing the app holds:
        * the records of the new transcript land on the same log, on the same

@@ -20,7 +20,7 @@ import {
   type AttachOkLite,
   type Replicator
 } from './replicator';
-import {cursorSeq, resetCoverage, type CursorState} from './cursor';
+import {cursorSeq, resetCoverage, resetCursor, type CursorState} from './cursor';
 import type {StoreRow} from './core';
 import type {EnginePage, EnginePagePrints} from '../../contract';
 import type {CycSessionEvent} from '../../../types';
@@ -69,7 +69,8 @@ function persist(sessionId: string, st: CursorState): void {
     pageSize: st.pageSize,
     total: prev?.total ?? 0,
     syncedAt: Date.now(),
-    ...(st.holes.size ? {holes: [...st.holes]} : {})
+    ...(st.holes.size ? {holes: [...st.holes]} : {}),
+    ...(prev?.axis ? {axis: prev.axis} : {})
   });
 }
 
@@ -82,12 +83,22 @@ export function replicatorFor(sessionId: string, engineKey: string, paneId: stri
         const owner = connOf(engineKey);
         return owner ? owner.client.fetchPage(paneId, page) : Promise.resolve(null);
       },
-      upsert: (rows, pg) =>
-        pg.sealed && wantOf(sessionId).has(pg.page)
+      upsert: (rows, pg) => {
+        // A fetched page names the axis it was cut from: one of another epoch
+        // is never filed among this session's rows by seq (fix-log-epoch).
+        const held = rowStore.metaSnapshot(sessionId)?.axis;
+        if (pg.axis && held && pg.axis !== held) {
+          void settleAxis(sessionId, pg.axis, 'page');
+          return Promise.reject(
+            new Error(`page ${pg.page} is on axis ${pg.axis}, rows held on ${held}`)
+          );
+        }
+        return pg.sealed && wantOf(sessionId).has(pg.page)
           ? replaceShownPage(sessionId, pg, rows)
           : rowStore
               .upsert(sessionId, rows, 'replicator')
-              .then((res) => ({loSeq: res.loSeq, hiSeq: res.hiSeq})),
+              .then((res) => ({loSeq: res.loSeq, hiSeq: res.hiSeq}));
+      },
       pageCommitted: (page, pg, wasHole) => onPageCommitted(sessionId, page, pg, wasHole),
       persistCursor: (st) => persist(sessionId, st),
       reachable: () => sync.engineReachable(engineKey),
@@ -203,7 +214,10 @@ async function runAttachOk(
 ): Promise<void> {
   attachRuns++;
   const r = replicatorFor(sessionId, engineKey, paneId);
-  await resetIfStaleAxis(sessionId, r, a);
+  // An engine that names no epoch gets the heuristics alone; one that does is
+  // settled in turn with any roster-driven drop of the same session.
+  if (a.axis) await withAxisLock(sessionId, () => settleAttachAxis(sessionId, r, a));
+  else await resetIfStaleAxis(sessionId, r, a);
   await r.attachOk(a);
   // Snap the open window onto the tail the delta just delivered BEFORE the
   // background backfill runs, so every older page the replicator pulls falls
@@ -220,6 +234,192 @@ async function runAttachOk(
   r.start();
 }
 
+// ---- The chat log's axis epoch (fix-log-epoch) ----
+//
+// A session's seq axis is not forever: the engine re-sequences a log when it
+// folds a provisional agent into the agent it turned out to be (carry.ts
+// absorb) or trims it, and writes it as a new chat file under the same session
+// id. Hunter, 2026-10-03: one absorbed status line renumbered all 2494 rows
+// (old axis 0..2645, new 0..2493). The phone held the old axis; nothing on the
+// wire said so. It painted the 9-day-old cached window, stated frontier 2600,
+// and was healed only because the new tail (2579) still sat below 2600 (the
+// held-tail heuristic below). A few hours of growth later the same frontier
+// would have read as plausible: a delta filed onto a dead axis.
+//
+// The engine now names every log's axis with an epoch (its chat file id),
+// minted in the same step as any re-sequence, and states it on the roster row,
+// the attach-ok and every fetched page. The device stamps the epoch its rows
+// were served under in the session meta. A different epoch is PROOF that every
+// seq, the cursor, the holes and the fingerprints this device holds for the
+// session describe pages that no longer exist: the rows are dropped and the
+// session syncs afresh, never merged with the new axis by seq. The heuristics
+// below stay for what the epoch cannot speak to: an engine older than it, and
+// rows stored before this device ever saw one (checked once, then stamped).
+
+// Called by the store when the open chat's stamped rows turn out to belong to
+// a dead axis while they are on screen: it re-attaches, and the attach-ok (cold,
+// it carries the new tail) replaces them in one turn (settleAttachAxis).
+let axisResync: (sessionId: string) => void = () => {};
+export function setAxisResync(fn: (sessionId: string) => void): void {
+  axisResync = fn;
+}
+
+// One axis decision at a time per session: a roster-driven drop must not
+// interleave with an attach-ok's purge and admit for the same session.
+const axisLocks = new Map<string, Promise<unknown>>();
+function withAxisLock<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
+  const prev = axisLocks.get(sessionId) ?? Promise.resolve();
+  const next = prev.then(run, run);
+  axisLocks.set(
+    sessionId,
+    next.catch(() => {})
+  );
+  return next;
+}
+
+function stampAxis(sessionId: string, axis: string): void {
+  const prev = rowStore.metaSnapshot(sessionId);
+  if (prev?.axis === axis) return;
+  const r = repls.get(sessionId);
+  rowStore.writeMeta({
+    sessionId,
+    cursor: r ? cursorSeq(r.cursor) : (prev?.cursor ?? -1),
+    tailVersion: r ? r.cursor.tailVersion : (prev?.tailVersion ?? 0),
+    tailPage: r ? r.cursor.tailPage : (prev?.tailPage ?? -1),
+    coveredFrom: r
+      ? Number.isFinite(r.cursor.coveredFrom)
+        ? r.cursor.coveredFrom
+        : -1
+      : (prev?.coveredFrom ?? -1),
+    pageSize: r ? r.cursor.pageSize : (prev?.pageSize ?? 100),
+    total: prev?.total ?? 0,
+    syncedAt: prev?.syncedAt ?? 0,
+    ...(r && r.cursor.holes.size ? {holes: [...r.cursor.holes]} : {}),
+    axis
+  });
+}
+
+// Everything this device derived from the old axis, besides the rows: the
+// fingerprint bookkeeping and the pages asked for out of order, and (`whole`,
+// when no served tail re-seeds them) the replicator's coverage and holes and
+// the projection signature of what was on screen.
+function forgetAxisState(sessionId: string, whole: boolean): void {
+  const r = repls.get(sessionId);
+  if (r) r.cursor.demand.length = 0;
+  if (r && whole) resetCursor(r.cursor);
+  if (whole) forgetProjection(sessionId);
+  wanted.delete(sessionId);
+  unreconciled.delete(sessionId);
+  verified.delete(sessionId);
+}
+
+// The engine stated `axis` for this session (its roster row, a fetched page, or
+// the open path's persisted roster). Rows stamped with another epoch are dropped
+// here, before anything paints them, unless the session is on screen right now:
+// then the dead rows stay until a tail replaces them (an empty chat is worse
+// than one about to be swapped), and the store re-attaches for that tail.
+// Unstamped rows are left to the attach-ok, which checks them once and stamps
+// them. Resolves true when it dropped rows.
+export function settleAxis(
+  sessionId: string,
+  axis: string | undefined,
+  why: 'roster' | 'page' | 'open'
+): Promise<boolean> {
+  if (!axis) return Promise.resolve(false);
+  return withAxisLock(sessionId, async () => {
+    const meta = await rowStore.readMeta(sessionId);
+    const held = meta?.axis;
+    if (!held || held === axis) return false;
+    if (why !== 'open' && rowStore.isOpen(sessionId)) {
+      cyclog('rowstore.axis-epoch.resync', {
+        session: sessionId,
+        held,
+        axis,
+        why: 'the open chat shows rows of a re-sequenced log; re-attach for the new tail'
+      });
+      axisResync(sessionId);
+      return false;
+    }
+    const heldTail = rowStore.highestHeldSeq(sessionId);
+    if (!(await rowStore.purge(sessionId))) {
+      cyclog('rowstore.axis-epoch.purge-aborted', {
+        session: sessionId,
+        held,
+        axis,
+        why: 'the purge transaction aborted; the next roster, open or attach retries'
+      });
+      return false;
+    }
+    forgetAxisState(sessionId, true);
+    stampAxis(sessionId, axis);
+    cyclog('rowstore.axis-epoch', {
+      session: sessionId,
+      held,
+      axis,
+      heldTail,
+      trigger: why,
+      why: 'the engine re-sequenced this chat log since these rows were served; dropped them before they paint'
+    });
+    return true;
+  });
+}
+
+// The attach-ok's half. With an epoch on the answer:
+//   - the same epoch as the stamp: the rows are on this axis, nothing to guess;
+//   - another epoch: replace the rows with the served tail in one turn (the
+//     engine served cold, since the attach named the stamp), forget the old
+//     cursor and fingerprints, stamp the new epoch;
+//   - no stamp yet (rows stored before this device met an epoch, or none): the
+//     stale-axis heuristics check them this once, then the epoch is stamped.
+// With none (an older engine) runAttachOk runs the heuristics alone.
+async function settleAttachAxis(sessionId: string, r: Replicator, a: AttachOkLite): Promise<void> {
+  if (!a.axis) return;
+  const meta = await rowStore.readMeta(sessionId);
+  const held = meta?.axis;
+  if (held === a.axis) return;
+  if (!held) {
+    if ((await resetIfStaleAxis(sessionId, r, a)) !== 'kept') stampAxis(sessionId, a.axis);
+    return;
+  }
+  const served = servedRows(sessionId, a);
+  if (!served.length && tailVersionOf(a) > 0) {
+    // the engine did not serve cold (this attach named no epoch): keep the rows
+    // on screen; the next attach states the stamp and gets the tail
+    cyclog('rowstore.axis-epoch.kept', {
+      session: sessionId,
+      held,
+      axis: a.axis,
+      why: 'a re-sequenced log, but this attach-ok carries no tail to replace the rows with'
+    });
+    return;
+  }
+  const heldTail = rowStore.highestHeldSeq(sessionId);
+  if (!(await replaceWithServedTail(sessionId, r, a, served))) {
+    cyclog('rowstore.axis-epoch.purge-aborted', {
+      session: sessionId,
+      held,
+      axis: a.axis,
+      why: 'the purge transaction aborted; the next attach retries'
+    });
+    return;
+  }
+  // the cursor was re-seeded at the served tail; the rest of the old axis goes
+  forgetAxisState(sessionId, false);
+  stampAxis(sessionId, a.axis);
+  cyclog('rowstore.axis-epoch', {
+    session: sessionId,
+    held,
+    axis: a.axis,
+    heldTail,
+    engineTailVersion: tailVersionOf(a),
+    trigger: 'attach',
+    why: 'the engine re-sequenced this chat log since these rows were served; replaced them with the served tail'
+  });
+}
+
+// THE FALLBACK HEURISTICS (no epoch to compare: an engine older than it, or
+// rows stored before this device met one).
+//
 // A device that ran the pre-rebuild build cached history rows the one-boot
 // migration imported verbatim, and those rows make the local axis stale in one
 // of three ways, each detected here at attach-ok:
@@ -270,11 +470,15 @@ async function runAttachOk(
 //      attachOk re-commits the same pages (idempotent by mid) and advances the
 //      cursor; the background backfill of OLDER pages is best-effort and never
 //      blanks the window, so a refetch that never completes cannot lose the tail.
-async function resetIfStaleAxis(sessionId: string, r: Replicator, a: AttachOkLite): Promise<void> {
+async function resetIfStaleAxis(
+  sessionId: string,
+  r: Replicator,
+  a: AttachOkLite
+): Promise<'sound' | 'healed' | 'kept'> {
   const version = tailVersionOf(a);
-  if (version <= 0) return;
+  if (version <= 0) return 'sound';
   const reason = staleReason(sessionId, version);
-  if (!reason) return;
+  if (!reason) return 'sound';
   const served = servedRows(sessionId, a);
   if (!served.length) {
     // Guard 1: a stale axis, but this attach served no tail to replace it with.
@@ -288,7 +492,7 @@ async function resetIfStaleAxis(sessionId: string, r: Replicator, a: AttachOkLit
       reason,
       why: 'stale axis detected but the attach-ok served no tail to replace it with; keep the existing rows visible and wait for an attach that carries the tail'
     });
-    return;
+    return 'kept';
   }
   cyclog('rowstore.stale-axis', {
     session: sessionId,
@@ -297,25 +501,36 @@ async function resetIfStaleAxis(sessionId: string, r: Replicator, a: AttachOkLit
     reason,
     why: 'cached rows do not match the engine axis; drop the stale axis and re-sync at the served tail'
   });
+  if (await replaceWithServedTail(sessionId, r, a, served)) return 'healed';
+  // Guard 3: the purge transaction ABORTED (an iOS page-freeze rolled back the
+  // deletes), so the stale axis is still durable AND still warm. Treat the
+  // session as NOT healed: leave the existing rows on screen, do NOT reset the
+  // cursor coverage, and let the detector re-fire on the next attach and redo
+  // the purge once a transaction commits. The heal is idempotent, so a redo is
+  // safe; claiming coverage here would tell the replicator the axis is sound
+  // when the poison never left.
+  cyclog('rowstore.stale-axis.purge-aborted', {
+    session: sessionId,
+    heldTail: rowStore.highestHeldSeq(sessionId),
+    engineTailVersion: version,
+    reason,
+    why: 'the purge transaction aborted (a frozen page rolled back the deletes); keep the rows and let the next attach redo the heal'
+  });
+  return 'kept';
+}
+
+// Drop this session's rows and put the attach-ok's served tail in their place,
+// in ONE turn, so the open chat goes from the old axis straight to the served
+// tail with no empty paint between (guard 2 above). False when the purge
+// transaction aborted: nothing changed, the caller keeps its state.
+async function replaceWithServedTail(
+  sessionId: string,
+  r: Replicator,
+  a: AttachOkLite,
+  served: StoreRow[]
+): Promise<boolean> {
   const wasOpen = rowStore.isOpen(sessionId);
-  const purged = await rowStore.purge(sessionId);
-  if (!purged) {
-    // Guard 3: the purge transaction ABORTED (an iOS page-freeze rolled back the
-    // deletes), so the stale axis is still durable AND still warm. Treat the
-    // session as NOT healed: leave the existing rows on screen, do NOT reset the
-    // cursor coverage, and let the detector re-fire on the next attach and redo
-    // the purge once a transaction commits. The heal is idempotent, so a redo is
-    // safe; claiming coverage here would tell the replicator the axis is sound
-    // when the poison never left.
-    cyclog('rowstore.stale-axis.purge-aborted', {
-      session: sessionId,
-      heldTail: rowStore.highestHeldSeq(sessionId),
-      engineTailVersion: version,
-      reason,
-      why: 'the purge transaction aborted (a frozen page rolled back the deletes); keep the rows and let the next attach redo the heal'
-    });
-    return;
-  }
+  if (!(await rowStore.purge(sessionId))) return false;
   // Re-open an empty window so the served tail admitted next lands in the loaded
   // window (floor 0) and projects immediately, instead of below an unset floor
   // where it would paint nothing.
@@ -330,8 +545,9 @@ async function resetIfStaleAxis(sessionId: string, r: Replicator, a: AttachOkLit
   // Guard 2: admit and project the served tail NOW, in the same turn as the
   // purge, so the open chat never passes through an empty paint on the way from
   // the stale axis to the real tail.
-  await rowStore.upsert(sessionId, served, 'heal');
-  resetCoverage(r.cursor, a.tailPage ?? -1, version);
+  if (served.length) await rowStore.upsert(sessionId, served, 'heal');
+  resetCoverage(r.cursor, a.tailPage ?? -1, tailVersionOf(a));
+  return true;
 }
 
 // The rows the engine served INLINE on this attach-ok (its newest pages), minted
@@ -378,9 +594,14 @@ function staleReason(sessionId: string, version: number): string | null {
 // is exactly C + 1 (replicator.ts noteLive). The frontier is min(held tail, C).
 // With no confirmed edge (no replicator, or one never fed an attach-ok) the
 // device attaches cold, so the engine re-serves its tail.
-export function attachFrontier(sessionId: string, heldTail: number): number {
+//
+// Rows stamped with an epoch the engine no longer serves (`axis`, the roster's)
+// prove nothing on the current axis: cold, whatever the cursor says.
+export function attachFrontier(sessionId: string, heldTail: number, axis?: string): number {
   const r = repls.get(sessionId);
   if (!r) return -1;
+  const held = rowStore.metaSnapshot(sessionId)?.axis;
+  if (axis && held && held !== axis) return -1;
   if (cursorSeq(r.cursor) > 0) return -1;
   const confirmed = r.cursor.tailVersion - 1;
   if (confirmed < 0) return -1;
@@ -729,4 +950,10 @@ export function __resetReplicatorsForTest(): void {
   verified.clear();
   printsInFlight.clear();
   wires.clear();
+  axisLocks.clear();
+}
+
+// The epoch this device's rows for the session are stamped with, if any.
+export function heldAxis(sessionId: string): string | undefined {
+  return rowStore.metaSnapshot(sessionId)?.axis;
 }

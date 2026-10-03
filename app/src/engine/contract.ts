@@ -92,6 +92,12 @@ export type EngineSession = {
   thinking?: boolean;
   claudeSessionId: string | null;
 
+  /** The chat log's axis epoch (engine sessions/session-state.ts axisOf): the
+   *  id the engine minted when it last created or re-sequenced this log. Rows
+   *  this device holds under another epoch are on a dead axis. Absent from an
+   *  engine older than the field, and while the agent has no log yet. */
+  axis?: string;
+
   contextPct?: number | null;
 
   /** How many subagents this chat's agent has running right now. Present only
@@ -266,6 +272,9 @@ export type EnginePage = {
   sealed: boolean;
   messages: EngineChatMessage[];
   events: EngineSessionEvent[];
+  /** The axis epoch this page was cut from (a fetched page; an attach-ok's
+   *  inline pages ride under the attach-ok's own). Absent from older engines. */
+  axis?: string;
 };
 
 export type EngineAttachOk = {
@@ -295,6 +304,10 @@ export type EngineAttachOk = {
   /* Fingerprints of the shown pages below the ones this answer carries,
    * present when the attach named a verifyFrom page. */
   fp?: EnginePagePrints;
+  /* The chat log's axis epoch the served pages and tail bookkeeping belong
+   * to. Absent from engines older than the field: the app then falls back to
+   * the stale-axis heuristics (store/rows/repl.ts). */
+  axis?: string;
 };
 
 // The engine's receipt for an utterance, sent before any delivery work.

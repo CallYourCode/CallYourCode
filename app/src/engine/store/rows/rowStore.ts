@@ -53,6 +53,10 @@ export type SessionMeta = {
   // The cursor's known holes (cursor.ts CursorState.holes), as page numbers.
   // Absent on a meta written before fix-sync-gap: no known holes.
   holes?: number[];
+  // The chat log's axis epoch these rows were served under (fix-log-epoch;
+  // repl.ts). Absent on a meta written before it, or by an engine that names
+  // none: the rows are then unstamped and the stale-axis heuristics decide.
+  axis?: string;
 };
 
 // The transaction runner over the single `rows` store, resolving the request
