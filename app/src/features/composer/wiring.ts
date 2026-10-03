@@ -457,8 +457,9 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
         chars: alongsideText.length,
         engineCan: canWords ? 'words' : 'none',
         why:
-          'this engine cannot put a voice note\'s words beside a quote or caption, so the ' +
-          'send waits for this device\'s decoder; the card shows it is waiting for its words'
+          'this engine cannot fill this note\'s words itself (no server words, or none ' +
+          'beside a quote or caption), so the send waits for this device\'s decoder; the ' +
+          'card shows it is waiting for its words'
       });
       card?.update({wordsWait: true});
       return (async () => {
