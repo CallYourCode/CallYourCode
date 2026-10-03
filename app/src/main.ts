@@ -72,7 +72,6 @@ import {toast} from './components/widgets';
 import * as engine from './engine/store';
 import './engine/contract';
 import {speaker} from './audio/speaker';
-import {warmClipPlayback} from './audio/webAudioClip';
 import './components/pluginCard';
 import './components/pluginPanel';
 import './engine/limitsAge';
@@ -710,8 +709,6 @@ function buildApp() {
   logSizeBeacon();
 
   requestPersistence();
-
-  warmClipPlayback();
 
   render();
 }
