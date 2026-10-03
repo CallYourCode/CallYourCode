@@ -35,11 +35,21 @@ import {
   type VoiceHandle
 } from './features/composer/components/messageComposer';
 import {sessionState} from './sessionState';
+import {lazy} from './shared/lazy';
 
 export function installTestHooks(): void {
   if (!new URLSearchParams(location.search).get('testhooks')) return;
 
   (window as never as {__cycClipVault: typeof clipVault}).__cycClipVault = clipVault;
+
+  // A real dynamic import through lazy() (the missing-chunk reload path).
+  (
+    window as never as {__cycLazyImport: (path: string, what: string) => Promise<string>}
+  ).__cycLazyImport = (path, what) =>
+    lazy(() => import(/* @vite-ignore */ path), what).then(
+      () => 'loaded',
+      (e: unknown) => 'failed: ' + String(e)
+    );
 
   (window as never as {__cycComposerVault: typeof composerVault}).__cycComposerVault =
     composerVault;

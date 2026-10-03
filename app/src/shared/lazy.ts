@@ -1,5 +1,5 @@
 import {cyclog} from './logging';
-import {markSelfReload} from './selfReload';
+import {markSelfReload, navigateSelf} from './selfReload';
 
 // Every dynamic import() in the app goes through lazy(). The engine serves
 // app/dist from disk, and a rebuild swaps in new hashed chunk names; a page
@@ -8,6 +8,14 @@ import {markSelfReload} from './selfReload';
 // boots on the new build. A sessionStorage mark survives that reload, so if a
 // load fails again soon after (a genuinely broken deploy) the page does not
 // loop: it tells the user and rethrows.
+//
+// The reload goes through the self-navigation gate: it waits while a new
+// worker is installing or waiting (a missing chunk usually means a deploy is
+// landing right now, so that wait is what makes the reload land on the new
+// build; navigating into a parked activation would hang the page blank). It
+// does NOT take the update reload's composer hold: the page is broken (the
+// feature that was asked for cannot load until it reloads), and the draft is
+// on disk, restored after the reload.
 
 const RELOADED_KEY = 'cyc:chunk-reloaded';
 // A reload takes seconds; a mark older than this is from an earlier rebuild
@@ -52,8 +60,13 @@ export function lazy<T>(load: () => Promise<T>, what: string): Promise<T> {
     reloadRequested = true;
     markReloaded();
     notify('The app was updated; reloading');
-    markSelfReload();
-    location.reload();
+    navigateSelf({
+      why: 'chunk-missing',
+      go: () => {
+        markSelfReload();
+        location.reload();
+      }
+    });
     throw err;
   });
 }

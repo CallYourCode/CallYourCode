@@ -1,19 +1,8 @@
 import {test, expect, type Page} from '@playwright/test';
-import {spawn, type ChildProcess} from 'node:child_process';
-import {
-  cpSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  statSync,
-  writeFileSync
-} from 'node:fs';
-import {tmpdir} from 'node:os';
-import {join, resolve} from 'node:path';
 import {bootPinned} from './rig';
 import {startChatEngine, seedMessages, type ChatEngine} from './chatEngine';
 import {captureLog, openChat, type LogCapture} from './offlineKit';
+import {deploy, makeDists, startHost} from './deployKit';
 
 // THE STUCK BUILD, end to end on the real app (iPhone 726ju, 2026-10-03: build
 // B deployed, B's worker installed and took control, yet every later launch and
@@ -33,82 +22,10 @@ import {captureLog, openChat, type LogCapture} from './offlineKit';
 // intact, reload.landed naming A -> B.
 // Then a relaunch with the origin gone still boots B from the precache.
 
-const DIST = resolve(__dirname, '..', '..', 'dist');
-const HOST_TS = resolve(__dirname, 'deployHost.ts');
 const NAME = 'Alpha Relay';
 const PANE = 'alpha';
 const DRAFT = 'this draft survives the update';
 const INPUT = '#cyc-thread-pane .cyc-composer-input';
-
-const TEXT = /\.(js|css|html|json|txt|webmanifest)$/;
-
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((n) => {
-    const p = join(dir, n);
-    return statSync(p).isDirectory() ? walk(p) : [p];
-  });
-}
-
-// Build A: the committed dist, source maps left out (never fetched at runtime).
-// Build B: A re-stamped (A + 1) with this build's own js/css renamed (their
-// content changes when the stamp does), every reference rewritten, and A's own
-// chunks carried next to B's, exactly the shape of a real redeploy.
-function makeDists(): {a: string; b: string; stampA: string; stampB: string} {
-  const root = mkdtempSync(join(tmpdir(), 'cyc-deploy-'));
-  const a = join(root, 'a');
-  const b = join(root, 'b');
-  cpSync(DIST, a, {recursive: true, filter: (src) => !src.endsWith('.map')});
-  cpSync(a, b, {recursive: true});
-  const stampA = readFileSync(join(a, 'build.txt'), 'utf8').trim().split(/\s+/).pop() ?? '';
-  if (!/^\d{10}$/.test(stampA)) throw new Error('sw-deploy-lands: dist has no build stamp');
-  const stampB = String(Number(stampA) + 1);
-  const own = readFileSync(join(a, 'built-assets.txt'), 'utf8')
-    .split('\n')
-    .filter((f) => /\.(js|css)$/.test(f));
-  const renames = own.map((f) => {
-    const base = f.split('/').pop() ?? f;
-    return [base, base.replace(/\.(js|css)$/, 'B.$1')] as const;
-  });
-  for (const f of own) {
-    const dir = join(b, 'assets', f.split('/').slice(0, -1).join('/'));
-    const base = f.split('/').pop() ?? f;
-    renameSync(join(dir, base), join(dir, base.replace(/\.(js|css)$/, 'B.$1')));
-  }
-  for (const p of walk(b).filter((p) => TEXT.test(p))) {
-    let s = readFileSync(p, 'utf8');
-    for (const [from, to] of renames) s = s.split(from).join(to);
-    s = s.split(stampA).join(stampB);
-    writeFileSync(p, s);
-  }
-  // A's own chunks ride along in B, so a page still on A lazy-loads them.
-  for (const f of own) cpSync(join(a, 'assets', f), join(b, 'assets', f));
-  return {a, b, stampA, stampB};
-}
-
-async function startHost(dist: string): Promise<{origin: string; proc: ChildProcess}> {
-  const proc = spawn('bun', [HOST_TS, dist], {stdio: ['ignore', 'pipe', 'pipe']});
-  const port = await new Promise<number>((ok, fail) => {
-    let out = '';
-    const t = setTimeout(() => fail(new Error('deployHost never listened: ' + out)), 15_000);
-    const take = (d: Buffer) => {
-      out += String(d);
-      const m = out.match(/LISTENING (\d+)/);
-      if (m) {
-        clearTimeout(t);
-        ok(Number(m[1]));
-      }
-    };
-    proc.stdout?.on('data', take);
-    proc.stderr?.on('data', take);
-    proc.on('exit', (c) => fail(new Error(`deployHost exited ${c}: ${out}`)));
-  });
-  return {origin: `http://127.0.0.1:${port}`, proc};
-}
-
-const deploy = async (origin: string, dist: string, fail: boolean) => {
-  const r = await fetch(`${origin}/__deploy?dist=${encodeURIComponent(dist)}&fail=${fail ? 1 : 0}`);
-  if (!r.ok) throw new Error('deploy failed');
-};
 
 // What the app does when the user brings it back: the visibility edge.
 const foreground = (page: Page) =>

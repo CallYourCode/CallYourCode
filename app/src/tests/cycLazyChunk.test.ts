@@ -1,6 +1,7 @@
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import {lazy, resetLazyForTests, setLazyNotifier} from '../shared/lazy';
 import {cyclog} from '../shared/logging';
+import {resetSelfNavForTests} from '../shared/selfReload';
 
 vi.mock('../shared/logging', () => ({cyclog: vi.fn()}));
 
@@ -13,6 +14,7 @@ const notified: string[] = [];
 
 beforeEach(() => {
   resetLazyForTests();
+  resetSelfNavForTests();
   sessionStorage.clear();
   reload.mockClear();
   notified.length = 0;
@@ -28,6 +30,12 @@ afterEach(() => {
   setLazyNotifier(() => {});
 });
 
+// The reload goes through the self-navigation gate, which decides on its own
+// tick (no service worker in jsdom: nothing pending, so it goes at once).
+const reloaded = (n: number) => vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(n));
+const settle = () => new Promise((r) => setTimeout(r, 30));
+const logged = (event: string) => vi.mocked(cyclog).mock.calls.filter((c) => c[0] === event);
+
 const missing = () => Promise.reject(new TypeError('Failed to fetch dynamically imported module'));
 
 describe('lazy chunk loading', () => {
@@ -40,45 +48,48 @@ describe('lazy chunk loading', () => {
 
   test('a failing loader logs chunk.missing, toasts, reloads once and rethrows', async () => {
     await expect(lazy(missing, 'the terminal')).rejects.toThrow('dynamically imported');
-    expect(cyclog).toHaveBeenCalledTimes(1);
-    expect(cyclog).toHaveBeenCalledWith('chunk.missing', {
-      what: 'the terminal',
-      err: 'TypeError: Failed to fetch dynamically imported module'
-    });
+    expect(logged('chunk.missing')).toEqual([
+      [
+        'chunk.missing',
+        {what: 'the terminal', err: 'TypeError: Failed to fetch dynamically imported module'}
+      ]
+    ]);
     expect(notified).toEqual(['The app was updated; reloading']);
-    expect(reload).toHaveBeenCalledTimes(1);
+    await reloaded(1);
+    expect(logged('nav.go')[0]?.[1]).toMatchObject({why: 'chunk-missing'});
   });
 
   test('a second failure in the same page does not reload again', async () => {
     await expect(lazy(missing, 'the terminal')).rejects.toThrow();
     await expect(lazy(missing, 'the QR scanner')).rejects.toThrow();
+    await reloaded(1);
+    await settle();
     expect(reload).toHaveBeenCalledTimes(1);
-    expect(cyclog).toHaveBeenCalledTimes(2);
+    expect(logged('chunk.missing')).toHaveLength(2);
     expect(notified).toEqual(['The app was updated; reloading']);
   });
 
   test('after the reload, a failure again tells the user instead of looping', async () => {
     await expect(lazy(missing, 'the terminal')).rejects.toThrow();
-    expect(reload).toHaveBeenCalledTimes(1);
+    await reloaded(1);
 
     // The reload happened: a fresh page, but the sessionStorage mark survives.
     resetLazyForTests();
+    resetSelfNavForTests();
     reload.mockClear();
     notified.length = 0;
 
     await expect(lazy(missing, 'the terminal')).rejects.toThrow();
+    await settle();
     expect(reload).not.toHaveBeenCalled();
     expect(notified).toEqual(['Could not load the terminal; reload the app']);
-    expect(cyclog).toHaveBeenLastCalledWith(
-      'chunk.missing',
-      expect.objectContaining({what: 'the terminal'})
-    );
+    expect(logged('chunk.missing').pop()?.[1]).toMatchObject({what: 'the terminal'});
   });
 
   test('a stale mark from an earlier rebuild does not block the next one-shot reload', async () => {
     sessionStorage.setItem('cyc:chunk-reloaded', String(Date.now() - 6 * 60_000));
     await expect(lazy(missing, 'the terminal')).rejects.toThrow();
-    expect(reload).toHaveBeenCalledTimes(1);
+    await reloaded(1);
     expect(notified).toEqual(['The app was updated; reloading']);
   });
 });

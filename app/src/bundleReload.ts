@@ -10,7 +10,14 @@ import {
   CACHE_PREFIX,
   type ReloadHolds
 } from './staleReload';
-import {markSelfReload, markReloadDeparture, readReloadDeparture} from './shared/selfReload';
+import {
+  askActivate,
+  markSelfReload,
+  markReloadDeparture,
+  navigateSelf,
+  pendingWorker,
+  readReloadDeparture
+} from './shared/selfReload';
 
 export const bundleInfo = {stamp: ''};
 
@@ -86,92 +93,46 @@ export function installStaleTabReload(): void {
   };
 
   const swSupported = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
-  const pendingWorker = async (): Promise<'' | 'installing' | 'waiting'> => {
-    if (!swSupported) return '';
-    try {
-      const r = await navigator.serviceWorker.getRegistration();
-      return r?.installing ? 'installing' : r?.waiting ? 'waiting' : '';
-    } catch {
-      return '';
-    }
-  };
-  const askActivate = () => {
-    if (!swSupported) return;
-    void navigator.serviceWorker
-      .getRegistration()
-      .then((r) => r?.waiting?.postMessage({t: 'skip-waiting'}))
-      .catch(() => {});
-  };
 
+  // The update reload, through the one self-navigation gate (never into an
+  // installing or waiting worker), with its own hold on top: a recording, a
+  // vault write, an unsent send, a draft in the box (until it is emptied or the
+  // app goes to the background) or a playing clip (reloadHold).
   const reloadSoon = (target: string) => {
     if (reloading) return;
     reloading = true;
-    const since = Date.now();
     // Announce only a reload that is about to happen; one held by a draft
     // comes later, when the box is empty or the app is in the background.
     if (!draftInBox()) toast('New version, reloading…', 2500);
+    let holds: ReloadHolds | null = null;
     let lastLogged = 0;
-    let timer = 0;
-    let ticking = false;
-    let again = false;
-    let going = false;
-    const tick = async (): Promise<void> => {
-      if (going) return;
-      if (ticking) {
-        again = true; // e.g. the background edge arrived mid-tick: decide again
-        return;
-      }
-      ticking = true;
-      window.clearTimeout(timer);
-      try {
-        // Never navigate while a new worker is installing or waiting: in
-        // Chromium the navigation can be what triggers the parked activation,
-        // and it then hangs (staleReload pendingWorker).
-        const pending = await pendingWorker();
-        const holds: ReloadHolds = {
+    navigateSelf({
+      why: 'update',
+      firstTickMs: 1200,
+      hold: (waited, hidden) => {
+        holds = {
           recording: recordingNow(),
           vault: vaultHolds.writing > 0,
           unsent: unsentWork.busy(),
           draft: draftInBox(),
           audio: audioPlaying()
         };
-        const waited = Date.now() - since;
-        const hidden = document.hidden;
-        const hold = reloadHold(holds, waited, hidden) || (pending ? 'sw-' + pending : '');
-        if (hold) {
-          if (pending === 'waiting') askActivate();
-          if (waited - lastLogged >= 15_000) {
-            lastLogged = waited;
-            cyclog('reload.deferred', {...holds, hold, hidden, waited});
-          }
-          timer = window.setTimeout(() => {
-            void tick();
-          }, 3000);
-          return;
-        }
-        going = true;
+        return reloadHold(holds, waited, hidden);
+      },
+      onHeld: (hold, waited, hidden) => {
+        if (waited - lastLogged < 15_000) return;
+        lastLogged = waited;
+        cyclog('reload.deferred', {...holds, hold, hidden, waited});
+      },
+      go: ({waited, hidden}) => {
         cyclog('reload.go', {waited, hidden, from: cycBuildStamp || bootStamp, to: target});
         const url = new URL(location.href);
         url.searchParams.set('b', String(Date.now()));
         markSelfReload();
         markReloadDeparture(cycBuildStamp || bootStamp, target, hidden);
         location.replace(url.toString());
-      } finally {
-        ticking = false;
-        if (again && !going) {
-          again = false;
-          void tick();
-        }
       }
-    };
-    // Going to the background is the moment a draft stops holding the reload:
-    // decide at once, before the page is suspended.
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) void tick();
     });
-    timer = window.setTimeout(() => {
-      void tick();
-    }, 1200);
   };
 
   const controller = createStaleReloadController({
