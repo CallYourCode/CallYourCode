@@ -898,11 +898,7 @@ class Pipeline {
       return;
     }
     if (!this.stream && !this.actx) {
-      cyclog('ptt.start.refused', {
-        why: 'the microphone is not open yet (getUserMedia has not answered)',
-        micOpen: !!this.stream,
-        pttDown: this.pttDown
-      });
+      this.refusePress('the microphone is not open yet (getUserMedia has not answered)');
       return;
     }
     this.pttDown = true;
@@ -919,20 +915,27 @@ class Pipeline {
     void this.ensureLive(true).then((after) => {
       if (!this.pttDown) return;
       if (!after || !this.stream || !canRecord(after)) {
-        cyclog('ptt.start.refused', {
-          why: !this.stream
+        this.refusePress(
+          !this.stream
             ? 'the microphone is not open yet (getUserMedia has not answered)'
-            : 'the microphone was dead and could not be recovered',
-          micOpen: !!this.stream,
-          pttDown: this.pttDown
-        });
-        this.pttDown = false;
-        this.pttCaptureId = 0;
-        this.syncRecordingState();
+            : 'the microphone was dead and could not be recovered'
+        );
         return;
       }
       this.beginPress();
     });
+  }
+
+  // The press is refused: give back everything it took (the press itself, its
+  // capture id, the recording state, and the speaker claim the composer took
+  // for it), so nothing waits behind a recording that never started. The
+  // release that follows finds no press down and does nothing.
+  private refusePress(why: string): void {
+    cyclog('ptt.start.refused', {why, micOpen: !!this.stream, pttDown: this.pttDown});
+    this.pttDown = false;
+    this.pttCaptureId = 0;
+    speaker.setBusy(false, 'press');
+    this.syncRecordingState();
   }
 
   private beginPress(): void {
