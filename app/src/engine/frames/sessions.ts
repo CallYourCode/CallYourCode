@@ -51,6 +51,8 @@ function parseSession(s: any, ctx: FrameContext): EngineSession {
     }
 
     if (typeof s.tab === 'string') es.tab = s.tab;
+    // the chat log's axis epoch (store/rows/repl.ts); absent from older engines
+    if (typeof s.axis === 'string' && s.axis) es.axis = s.axis;
     if (Number.isFinite(s.turnSince)) es.turnSince = Number(s.turnSince);
 
     if (Number.isFinite(s.lastActivity)) es.lastActivity = Number(s.lastActivity);

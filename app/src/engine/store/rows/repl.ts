@@ -340,7 +340,8 @@ export function settleAxis(
       axisResync(sessionId);
       return false;
     }
-    const heldTail = rowStore.highestHeldSeq(sessionId);
+    // a closed chat's rows are not warm: its meta knows where they reached
+    const heldTail = Math.max(rowStore.highestHeldSeq(sessionId), (meta?.tailVersion ?? 0) - 1);
     if (!(await rowStore.purge(sessionId))) {
       cyclog('rowstore.axis-epoch.purge-aborted', {
         session: sessionId,

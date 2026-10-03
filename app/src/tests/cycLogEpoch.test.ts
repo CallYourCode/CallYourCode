@@ -33,6 +33,8 @@ import {initDoor} from '../engine/store/rows/door';
 import {eventRow, messageRow} from '../engine/store/rows/core';
 import {replicatorFor, __resetReplicatorsForTest} from '../engine/store/rows/repl';
 import {attach, detachChat} from '../engine/store';
+import {dispatchFrame} from '../engine/frames';
+import type {FrameContext} from '../engine/frames/types';
 import * as sync from '../engine/sync';
 import {memTx} from './rowStoreFake';
 
@@ -500,5 +502,38 @@ describe('the heuristics are the fallback, not the rule', () => {
     expect(events('rowstore.stale-axis')).toEqual([]);
     expect(events('rowstore.axis-epoch')).toEqual([]);
     expect(heldPairs()).toEqual(enginePairs(engine));
+  });
+});
+
+describe('the wire', () => {
+  // The roster row, the attach-ok and a fetched page each carry the epoch, and
+  // each decoder keeps it (a whitelisting decoder that drops it silently turns
+  // the whole roster path off: the rig caught exactly that).
+  test('the sessions, session and attach-ok frames carry the epoch through their decoders', () => {
+    const got: Record<string, unknown[]> = {};
+    const ctx = {
+      url: 'ws://engine',
+      emit: (ev: string, ...args: unknown[]) => {
+        got[ev] = args;
+      },
+      engineObjectUrl: (p: string) => p,
+      rememberUserHost: () => {},
+      canDo: new Set<string>(),
+      voiceHealthyState: false,
+      attachedId: '',
+      tailedId: null,
+      terms: new Map()
+    } as unknown as FrameContext;
+    dispatchFrame(ctx, {
+      t: 'sessions',
+      list: [{id: PANE, name: 'Hunter', cwd: '', alive: true, axis: NEW}]
+    });
+    expect((got.sessions[0] as EngineSession[])[0].axis).toBe(NEW);
+    dispatchFrame(ctx, {t: 'session', id: PANE, name: 'Hunter', cwd: '', alive: true, axis: OLD});
+    expect((got.session[0] as EngineSession).axis).toBe(OLD);
+    dispatchFrame(ctx, {t: 'sessions', list: [{id: PANE, name: 'Hunter', cwd: '', alive: true}]});
+    expect('axis' in (got.sessions[0] as EngineSession[])[0]).toBe(false);
+    dispatchFrame(ctx, {t: 'attach-ok', id: PANE, known: true, tailPage: 0, pages: [], axis: NEW});
+    expect((got.attachOk[0] as EngineAttachOk).axis).toBe(NEW);
   });
 });
