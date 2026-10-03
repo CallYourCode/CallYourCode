@@ -1,5 +1,5 @@
 import {h} from '../../../components/domHelpers';
-import {makeIcon, makeIconButton, BTN_HOVER_UTILS} from '../../../components/iconGlyphs';
+import {makeIcon, makeIconButton} from '../../../components/iconGlyphs';
 import {paintActionControlSize} from '@/components/circleButtonSize';
 import type {CycReplyTo} from '../../../types';
 import {pasteImageFile, sanitizeClipboardHtml} from '@/features/composer/paste';
@@ -275,11 +275,17 @@ export function createComposer({
     // mic, it now sits directly ABOVE it, on the slide-up-to-lock path, and the
     // mic no longer moves. The pointer-slide lock detection reads the chip's
     // live rect, so it follows the chip to its new position.
+    // It floats over the chat, so it is painted with the theme surface like the
+    // corner floats: `!`, because the reset's un-layered `button` background
+    // beats a layered utility. Its hover is the usual 10% muted tint, mixed
+    // over the surface so the chip stays opaque.
     'cyc-icon-btn cyc-ctl-round cyc-rec-lock absolute left-1/2 -translate-x-1/2 [bottom:calc(100%+0.625rem)] ' +
       'flex-none items-center justify-center text-[1.5rem]! text-(--cyc-text-muted) p-0! w-10! h-10! ' +
       'leading-[var(--cyc-circle-size)] ' +
-      'bg-[var(--cyc-surface)] [box-shadow:0_1px_4px_rgba(0,0,0,0.35)] z-[3] hidden! ' +
-      `${COMPOSER_ICON_TRANSITION} [.cyc-composer[data-cyc-recording]:not(.cyc-rec-locked)_&]:flex! ${BTN_HOVER_UTILS}`
+      'bg-[var(--cyc-surface)]! [box-shadow:0_1px_4px_rgba(0,0,0,0.35)] z-[3] hidden! ' +
+      `${COMPOSER_ICON_TRANSITION} [.cyc-composer[data-cyc-recording]:not(.cyc-rec-locked)_&]:flex! ` +
+      'fine:hover:bg-[color-mix(in_srgb,var(--cyc-text-muted)_10%,var(--cyc-surface))]! ' +
+      'fine:active:bg-[color-mix(in_srgb,var(--cyc-text-muted)_10%,var(--cyc-surface))]!'
   );
   paintActionControlSize(lockChip);
   lockChip.append(makeIcon('lock'));

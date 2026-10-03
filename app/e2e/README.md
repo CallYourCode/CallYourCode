@@ -40,6 +40,18 @@ static server here on purpose: the page must talk to the real `/config` and
 
 The spec refuses to run without `CYC_PAGE`, or against a live/offline-rig port.
 
+### `voice/` -- the microphone in Chromium AND WebKit
+
+`voice-resume.spec.ts` (the mic after a background: a stalled capture graph is
+rebuilt, or reported when nothing revives it) and `lock-chip.spec.ts` (the lock
+chip over the chat carries the theme surface). Both engines get a fake
+microphone, so this directory has its own config; it serves the built bundle
+like `offline/` and reuses the offline rig, on port 8296 by default.
+
+    npx playwright test -c voice-resume.config.ts
+
+`VR_SHOTS=<dir>` writes the record bar and lock chip screenshots there.
+
 ## The guard (`offline/guard.ts`)
 
 The offline config's reporter, so a green run can be believed. It fails the run
