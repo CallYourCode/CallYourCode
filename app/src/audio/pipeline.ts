@@ -242,7 +242,7 @@ class Pipeline {
     cap.wasPlaying = false;
     if (this.tailFor === cap) this.tailFor = null;
     speaker.setBusy(false, `capture:${cap.id}`);
-    if (resume && !this.pttDown && !this.active && !this.inFlight.size) speaker.resume();
+    if (resume && !this.pttDown && !this.active && !this.inFlight.size) speaker.resumeInterrupted();
     this.syncRecordingState();
   }
 
@@ -752,11 +752,14 @@ class Pipeline {
   }
 
   endPTT(): void {
+    // The press is over, whatever became of it (a refused start already cleared
+    // pttDown): its claim on the speaker goes with it, or every later tap would
+    // wait for a recording that is not happening.
+    speaker.setBusy(false, 'press');
     if (!this.pttDown) return;
     this.pttDown = false;
     this.pttCaptureId = 0;
 
-    speaker.setBusy(false, 'press');
     if (this.active) {
       void this.endCapture();
       return;

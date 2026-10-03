@@ -281,6 +281,154 @@ describe('a press while the mic is recording waits, visibly, and starts on relea
   });
 });
 
+describe('a press is a press made now: the kept verdict keeps what the user asked for after the capture began', () => {
+  type P = {
+    active: {id: number; startedAt: number} | null;
+    inFlight: Map<number, unknown>;
+    syncRecordingState(): void;
+    commitUtterance(cap: unknown, released: unknown, heard: unknown, blob: unknown): Promise<void>;
+  };
+  const pipe = async () => (await import('../audio/pipeline')).pipeline as unknown as P;
+  // wiring.onVoiceStart (pause, 'press' claim) then pipeline.fire (claim, recState).
+  const startTake = async (p: P, id: number) => {
+    speaker.pause();
+    speaker.setBusy(true, 'press');
+    const cap = {id, cid: `c-${id}`, startedAt: performance.now(), wasPlaying: false};
+    speaker.setBusy(true, `capture:${id}`);
+    p.active = cap;
+    p.inFlight.set(id, cap);
+    p.syncRecordingState();
+    return cap;
+  };
+  // the press released: releaseAndMeasure, recState to transcribing.
+  const release = (p: P) => {
+    speaker.setBusy(false, 'press');
+    p.active = null;
+    p.syncRecordingState();
+  };
+  const keep = (p: P, cap: {id: number}) =>
+    p.commitUtterance(
+      cap,
+      {id: cap.id, forCapture: undefined, durationS: 9},
+      {text: 'a note', streamed: true, failed: false, decoded: true, blob: new Blob(['x'])},
+      async (): Promise<Blob | null> => null
+    );
+  const playing = async () => {
+    tap('reply');
+    await land('reply');
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+    await new Promise((r) => setTimeout(r, 2));
+  };
+
+  test('resumed WHILE recording: waits, starts on release, and survives the kept verdict', async () => {
+    const p = await pipe();
+    await playing();
+    const cap = await startTake(p, 21);
+    speaker.resume();
+    expect(speaker.state).toMatchObject({state: 'waiting', msgId: 'reply'});
+    release(p);
+    await flush();
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+    await keep(p, cap);
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+  });
+
+  test('resumed AFTER release, transcript pending: plays at once and survives the kept verdict', async () => {
+    const p = await pipe();
+    await playing();
+    const cap = await startTake(p, 22);
+    release(p);
+    expect(speaker.state).toMatchObject({state: 'paused', msgId: 'reply'});
+    speaker.resume();
+    await flush();
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+    await keep(p, cap);
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+  });
+
+  test('not resumed: what the take interrupted still goes at the kept verdict', async () => {
+    const p = await pipe();
+    await playing();
+    const cap = await startTake(p, 23);
+    release(p);
+    await keep(p, cap);
+    expect(speaker.state.state).toBe('idle');
+  });
+
+  test('a machine resume (a dropped take giving the clip back) is not a press: a later kept take still drops it', async () => {
+    const p = await pipe();
+    await playing();
+    speaker.pause();
+    speaker.resumeInterrupted();
+    await flush();
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+    await new Promise((r) => setTimeout(r, 2));
+    const cap = await startTake(p, 24);
+    release(p);
+    await keep(p, cap);
+    expect(speaker.state.state).toBe('idle');
+  });
+});
+
+describe('automatic speech respects the hold on every path (one gate)', () => {
+  test('a tap that ends during a pending transcript does not start the arrival queued behind it', async () => {
+    speaker.setBusy(true, 'capture:31');
+    tap('reply');
+    await land('reply');
+    auto('arrival');
+    clip.fire('ended');
+    await flush();
+    expect(speaker.state.state).toBe('finished');
+    expect(streamAudioUrl).toHaveBeenCalledTimes(1);
+    // the hold lifts (a dropped take): the held arrival starts
+    speaker.setBusy(false, 'capture:31');
+    expect(speaker.state).toMatchObject({state: 'loading', msgId: 'arrival'});
+  });
+
+  test('a tap that fails during a pending transcript does not start the arrival queued behind it', async () => {
+    speaker.setBusy(true, 'capture:32');
+    tap('reply');
+    auto('arrival');
+    pending[0].reject(new Error('audio 404'));
+    await flush();
+    expect(errors).toEqual(['reply']);
+    expect(speaker.state.state).toBe('idle');
+    expect(streamAudioUrl).toHaveBeenCalledTimes(1);
+  });
+
+  test('a tap enqueued behind held automatic speech starts, and the arrival stays held', async () => {
+    speaker.setBusy(true, 'capture:34');
+    auto('arrival');
+    tap('other');
+    expect(speaker.state).toMatchObject({state: 'loading', msgId: 'other'});
+    expect(speaker.pending()).toEqual(new Set(['other', 'arrival']));
+  });
+
+  test('a refused press does not leave its claim: the release clears it and taps play', async () => {
+    const {pipeline} = await import('../audio/pipeline');
+    const p = pipeline as unknown as {pttDown: boolean; endPTT(): void};
+    // wiring.onVoiceStart took the claim; the mic refused the start (pttDown cleared)
+    speaker.setBusy(true, 'press');
+    p.pttDown = false;
+    // wiring.onVoiceEnd
+    p.endPTT();
+    expect(speaker.holds()).toEqual([]);
+    expect(speaker.recording()).toBe(false);
+    tap('reply');
+    expect(speaker.state).toMatchObject({state: 'loading', msgId: 'reply'});
+  });
+
+  test('a tap queued behind a tap still plays on during the hold', async () => {
+    speaker.setBusy(true, 'capture:33');
+    tap('one');
+    tap('two');
+    await land('one');
+    clip.fire('ended');
+    await flush();
+    expect(speaker.state).toMatchObject({state: 'loading', msgId: 'two'});
+  });
+});
+
 describe('nothing fails silently', () => {
   test('a fetch that fails is an error the user sees, and the spinner goes', async () => {
     tap('gone');

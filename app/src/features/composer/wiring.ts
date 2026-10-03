@@ -654,7 +654,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
         .catch(() => {
           pttHolding = false;
           speaker.setBusy(false, 'press');
-          speaker.resume();
+          speaker.resumeInterrupted();
           toast('Microphone unavailable');
         });
     },

@@ -33,9 +33,14 @@ type SpeakerItem = {
    *  'autoplay-arrival' or 'tap'. Kept as a string here so the speaker owns no
    *  app-surface types; it rides onto the clip.play log line for diagnosis. */
   reason?: string;
-  /** performance.now() when it was enqueued: orders it against a capture's start
-   *  (supersede) and times tap-to-sound on the clip.started line. */
+  /** performance.now() when it was enqueued: times enqueue-to-sound on the
+   *  clip.started and clip.fail lines. */
   at?: number;
+  /** USER INTENT TIME: performance.now() of the last user action asking for this
+   *  clip to sound (a tap that enqueued it, a press that resumed it). Unset for
+   *  automatic speech nobody asked for. It is the one thing the hold (setBusy)
+   *  and a kept utterance (supersede) look at. */
+  askedAt?: number;
 };
 
 /* 'waiting': a tap made while the mic is recording, shown on its button and
@@ -94,8 +99,8 @@ class Speaker {
   private recordingMayHaveEnded(was: boolean): void {
     if (!was || this.recording() || this.stateName !== 'waiting') return;
     dbg('recording released: starting the waiting tap');
-    if (this.current) this.resume();
-    else if (this.queue.length) this.playNext();
+    if (this.current) this.resumeCurrent();
+    else this.playNext();
   }
   private lastBySession = new Map<string, SpeakerItem>();
   private stateName: SpeakerStateName = 'idle';
@@ -110,8 +115,7 @@ class Speaker {
     this.audio.addEventListener('ended', () => {
       const done = this.current;
       this.current = null;
-      if (this.queue.length) this.playNext();
-      else {
+      if (!this.playNext()) {
         this.emit('finished', done || undefined);
 
         this.releaseMedia();
@@ -138,8 +142,7 @@ class Speaker {
     if (this.current === item) this.current = null;
     for (const fn of this.errorListeners) fn(item);
     // Never left in 'loading' (a spinner with nothing behind it), busy or not.
-    if (this.queue.length) this.playNext();
-    else this.emit('idle');
+    if (!this.playNext()) this.emit('idle');
   }
 
   private releaseMedia(): void {
@@ -278,10 +281,8 @@ class Speaker {
     dbg('unlock done');
   }
 
-  /* The busy hold (setBusy: a capture recording or awaiting its verdict) delays
-   * AUTOMATIC speech only. A manual item is a tap, the user's latest command, and
-   * starts now: holding it left the button idle with no trace while a long
-   * transcription ran (play-tap, 2026-10-03). */
+  /* A manual item is a tap: the user asked for it now (askedAt). The hold
+   * (setBusy) delays only what nobody asked for; the gate is in playNext. */
   enqueue(item: SpeakerItem): void {
     if (this.current && this.current.sessionId !== item.sessionId) this.stopAll();
 
@@ -290,17 +291,19 @@ class Speaker {
       return;
     }
     item.at = performance.now();
+    item.askedAt = item.manual ? item.at : undefined;
     this.started.delete(item);
     this.queue.push(item);
 
-    if (!this.current && (!this.busy || item.manual)) this.playNext();
+    if (!this.current) this.playNext();
   }
 
   /* The user just said something (pipeline: a capture that began at `since` was
    * kept): what the speaker was saying or holding from before is stale and goes.
-   * A tap made after `since` is newer than the utterance and stays. */
+   * Anything the user asked for after `since` (a tap, a resume, including one
+   * that waited for the recording to end) is newer than the utterance and stays. */
   supersede(since: number): void {
-    const fresh = (it: SpeakerItem) => !!it.manual && (it.at ?? -Infinity) >= since;
+    const fresh = (it: SpeakerItem) => (it.askedAt ?? -Infinity) >= since;
     const keep = this.queue.filter(fresh);
     if (this.current && fresh(this.current)) {
       this.queue = keep;
@@ -322,7 +325,22 @@ class Speaker {
     this.emit('paused', this.current);
   }
 
+  /* A user's press on play for the clip that is current (paused, or blocked by
+   * the autoplay policy): it is asked for now. */
   resume(): void {
+    const asked = this.current ?? (this.stateName === 'blocked' ? this.queue[0] : undefined);
+    if (asked) asked.askedAt = performance.now();
+    this.resumeCurrent();
+  }
+
+  /* The machine giving back what a capture or a press interrupted (pipeline
+   * release after a dropped take, a press the mic refused). Nobody asked anew:
+   * the clip keeps the intent it had. */
+  resumeInterrupted(): void {
+    this.resumeCurrent();
+  }
+
+  private resumeCurrent(): void {
     dbg('resume', this.current?.msgId);
     if (!this.current) {
       // Blocked by the autoplay policy: the clip went back to the head of the
@@ -463,25 +481,40 @@ class Speaker {
     document.addEventListener('keydown', go, true);
   }
 
-  private playNext(): void {
-    if (this.queue[0]?.manual && this.recording()) {
-      dbg('playNext: the mic is recording; the tap waits', this.queue[0].msgId);
-      this.current = null;
-      this.emit('waiting', this.queue[0]);
-      return;
-    }
-    if (this.queue.length && !this.mayStart(this.queue[0])) {
-      dbg('playNext refused by the gate', this.queue[0].msgId, this.queue.length);
+  /* THE ONE GATE every start goes through (enqueue, a clip ending or failing,
+   * a hold or a recording released, a gesture): what the user asked for waits
+   * only for a live recording ('waiting'); what nobody asked for waits for the
+   * whole hold (a capture recording or awaiting its verdict), and the mute gate.
+   * True when the head started loading or is waiting visibly. */
+  private playNext(): boolean {
+    if (!this.queue.length) {
       this.current = null;
       if (!this.busy) this.emit('idle');
-      return;
+      return false;
     }
-    const item = this.queue.shift();
-    if (!item) {
+    // Under the hold, the first thing the user asked for goes ahead of the
+    // automatic speech held in front of it, which stays queued.
+    const at = this.busy ? this.queue.findIndex((it) => it.askedAt !== undefined) : 0;
+    if (at > 0) this.queue.unshift(...this.queue.splice(at, 1));
+    const head = this.queue[0];
+    if (head.askedAt !== undefined && this.recording()) {
+      dbg('playNext: the mic is recording; the tap waits', head.msgId);
+      this.current = null;
+      this.emit('waiting', head);
+      return true;
+    }
+    if (head.askedAt === undefined && this.busy) {
+      dbg('playNext: held for the capture', head.msgId, [...this.busyClaims]);
+      this.current = null;
+      return false;
+    }
+    if (!this.mayStart(head)) {
+      dbg('playNext refused by the gate', head.msgId, this.queue.length);
       this.current = null;
       if (!this.busy) this.emit('idle');
-      return;
+      return false;
     }
+    const item = this.queue.shift()!;
     this.current = item;
     dbg('playNext', item.msgId);
     this.lastBySession.set(item.sessionId, item);
@@ -515,6 +548,7 @@ class Speaker {
         if (this.current !== item) return;
         this.failed(item, 'fetch', e);
       });
+    return true;
   }
 }
 

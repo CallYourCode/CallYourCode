@@ -158,6 +158,40 @@ function firstSpeaking(r: Rec, msgId: string, after: number): number | null {
   return r.states.find((s) => s.t >= after && s.state === 'speaking' && s.msg === msgId)?.t ?? null;
 }
 
+// The capture lifecycle, through the app's own pipeline: fire (claims the
+// speaker, pauses what plays, recState recording), the press released
+// (releaseAndMeasure: transcript pending), the kept verdict (commitUtterance).
+const fire = (page: Page) =>
+  page.evaluate(() => (window as unknown as {__cycPipeline: {fire(): void}}).__cycPipeline.fire());
+const releaseRecording = (page: Page) =>
+  page.evaluate(() => {
+    const p = (window as unknown as {
+      __cycPipeline: {active: unknown; syncRecordingState(): void};
+    }).__cycPipeline;
+    p.active = null;
+    p.syncRecordingState();
+  });
+const keptVerdict = (page: Page) =>
+  page.evaluate(async () => {
+    const p = (window as unknown as {
+      __cycPipeline: {
+        inFlight: Map<number, {id: number}>;
+        commitUtterance(c: unknown, r: unknown, h: unknown, b: () => Promise<null>): Promise<void>;
+      };
+    }).__cycPipeline;
+    const cap = [...p.inFlight.values()].pop()!;
+    await p.commitUtterance(
+      cap,
+      {id: cap.id, forCapture: undefined, durationS: 9},
+      {text: 'a note', streamed: true, failed: false, decoded: true, blob: null},
+      async () => null
+    );
+  });
+const stateOf = (page: Page) =>
+  page.evaluate(() =>
+    (window as unknown as {__cycSpeakerState: () => {state: string; msgId?: string}}).__cycSpeakerState()
+  );
+
 const results: Record<string, unknown> = {};
 function record(name: string, browserName: string, data: Record<string, unknown>) {
   results[`${browserName}:${name}`] = data;
@@ -312,12 +346,17 @@ test('play tap: a press while the mic is recording waits, shown, and plays on re
       .poll(() => speaking(page, SHORT), {timeout: FRAME_MS * 4 + 10_000})
       .toBe(true)
       .catch(() => {});
+    // The verdict lands, kept: the press made during the recording stays.
+    await keptVerdict(page);
+    await page.waitForTimeout(500);
+    const afterVerdict = (await stateOf(page)).state;
     const r = await rec(page);
     const sound = firstSpeaking(r, SHORT, t0);
     const data = {
       frameMs: FRAME_MS,
       shownAfter300ms: shown,
       soundedWhileRecording,
+      afterVerdict,
       releaseToSoundMs: sound === null ? null : Math.round(sound - releasedAt),
       clipTap: r.logs.filter((l) => l.event === 'clip.tap').map((l) => l.fields),
       states: r.states.map((x) => `${Math.round(x.t - t0)}:${x.state}`)
@@ -328,6 +367,7 @@ test('play tap: a press while the mic is recording waits, shown, and plays on re
       expect(data.soundedWhileRecording, 'nothing sounds into a live recording').toBe(false);
       expect(data.releaseToSoundMs, 'it starts once the recording is released').not.toBeNull();
       expect(data.releaseToSoundMs!).toBeLessThan(FRAME_MS + 1_500);
+      expect(data.afterVerdict, 'the kept verdict does not cut it').toBe('speaking');
       expect(data.clipTap).toEqual([
         expect.objectContaining({outcome: 'after-recording', recording: true})
       ]);
@@ -336,6 +376,57 @@ test('play tap: a press while the mic is recording waits, shown, and plays on re
     await engine.close();
   }
 });
+
+for (const when of ['while recording', 'after release'] as const) {
+  test(`play tap: a reply paused by a take, resumed ${when}, survives the kept verdict`, async ({
+    page,
+    browserName
+  }) => {
+    test.setTimeout(60_000);
+    const engine = await startBz([]);
+    try {
+      await boot(page, engine.port, browserName);
+      await press(page, SHORT, browserName);
+      await expect.poll(() => speaking(page, SHORT), {timeout: FRAME_MS * 4 + 10_000}).toBe(true);
+      // He presses the mic while the reply plays: the take pauses it.
+      await fire(page);
+      const afterFire = (await stateOf(page)).state;
+      if (when === 'after release') await releaseRecording(page);
+      // He presses play on the paused reply.
+      await press(page, SHORT, browserName);
+      await page.waitForTimeout(300);
+      const afterPress = (await stateOf(page)).state;
+      if (when === 'while recording') {
+        await page.waitForTimeout(1_000);
+        await releaseRecording(page);
+      }
+      await page.waitForTimeout(800);
+      const beforeVerdict = (await stateOf(page)).state;
+      await keptVerdict(page);
+      await page.waitForTimeout(800);
+      const afterVerdict = await stateOf(page);
+      const r = await rec(page);
+      const data = {
+        afterFire,
+        afterPress,
+        beforeVerdict,
+        afterVerdict: afterVerdict.state,
+        afterVerdictMsg: afterVerdict.msgId,
+        taps: r.logs.filter((l) => l.event === 'clip.tap').map((l) => l.fields.outcome)
+      };
+      record(`resume-${when.replace(' ', '-')}`, browserName, data);
+      if (TAG === 'after') {
+        expect(data.afterFire).toBe('paused');
+        expect(data.afterPress).toBe(when === 'while recording' ? 'waiting' : 'speaking');
+        expect(data.beforeVerdict).toBe('speaking');
+        expect(data.afterVerdict, 'the resumed reply survives the kept verdict').toBe('speaking');
+        expect(data.afterVerdictMsg).toBe(SHORT);
+      }
+    } finally {
+      await engine.close();
+    }
+  });
+}
 
 test('play tap: a one-frame reply over a slow tunnel, pressed three times while loading', async ({
   page,
