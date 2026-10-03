@@ -179,6 +179,8 @@ export function mintRtcClient(pipe: Pipe, signalWs: Sock): void {
         pipe.close(code, reason);
       } catch {}
     },
+    // The bulk lane's gate: a download frame waits for this pipe's buffer.
+    () => pipe.drain(),
   );
   data.sec = sec;
   // The sealed tunnel: chunked {t:"res"} answers drain against this pipe's buffer.
