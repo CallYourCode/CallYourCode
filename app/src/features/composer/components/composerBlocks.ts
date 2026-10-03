@@ -29,8 +29,6 @@ import {
   type VoiceHandle
 } from './composerModel';
 
-const SHEET_MAX_WIDTH = 900;
-
 // Chip fills. `!` beats the base light-secondary utility.
 const CHIP_BG_PRIMARY: Record<PresentationTheme, string> = {
   day: 'bg-[#96602f]!',
@@ -618,7 +616,9 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
 
   btnAttach.addEventListener('click', (e) => {
     if (isDisabled()) return;
-    if (touchCapable || window.innerWidth <= SHEET_MAX_WIDTH) {
+    // Sheet or menu is an input-device choice, never a width one: a mouse in a
+    // half-width window still gets the menu at the button.
+    if (touchCapable) {
       openSheet(attachItems(), {triggerElement: btnAttach});
     } else {
       openMenu(attachItems(), e, {triggerElement: btnAttach});
@@ -714,7 +714,7 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
       }));
       btn.addEventListener('click', (e) => {
         if (isDisabled()) return;
-        if (touchCapable || window.innerWidth <= SHEET_MAX_WIDTH) {
+        if (touchCapable) {
           openSheet(rows, {triggerElement: btn, className: 'cyc-plugin-widget cyc-bits'});
         } else {
           openMenu(rows, e, {triggerElement: btn, className: 'cyc-plugin-widget cyc-bits'});

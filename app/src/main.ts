@@ -288,7 +288,12 @@ function buildApp() {
       'tab:!flex',
       'desk:transition-transform desk:duration-0',
       'group-[.view-list]/cols:tab:max-desk:translate-x-[calc(var(--cyc-rail-width)+var(--cyc-pane-gap))]',
-      'group-[.view-list]/cols:pointer-events-none group-[.view-chat]/cols:pointer-events-auto',
+      // Inert only where the list really covers the chat (phone: the pane slides
+      // off-screen). At tablet width the list is a drawer and the chat stays in
+      // view beside it; on a laptop they sit side by side. A visible chat must
+      // take the press: a click on its composer focuses the input, and the
+      // chatEl click below closes the drawer.
+      'group-[.view-list]/cols:max-tab:pointer-events-none',
       'group-[.view-chat]/cols:max-tab:translate-x-0 group-[.view-chat]/cols:max-tab:opacity-100',
       'group-[.view-profile]/cols:max-tab:-translate-x-full group-[.view-profile]/cols:max-tab:opacity-0'
     ].join(' ')

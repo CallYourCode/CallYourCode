@@ -369,6 +369,64 @@ export function createComposer({
   container.append(composerRowsOuter);
   el.append(container);
 
+  const focusAtEnd = () => {
+    input.focus({preventScroll: true});
+
+    const selection = window.getSelection();
+    if (selection) {
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+  };
+
+  // The pill is the input box. The text field is only as tall as its text and
+  // sits inside padding (and under the reply card when one is set), so a press
+  // on the pill's bare surface around it must land in the field too, never
+  // nowhere. Controls inside the pill (buttons, chips, the reply card's jump
+  // panel, dials, the ask panel) are not surfaces and keep their own press;
+  // a press on a surface's own scrollbar is left alone.
+  //
+  // The decision is read off pointerdown, the true hit. A touch tap's mouse
+  // events and click are retargeted by the browser to a nearby control (WebKit
+  // snaps a tap just under the reply card onto it, which jumped to the replied
+  // message instead of focusing), so they only act on what pointerdown saw.
+  const isPressSurface = (t: Element) =>
+    t === composerRows ||
+    t === composerLine ||
+    t === composerFieldBox ||
+    t === blocksRow ||
+    t.matches('.cyc-reply-wrap, .cyc-reply-wrap-content');
+  let surfacePress = false;
+  composerRows.addEventListener('pointerdown', (e) => {
+    const t = e.target as Element;
+    surfacePress =
+      e.isPrimary &&
+      e.button === 0 &&
+      !disabled &&
+      isPressSurface(t) &&
+      e.offsetX < t.clientWidth &&
+      e.offsetY < t.clientHeight;
+  });
+  composerRows.addEventListener('mousedown', (e) => {
+    if (!surfacePress) return;
+    e.preventDefault();
+    if (document.activeElement !== input) focusAtEnd();
+  });
+  composerRows.addEventListener(
+    'click',
+    (e) => {
+      // detail 0 is a keyboard click: it follows no press of ours.
+      if (!surfacePress || e.detail === 0) return;
+      surfacePress = false;
+      const t = e.target as Element;
+      if (t !== input && !isPressSurface(t)) e.stopPropagation();
+    },
+    {capture: true}
+  );
+
   input.addEventListener('paste', (e) => {
     const data = (e as ClipboardEvent).clipboardData;
     const file = pasteImageFile(data);
@@ -449,18 +507,7 @@ export function createComposer({
     setLive,
     setLivePartial,
     setTranscribing,
-    focus() {
-      input.focus({preventScroll: true});
-
-      const selection = window.getSelection();
-      if (selection) {
-        const range = document.createRange();
-        range.selectNodeContents(input);
-        range.collapse(false);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      }
-    },
+    focus: focusAtEnd,
     clear: field.clear,
     getDraft: field.getDraftText,
     setDraft: field.setDraft,
