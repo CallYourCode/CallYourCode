@@ -42,8 +42,11 @@ vi.mock('../audio/webAudioClip', async (orig) => ({
 
 type Claims = {busyClaims: Set<string>};
 type P = Record<string, unknown> & {
+  holdForPress(): void;
   startPTT(): void;
   endPTT(): void;
+  refusePress(why: string): void;
+  cancelCapture(): void;
   readonly pressCaptureId: number;
 };
 
@@ -64,10 +67,10 @@ beforeEach(async () => {
   );
 });
 
-// wiring.onVoiceStart pauses the reply and claims the speaker, then starts the press.
+// wiring.onVoiceStart holds the speaker for the press, then starts it once the
+// mic is open.
 function press(): void {
-  speaker.pause();
-  speaker.setBusy(true, 'press');
+  pipeline.holdForPress();
   pipeline.startPTT();
 }
 
@@ -125,27 +128,15 @@ describe('a refused press releases every claim it took', () => {
     expect(claims()).toEqual([]);
     expect(pipeline.pttDown).toBe(false);
   });
+});
 
-  // The reply the press paused comes back with the claim: the press that
-  // paused it is over and nothing was recorded over it.
-  test.each([
-    [
-      'the mic is not open',
-      () => {
-        pipeline.stream = null;
-        pipeline.actx = null;
-      }
-    ],
-    [
-      'dead track that cannot be re-acquired',
-      () => {
-        pipeline.stream = {getAudioTracks: () => [{readyState: 'ended', muted: false}]};
-        pipeline.actx = {state: 'running', currentTime: 0};
-        (pipeline as unknown as {reacquireStream: () => Promise<void>}).reacquireStream = () =>
-          Promise.reject(new Error('NotAllowedError'));
-      }
-    ]
-  ])('%s: the reply it paused plays again', async (_, refuse) => {
+// A press gives back exactly what IT paused, and only that, whenever it ends
+// without a recording; a capture's dropped take likewise. A reply the user had
+// paused by hand, or paused or resumed during the press, is never resumed by
+// the machine.
+describe('a press that records nothing gives back exactly the reply it paused', () => {
+  type Pending = {fail: (e: Error) => void};
+  const playReply = async () => {
     speaker.enqueue({
       msgId: 'reply',
       url: '/audio/reply.mp3',
@@ -155,12 +146,170 @@ describe('a refused press releases every claim it took', () => {
     });
     await settle();
     expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
-    refuse();
+  };
+  const micClosed = () => {
+    pipeline.stream = null;
+    pipeline.actx = null;
+  };
+  const micLive = () => {
+    pipeline.stream = {getAudioTracks: () => [{readyState: 'live', muted: false}]};
+    pipeline.actx = {state: 'running', currentTime: 0};
+  };
+  // A dead track whose re-acquire either fails at once or waits for the test.
+  const micDead = (pending?: Pending) => {
+    pipeline.stream = {getAudioTracks: () => [{readyState: 'ended', muted: false}]};
+    pipeline.actx = {state: 'running', currentTime: 0};
+    (pipeline as unknown as {reacquireStream: () => Promise<void>}).reacquireStream = () =>
+      pending
+        ? new Promise((_, rej) => (pending.fail = rej))
+        : Promise.reject(new Error('NotAllowedError'));
+  };
+  const state = () => speaker.state.state;
+  type Fire = {fire(): void; abandonCapture(cap: unknown, s: number, b: null, w: string): void};
+  // A take that ends in a drop (the verdict's own release path).
+  const dropTake = () => {
+    const p = pipeline as unknown as Fire & {active: unknown};
+    const cap = p.active;
+    p.active = null;
+    p.abandonCapture(cap, 1, null, 'test: dropped');
+  };
+
+  test('refused, the mic not open: the reply plays again', async () => {
+    await playReply();
+    micClosed();
     press();
+    expect(claims()).toEqual([]);
+    await settle();
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+  });
+
+  test('refused, the mic dead and not recoverable: the reply plays again', async () => {
+    await playReply();
+    micDead();
+    press();
+    expect(state()).toBe('paused');
     await settle();
     await settle();
     expect(pipeline.pttDown).toBe(false);
+    expect(state()).toBe('speaking');
+  });
+
+  test('the mic failed to open (the composer refuses the press): the reply plays again', async () => {
+    await playReply();
+    pipeline.holdForPress();
+    expect(state()).toBe('paused');
+    pipeline.refusePress('the microphone could not be opened (getUserMedia failed)');
     expect(claims()).toEqual([]);
-    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+    await settle();
+    expect(state()).toBe('speaking');
+  });
+
+  test('released before getUserMedia answered: the reply plays again', async () => {
+    await playReply();
+    pipeline.holdForPress();
+    expect(state()).toBe('paused');
+    pipeline.endPTT();
+    expect(claims()).toEqual([]);
+    await settle();
+    expect(state()).toBe('speaking');
+  });
+
+  test('released before the recovery answered: the reply plays again, once', async () => {
+    const pending = {} as Pending;
+    await playReply();
+    micDead(pending);
+    press();
+    await settle();
+    expect(state()).toBe('paused');
+    pipeline.endPTT();
+    await settle();
+    expect(state()).toBe('speaking');
+    pending.fail(new Error('NotAllowedError'));
+    await settle();
+    await settle();
+    expect(state()).toBe('speaking');
+    expect(claims()).toEqual([]);
+  });
+
+  test('cancelled before a capture began: the press is over and the reply plays again', async () => {
+    const pending = {} as Pending;
+    await playReply();
+    micDead(pending);
+    press();
+    await settle();
+    pipeline.cancelCapture();
+    expect(pipeline.pttDown).toBe(false);
+    expect(claims()).toEqual([]);
+    await settle();
+    expect(state()).toBe('speaking');
+    pending.fail(new Error('NotAllowedError'));
+    await settle();
+    await settle();
+    expect(pipeline.pressCaptureId).toBe(0);
+  });
+
+  test('a reply the user paused by hand before the press is never resumed', async () => {
+    await playReply();
+    speaker.pause();
+    micClosed();
+    press();
+    await settle();
+    expect(state()).toBe('paused');
+    pipeline.holdForPress();
+    pipeline.endPTT();
+    await settle();
+    expect(state()).toBe('paused');
+    pipeline.holdForPress();
+    pipeline.refusePress('the microphone could not be opened (getUserMedia failed)');
+    await settle();
+    expect(state()).toBe('paused');
+    expect(claims()).toEqual([]);
+  });
+
+  test('paused or resumed by the user during the press: the press does not touch it', async () => {
+    const pending = {} as Pending;
+    await playReply();
+    micDead(pending);
+    press();
+    await settle();
+    speaker.resume();
+    speaker.pause();
+    pipeline.endPTT();
+    await settle();
+    expect(state()).toBe('paused');
+  });
+
+  test('a dropped take gives back the reply it paused', async () => {
+    micLive();
+    await playReply();
+    (pipeline as unknown as Fire).fire();
+    expect(state()).toBe('paused');
+    dropTake();
+    await settle();
+    expect(state()).toBe('speaking');
+  });
+
+  test("a dropped take started by a press gives back the press's pause", async () => {
+    micLive();
+    await playReply();
+    pipeline.holdForPress();
+    (pipeline as unknown as {beginPress(): void}).beginPress();
+    expect(pipeline.pressCaptureId).not.toBe(0);
+    // The release (endPTT): the press's claim goes, the take is judged.
+    speaker.setBusy(false, 'press');
+    pipeline.pttDown = false;
+    dropTake();
+    await settle();
+    expect(state()).toBe('speaking');
+  });
+
+  test('a dropped take over a reply the user had paused leaves it paused', async () => {
+    micLive();
+    await playReply();
+    speaker.pause();
+    (pipeline as unknown as Fire).fire();
+    dropTake();
+    await settle();
+    expect(state()).toBe('paused');
   });
 });

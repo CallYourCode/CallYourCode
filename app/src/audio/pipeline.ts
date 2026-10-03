@@ -1,4 +1,4 @@
-import {speaker} from './speaker';
+import {speaker, type Interruption} from './speaker';
 import {playbackContextOpen, releasePlaybackContext, setCallPlayback} from './webAudioClip';
 import {releaseToneContext, toneContextOpen} from './turnTones';
 import {Pcm16kChunker, PCM_TAP_PROCESSOR_NAME, PCM_TAP_WORKLET_JS, STT_RATE} from './pcm';
@@ -93,6 +93,8 @@ type Capture = {
   audioFrom: number;
   dbs: number[];
   wasPlaying: boolean;
+  // What this take paused, given back if it is dropped.
+  paused: Interruption | null;
 
   fromPress: boolean;
   slot: Slot | null;
@@ -162,6 +164,8 @@ class Pipeline {
   private above = 0;
   private lastVoiceAt = 0;
   private pttDown = false;
+  // What the press paused, until its capture takes it or the press ends empty.
+  private pressPaused: Interruption | null = null;
   private handsFreeId: string | null = null;
 
   private captureSeq = 0;
@@ -254,8 +258,15 @@ class Pipeline {
     cap.wasPlaying = false;
     if (this.tailFor === cap) this.tailFor = null;
     speaker.setBusy(false, `capture:${cap.id}`);
-    if (resume && !this.pttDown && !this.active && !this.inFlight.size) speaker.resumeInterrupted();
+    if (resume) this.giveBack(cap.paused);
     this.syncRecordingState();
+  }
+
+  // Not while the user is still talking or a take is still being judged: a
+  // kept take drops what it interrupted. The last one out gives it back (every
+  // holder of a machine pause shares its token).
+  private giveBack(paused: Interruption | null): void {
+    if (!this.pttDown && !this.active && !this.inFlight.size) speaker.giveBack(paused);
   }
 
   private workletReady = false;
@@ -889,6 +900,14 @@ class Pipeline {
     this.syncRecordingState();
   }
 
+  // The composer's press takes the speaker before it asks for the mic: the
+  // 'press' claim, and the reply it pauses, recorded so that a press that
+  // records nothing gives back exactly that.
+  holdForPress(): void {
+    this.pressPaused = speaker.interrupt();
+    speaker.setBusy(true, 'press');
+  }
+
   startPTT(): void {
     if (this.pttDown) {
       cyclog('ptt.start.refused', {
@@ -927,24 +946,36 @@ class Pipeline {
     });
   }
 
-  // The press is refused: give back everything it took (the press itself, its
-  // capture id, the recording state, the speaker claim the composer took for
-  // it, and the reply it paused), so nothing waits behind a recording that
-  // never started. The release that follows finds no press down and does
-  // nothing. The composer refuses through here too when the mic cannot open.
+  // The press is refused (here, or by the composer when the mic cannot open).
+  // The release that follows finds no press down and does nothing.
   refusePress(why: string): void {
     cyclog('ptt.start.refused', {why, micOpen: !!this.stream, pttDown: this.pttDown});
+    this.endEmptyPress();
+  }
+
+  // A press that ends with no recording (refused, released or cancelled before
+  // the mic or its recovery answered) gives back everything it took: the press
+  // itself, its capture id, the recording state, the 'press' claim, and the
+  // reply it paused, so nothing waits behind a recording that never started.
+  private endEmptyPress(): void {
     this.pttDown = false;
     this.pttCaptureId = 0;
     speaker.setBusy(false, 'press');
     this.syncRecordingState();
-    speaker.resumeInterrupted();
+    const paused = this.pressPaused;
+    this.pressPaused = null;
+    this.giveBack(paused);
   }
 
   private beginPress(): void {
     if (!this.active) this.fire();
 
-    if (this.active) this.active.fromPress = true;
+    if (this.active) {
+      this.active.fromPress = true;
+      // The take now holds what the press paused; its verdict gives it back.
+      this.active.paused ??= this.pressPaused;
+    }
+    this.pressPaused = null;
     this.pttCaptureId = this.active?.id ?? 0;
     this.lastVoiceAt = performance.now();
     this.syncRecordingState();
@@ -955,7 +986,9 @@ class Pipeline {
     // pttDown): its claim on the speaker goes with it, or every later tap would
     // wait for a recording that is not happening.
     speaker.setBusy(false, 'press');
-    if (!this.pttDown) return;
+    // Released before the press reached the pipeline (getUserMedia had not
+    // answered), or after it was refused.
+    if (!this.pttDown) return this.endEmptyPress();
     this.pttDown = false;
     this.pttCaptureId = 0;
 
@@ -969,7 +1002,7 @@ class Pipeline {
         'the press ended with no capture running, so nothing was recorded ' +
         'and no event will follow'
     });
-    this.syncRecordingState();
+    this.endEmptyPress();
   }
 
   forceEnd(): void {
@@ -978,7 +1011,8 @@ class Pipeline {
 
   cancelCapture(): void {
     const cap = this.active;
-    if (!cap) return;
+    // Cancelled before a capture began (the mic or its recovery had not answered).
+    if (!cap) return this.endEmptyPress();
 
     cyclog('capture.cancelled', {
       cid: cap.cid,
@@ -1105,6 +1139,7 @@ class Pipeline {
       audioFrom: now,
       dbs: [],
       wasPlaying: speaker.isPlaying(),
+      paused: null,
       slot: null,
       stream: null,
       streamOpen: false,
@@ -1114,7 +1149,7 @@ class Pipeline {
 
       fromPress: false
     };
-    if (cap.wasPlaying) speaker.pause();
+    cap.paused = speaker.interrupt();
     speaker.setBusy(true, `capture:${cap.id}`);
 
     this.active = cap;

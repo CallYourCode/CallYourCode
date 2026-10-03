@@ -615,8 +615,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
 
       if (dataState.mode !== 'live') return;
 
-      speaker.pause();
-      speaker.setBusy(true, 'press');
+      pipeline.holdForPress();
       pttHolding = true;
       void ensureMic()
         .then(() => {
@@ -670,8 +669,8 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           capture: captureId,
           heldS: seconds,
           why:
-            'nothing was ever recorded, so no block was made: the release beat ' +
-            'getUserMedia, or the press was refused (ptt.start.refused says why)'
+            'nothing was ever recorded, so no block was made: the press ended before ' +
+            'the mic or its recovery answered, or it was refused (ptt.start.refused says why)'
         });
 
         if (interrupted) {

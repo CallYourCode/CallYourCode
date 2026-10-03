@@ -54,6 +54,10 @@ type SpeakerStateName =
   | 'blocked'
   | 'waiting';
 
+/* What the machine paused for a press or a capture: the clip, so exactly that
+ * clip is given back (giveBack) and nothing else. */
+export type Interruption = {readonly item: SpeakerItem};
+
 export type SpeakerState = {
   state: SpeakerStateName;
   sessionId?: string;
@@ -103,6 +107,8 @@ class Speaker {
     else this.playNext();
   }
   private lastBySession = new Map<string, SpeakerItem>();
+  // The machine's pause still standing; the user's pause or resume ends it.
+  private interruption: Interruption | null = null;
   private stateName: SpeakerStateName = 'idle';
   private stateListeners = new Set<StateListener>();
   private errorListeners = new Set<ErrorListener>();
@@ -316,6 +322,11 @@ class Speaker {
   }
 
   pause(): void {
+    this.interruption = null;
+    this.pauseCurrent();
+  }
+
+  private pauseCurrent(): void {
     dbg('pause', this.current?.msgId);
     if (!this.current) return;
     ++this.playGen;
@@ -330,14 +341,32 @@ class Speaker {
   resume(): void {
     const asked = this.current ?? (this.stateName === 'blocked' ? this.queue[0] : undefined);
     if (asked) asked.askedAt = performance.now();
+    this.interruption = null;
     this.resumeCurrent();
   }
 
-  /* The machine giving back what a capture or a press interrupted (pipeline
-   * release after a dropped take, pipeline refusePress for a refused press,
-   * the mic failing to open included). Nobody asked anew:
-   * the clip keeps the intent it had. */
-  resumeInterrupted(): void {
+  /* The machine taking the speaker for a press or a capture. A clip the user
+   * has not paused is paused, and the token naming it returned. A clip the
+   * machine already holds paused returns the token that holds it (a capture a
+   * press starts carries the press's pause). A clip the user paused is not
+   * the machine's to give back: null. */
+  interrupt(): Interruption | null {
+    if (!this.current) return null;
+    if (this.stateName === 'paused')
+      return this.interruption?.item === this.current ? this.interruption : null;
+    this.pauseCurrent();
+    this.interruption = {item: this.current};
+    return this.interruption;
+  }
+
+  /* The machine giving back what it paused (a press that recorded nothing, a
+   * dropped take): only that clip, only while it is still current and still
+   * paused by the machine, the user having neither paused nor resumed it
+   * since. Nobody asked anew: the clip keeps the intent it had. */
+  giveBack(paused: Interruption | null): void {
+    if (!paused || paused !== this.interruption) return;
+    this.interruption = null;
+    if (this.current !== paused.item || this.stateName !== 'paused') return;
     this.resumeCurrent();
   }
 

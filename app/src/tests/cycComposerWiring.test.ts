@@ -79,7 +79,6 @@ vi.mock('../audio/speaker', () => ({
     stopAll: vi.fn(),
     pause: vi.fn(),
     resume: vi.fn(),
-    resumeInterrupted: vi.fn(),
     setBusy: vi.fn(),
     state: {state: 'idle'}
   }
@@ -92,6 +91,7 @@ const pipelineMock = vi.hoisted(() => ({
   capturesInFlight: [] as number[],
   pressCaptureId: 0,
   cidOf: () => '',
+  holdForPress: vi.fn(),
   startPTT: vi.fn(),
   refusePress: vi.fn(),
   endPTT: vi.fn(),
