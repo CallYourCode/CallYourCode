@@ -43,6 +43,10 @@ export type ScrollEngineOptions = {
   // untouched; the scroll matrix seeds longer, wrapping rows shaped like the
   // owner's real chats (varied heights are what the measure/estimate gap needs).
   lines?: string[];
+  // The last N seeded lines are all the agent's: one long run of agent replies
+  // (the shape of a chat the agent filled while the owner was away), so the
+  // rows near the end sit in ONE message group. 0 = roles alternate throughout.
+  agentTail?: number;
 };
 
 // One session record as the engine's log line carries it (`t:"s"` on a page,
@@ -127,6 +131,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
   const eventsEvery = o.eventsEvery ?? 0;
   const attachDelayMs = o.attachDelayMs ?? 0;
   const dequeueDelayMs = o.dequeueDelayMs;
+  const agentTail = o.agentTail ?? 0;
   let agentRuns: ScrollAgentRun[] = [];
 
   type Msg = {
@@ -181,7 +186,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
     return ev;
   };
   for (let i = 0; i < count; i++) {
-    const role = i % 2 === 0 ? 'user' : 'claude';
+    const role = i % 2 === 0 && i < count - agentTail ? 'user' : 'claude';
     const withImage = imageEvery > 0 && role === 'claude' && i % imageEvery === 0;
     const m = push(role, lines[i % lines.length] + (i % 7 === 0 ? ` (#${i})` : ''), withImage);
     if (eventsEvery > 0 && role === 'claude' && i % eventsEvery === 0) {

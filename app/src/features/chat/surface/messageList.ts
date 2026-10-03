@@ -575,6 +575,19 @@ function recoverIfUncovered(inner: HTMLElement, st: RenderState): void {
 // the bottom, so a re-window follows the end rather than holding a top anchor.
 const BOTTOM_PIN_PX = 2;
 
+// A day section is empty when no row is left in it beside its date chip. A
+// window that opens mid-day draws its first day WITHOUT a chip, so a child
+// count cannot tell: "one child or fewer" pruned a chip-less section still
+// holding one group, with every row in it, and the list stood empty for the
+// rest of the paint. The paint's layout read then let the browser clamp
+// scrollTop to the spacers alone (2.7k px up, no write of ours), throwing back
+// a reader scrolling down (BZ Distributor, 2026-10-03).
+function sectionEmpty(section: HTMLElement): boolean {
+  for (const child of section.children)
+    if (!child.classList.contains('cyc-date-chip')) return false;
+  return true;
+}
+
 function cssEscape(id: string): string {
   const g = globalThis as unknown as {CSS?: {escape?: (s: string) => string}};
   return g.CSS?.escape ? g.CSS.escape(id) : id.replace(/["\\]/g, '\\$&');
@@ -1967,7 +1980,7 @@ function paintMessages(
     for (const w of emptied) {
       if (!w.isConnected) continue;
       const empty = w.classList.contains('cyc-date-group')
-        ? w.childElementCount <= 1
+        ? sectionEmpty(w)
         : !w.childElementCount;
       if (empty) w.remove();
     }
@@ -2217,7 +2230,6 @@ function paintMessages(
     inner.append(dateGroup);
   }
 
-  const onlyChip = (section: HTMLElement) => section.childElementCount <= 1;
 
   // Sweep the rows the walk reused verbatim: strip an unread or queued stamp off
   // any that is not this paint's anchor, and off a second row that duplicates
@@ -2246,7 +2258,7 @@ function paintMessages(
     const key = new Date(it.ts).toDateString();
     if (key !== dayKey) {
       dayKey = key;
-      if (spare?.dateGroup?.isConnected && spare.dayKey === key && onlyChip(spare.dateGroup)) {
+      if (spare?.dateGroup?.isConnected && spare.dayKey === key && sectionEmpty(spare.dateGroup)) {
         dateGroup = spare.dateGroup;
       } else {
         dateGroup = h('section', 'cyc-date-group relative');
@@ -2322,7 +2334,7 @@ function paintMessages(
 
   for (const w of emptied) {
     if (!w.isConnected) continue;
-    if (w.classList.contains('cyc-date-group') ? onlyChip(w) : !w.childElementCount) w.remove();
+    if (w.classList.contains('cyc-date-group') ? sectionEmpty(w) : !w.childElementCount) w.remove();
   }
 
   // A pending bubble's per-chunk transfer progress repaints in place: the
