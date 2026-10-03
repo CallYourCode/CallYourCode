@@ -17,7 +17,7 @@ import { deliverToPane } from "./pane-deliver.ts";
 import { stampTs, logChat, noticeChat, awaitingQueue, armAwaiting, clearAwaiting, armQueueClear,
   QUEUE_STUCK_MS } from "./chatlog.ts";
 import { markReadOnUtterance } from "../sessions/readstate.ts";
-import { audio, clipOnDisk, haveClip, adoptStagedClip } from "./clips.ts";
+import { audio, clipOnDisk, haveClip, adoptStagedClip, reclaimAdoptedClip } from "./clips.ts";
 import { attachmentsOf, attachmentFields, uploadIds, type ChatMsg, type UploadRec } from "./chatmsg.ts";
 import { persistPatch, type Session } from "../sessions/session-state.ts";
 import { transcribeStored, showPendingVoiceNote, readWords, fillWords, fillNoteWords,
@@ -42,7 +42,7 @@ export type DeliverDeps = {
   forgetDelivery(sessionId: string, entry: ReplyDelivery): void;
   writeHookState(): void;
   /** the upload binder (uploads.ts instance) */
-  bindOwnedUploads(claimed: UploadRec[], cid?: string): Promise<{ ups: UploadRec[]; missing: string[] }>;
+  bindOwnedUploads(claimed: UploadRec[], cid?: string, sessionId?: string): Promise<{ ups: UploadRec[]; missing: string[] }>;
   adoptStagedUploads(sessionId: string, ups: UploadRec[]): Promise<void>;
 };
 
@@ -325,8 +325,10 @@ export async function handleUtterance(ws: Sock | null, m: any, takenAt: number) 
    * carried, including a forged `path`. bindOwnedUploads throws that away and
    * puts back the file this engine wrote for that uploadId. A forge is
    * dropped. An id we minted whose file is gone fails the whole message. */
+  /* The session is passed so a file this message already adopted (a process
+   * that died before its row was written, intake.ts) is found at home. */
   const bound = await d.bindOwnedUploads(
-    attachmentsOf({ uploads: m.uploads, upload: m.upload } as ChatMsg), cid);
+    attachmentsOf({ uploads: m.uploads, upload: m.upload } as ChatMsg), cid, s?.id);
   const ups = bound.ups;
   /* ...and so is a voice note whose transcript failed on the device: the clip
    * is the message, and we can read it ourselves below.
@@ -339,6 +341,7 @@ export async function handleUtterance(ws: Sock | null, m: any, takenAt: number) 
    * was on disk the entire time; both reproductions logged onDisk=true beside
    * the drop. Computed once and reused below, so the guard and the msgId the
    * bubble gets can never disagree about the same clip. */
+  if (s && m.kind === "voice" && typeof m.msgId === "string") await reclaimAdoptedClip(s.id, m.msgId);
   const haveIt = m.kind === "voice" && typeof m.msgId === "string" && await haveClip(m.msgId);
   const rescuable = haveIt;
   D().log("utterance.in", { cid, session: String(m.id ?? ""), kind: m.kind ?? "text",

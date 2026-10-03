@@ -68,7 +68,7 @@ import type { PluginSpec } from "../plugins/platform/spec.ts";
 
 import { clients, send, broadcast, resetForTest as resetWire } from "../transport/wire.ts";
 import { initReadState, resetForTest as resetReadState } from "../sessions/readstate.ts";
-import { initClips } from "../chat/clips.ts";
+import { initClips, resetForTest as resetClips } from "../chat/clips.ts";
 import { initContextCache, claudeTitleOf,
   resetForTest as resetContextCache } from "../sessions/context-cache.ts";
 import { initSubagentCount,
@@ -403,6 +403,7 @@ function resetAllModules(): void {
   resetSessionState();
   resetChatlog();
   resetTts();
+  resetClips(); // the hot clip cache dies with the process; a restart reads the disk
   resetAsks();
   resetContextCache();
   resetSubagentCount();
@@ -1019,7 +1020,7 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
         noteDelivery: (id, how) => noteDelivery(id, how),
         forgetDelivery: (id, entry) => forgetDelivery(id, entry),
         writeHookState: () => writeHookState(),
-        bindOwnedUploads: (claimed, c) => uploads!.bindOwnedUploads(claimed, c),
+        bindOwnedUploads: (claimed, c, sid) => uploads!.bindOwnedUploads(claimed, c, sid),
         adoptStagedUploads: (id, ups) => uploads!.adoptStagedUploads(id, ups),
       });
     }

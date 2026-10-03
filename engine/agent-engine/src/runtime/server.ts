@@ -1075,7 +1075,7 @@ initDeliver({
   noteDelivery: (id, how) => noteDelivery(id, how),
   forgetDelivery: (id, entry) => forgetDelivery(id, entry),
   writeHookState: () => writeHookState(),
-  bindOwnedUploads: (claimed, cid) => uploads.bindOwnedUploads(claimed, cid),
+  bindOwnedUploads: (claimed, cid, sid) => uploads.bindOwnedUploads(claimed, cid, sid),
   adoptStagedUploads: (id, ups) => uploads.adoptStagedUploads(id, ups),
 });
 
