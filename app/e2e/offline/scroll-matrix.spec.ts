@@ -636,6 +636,59 @@ for (const v of VIEWPORTS) {
       }
     });
 
+    // CASE down-scroll (BZ Distributor laptop, 2026-10-03 09:40): scrolling DOWN
+    // toward the end through a long run of agent lines (one message group, the
+    // window opened mid-day) always moves the view down and loads no older
+    // history. The field saw scrollTop thrown ~2.9k px up on each step near the
+    // end (the window pruned for a layout, the browser clamped), read as the top,
+    // and history.older fired 24 times while the reader never reached the end.
+    test('down-scroll: scrolling down to the end moves down and loads no older history', async ({
+      page
+    }) => {
+      test.setTimeout(120_000);
+      const eng = await startScrollEngine({
+        count: 600,
+        eventsEvery: 9,
+        agentTail: 150,
+        lines: LONG
+      });
+      try {
+        await openPrimary(page, eng, v);
+        // up into the agent run, well clear of the end
+        for (let i = 0; i < 6; i++) await readerScroll(page, -700);
+        await page.waitForTimeout(600);
+        await installLogTap(page);
+        const distBefore = await distToEnd(page);
+        const samplePromise = sample(page, 4000);
+        let dist = distBefore;
+        for (let i = 0; i < 60 && dist > T.landPx; i++) {
+          dist = await readerScroll(page, 120);
+          await page.waitForTimeout(40);
+        }
+        const {frames} = await samplePromise;
+        await page.waitForTimeout(400);
+        const distAfter = await distToEnd(page);
+        // an upward leap the reader did not make (they only scrolled down)
+        let thrownUp = 0;
+        for (let i = 1; i < frames.length; i++)
+          if (frames[i].top < frames[i - 1].top - 200) thrownUp++;
+        const tap = await readTapCounts(page);
+        await annotate('down-scroll', {
+          distBefore,
+          distAfter,
+          thrownUp,
+          historyOlder: tap.counts['history.older'] ?? 0,
+          scrollUpUser: tap.counts['scroll.up.user'] ?? 0
+        });
+        expect(distBefore, 'the reader is not up in the agent run').toBeGreaterThan(2000);
+        expect(thrownUp, 'the view was thrown up while the reader scrolled down').toBe(0);
+        expect(tap.counts['history.older'] ?? 0, 'scrolling down loaded older history').toBe(0);
+        expect(distAfter, 'scrolling down never reached the end').toBeLessThanOrEqual(T.landPx);
+      } finally {
+        await eng.close();
+      }
+    });
+
     // CASE chat switch: leaving a chat and coming back must recompute its landing
     // from scratch, carrying no leftover scroll from the view you left. The offline
     // engine serves ONE session (the seal pins every scroll engine to the same

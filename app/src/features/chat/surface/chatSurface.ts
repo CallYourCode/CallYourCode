@@ -14,6 +14,7 @@ import {
   rewindowMessages,
   setMessageScrollOwner,
   messageListBanked,
+  messageModelTop,
   bankMessageShift
 } from './messageList';
 import {scrollSurface} from '@/shared/dom';
@@ -1106,6 +1107,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     rewindow: () => rewindowMessages(messageListInner),
     listBanked: () => messageListBanked(messageListInner),
     isMachineScroll: isMachineTop,
+    modelTop: () => messageModelTop(messageListInner),
     nearBottomPx: () => Math.max(OVERLAY_SCROLL_NEAR_PX, messageListScroll.clientHeight / 3),
     isPinned: () => pinnedToBottom,
     distToEnd,
@@ -1128,14 +1130,14 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
 
   const historyPager = installHistoryPager({
     container: messageListScroll,
-    messages: messageListInner,
     render: deps.render,
     ownsOpening: openOwned,
     isAnchoring: () => anchorHopPending,
-    // R7 routed through the ScrollOwner (phase 2 step 2): the pager asks the owner
-    // "was this a machine re-seat?" instead of reading the tag directly. The owner
-    // delegates to the same machine-top tag, so the answer is identical.
-    isMachineScroll: (top) => scrollOwner.isMachineScroll(top)
+    // R7 through the ScrollOwner: the pager asks the owner whether an upward move
+    // was a machine re-seat and whether the view is at the top of the loaded
+    // history, never reading the mounted rows itself.
+    isMachineScroll: (top) => scrollOwner.isMachineScroll(top),
+    atTop: scrollOwner.atTop
   });
   deps.onTeardown(historyPager.destroy);
 

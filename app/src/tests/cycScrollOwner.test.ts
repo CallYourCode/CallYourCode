@@ -19,7 +19,9 @@ afterEach(() => {
   delete (window as {onscrollend?: unknown}).onscrollend;
 });
 
-function mount(over: {isPinned?: () => boolean; distToEnd?: () => number} = {}) {
+function mount(
+  over: {isPinned?: () => boolean; distToEnd?: () => number; bank?: () => number} = {}
+) {
   const scroll = document.createElement('div');
   let top = 0;
   Object.defineProperty(scroll, 'scrollTop', {get: () => top, set: (v: number) => (top = v)});
@@ -38,6 +40,7 @@ function mount(over: {isPinned?: () => boolean; distToEnd?: () => number} = {}) 
     rewindow,
     listBanked: () => true,
     isMachineScroll: () => false,
+    modelTop: () => top + (over.bank?.() ?? 0),
     nearBottomPx: () => 100,
     isPinned: over.isPinned ?? (() => false),
     distToEnd: over.distToEnd ?? (() => 0),
@@ -340,5 +343,27 @@ describe('ScrollOwner after the reader stops', () => {
     pinned = true;
     vi.advanceTimersByTime(2000);
     expect(rewindow).toHaveBeenCalledTimes(1);
+  });
+});
+
+// R7: older history loads only when the reader reaches the top of the LOADED
+// history: the model offset (scrollTop plus the correction banked in the spacer
+// while a reader drives), or the box's own top while rows above are banked out
+// of it. Never the edge of the mounted window.
+describe('ScrollOwner top of the loaded history', () => {
+  test('the top is the start of the model or of the box, nowhere else', () => {
+    let bank = 0;
+    const {scroll, owner} = mount({bank: () => bank});
+    scroll.scrollTop = 56_358; // the field: far from the top
+    expect(owner.atTop()).toBe(false);
+    scroll.scrollTop = 40;
+    expect(owner.atTop()).toBe(true);
+    bank = 17_000; // the rows above are banked: the box's top is as high as it goes
+    expect(owner.atTop()).toBe(true);
+    scroll.scrollTop = 3000;
+    bank = -2950; // rows above measured shorter: the spacer carries the difference
+    expect(owner.atTop()).toBe(true);
+    bank = 0;
+    expect(owner.atTop()).toBe(false);
   });
 });

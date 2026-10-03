@@ -11,8 +11,12 @@ import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 //
 // installHistoryPager was already handed an `isMachineScroll` predicate but never
 // consulted it. It now gates the scroll-driven fetch on it: an upward move that
-// matches the last machine write loads NOTHING; only an untagged (reader) move
-// at the top still loads older. grep token: `pager machine gate`.
+// matches the last machine write loads NOTHING. And it asks the ScrollOwner
+// whether the view sits at the top of the LOADED history (the model offset), not
+// whether the first mounted row meets the viewport: the BZ Distributor
+// down-scroll loop (laptop, 2026-10-03) read the virtual window's own edge as
+// the top at scrollTop 56k to 203k, and older history loaded 24 times while the
+// reader scrolled DOWN. grep token: `pager machine gate`.
 
 const store = vi.hoisted(() => ({
   canOlder: vi.fn(() => true),
@@ -25,18 +29,12 @@ vi.mock('@/shared/logging', () => ({cyclog: () => {}}));
 
 import {installHistoryPager} from '@/features/chat/surface/historyPager';
 
-// A container whose scrollTop we drive and whose viewport top is 0, holding a
-// first message row that sits AT the container top (so the pager's own
-// "first row is well above the fold" cover check does not veto the fetch: the
-// only thing standing between an upward move and a load is the machine gate).
+// A container whose scrollTop we drive. The owner's answers are stubbed: the
+// machine tag per test, the top as the owner reads it (model offset <= 100 px,
+// no bank here).
 function mount() {
   const container = document.createElement('div');
   container.className = 'cyc-message-list-scroll';
-  const messages = document.createElement('div');
-  const first = document.createElement('div');
-  first.className = 'cyc-message';
-  messages.append(first);
-  container.append(messages);
   document.body.append(container);
 
   let top = 0;
@@ -47,28 +45,26 @@ function mount() {
       top = v;
     }
   });
-  container.getBoundingClientRect = () =>
-    ({top: 0, left: 0, right: 390, bottom: 800, width: 390, height: 800, x: 0, y: 0, toJSON() {}}) as DOMRect;
-  first.getBoundingClientRect = () =>
-    ({top: 0, left: 0, right: 390, bottom: 100, width: 390, height: 100, x: 0, y: 0, toJSON() {}}) as DOMRect;
 
   const setTop = (v: number) => {
     container.scrollTop = v;
     container.dispatchEvent(new Event('scroll'));
   };
-  return {container, messages, setTop};
+  return {container, setTop};
 }
 
 let machine = false;
-function pager(container: HTMLElement, messages: HTMLElement) {
-  return installHistoryPager({
-    container,
-    messages,
+function mountPager() {
+  const m = mount();
+  installHistoryPager({
+    container: m.container,
     render: () => {},
     ownsOpening: () => false,
     isAnchoring: () => false,
-    isMachineScroll: () => machine
+    isMachineScroll: () => machine,
+    atTop: () => m.container.scrollTop <= 100
   });
+  return m;
 }
 
 beforeEach(() => {
@@ -83,35 +79,39 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-describe('pager machine gate: the older-history pager ignores the app\'s own re-seat', () => {
-  test('an upward MACHINE re-seat near the top loads nothing', () => {
-    const {container, messages, setTop} = mount();
-    pager(container, messages);
-    setTop(5000); // a downward settle first, arming lastCoverTop
+describe('pager machine gate: older history loads only when the reader reaches the top', () => {
+  test('an upward MACHINE re-seat at the top loads nothing', () => {
+    const {setTop} = mountPager();
+    setTop(5000); // a downward settle first, arming the upward check
     machine = true;
-    setTop(1000); // the go-to-bottom re-window's upward re-seat
+    setTop(0); // the go-to-bottom re-window's upward re-seat
     expect(store.loadOlder).not.toHaveBeenCalled();
   });
 
-  test('an upward READER move near the top still loads older history', () => {
-    const {container, messages, setTop} = mount();
-    pager(container, messages);
+  test('the reader scrolling up to the top loads older history', () => {
+    const {setTop} = mountPager();
     setTop(5000);
-    machine = false;
-    setTop(1000); // a genuine reader flick to the top
+    setTop(40);
     expect(store.loadOlder).toHaveBeenCalledTimes(1);
   });
 
-  test('a reader move at the top loads once even right after a machine re-seat', () => {
-    const {container, messages, setTop} = mount();
-    pager(container, messages);
-    setTop(5000);
-    machine = true;
-    setTop(2000); // app re-seat: ignored
+  test('an untagged upward move far from the top loads nothing', () => {
+    const {setTop} = mountPager();
+    // the field: a browser clamp threw the view ~2.7k px up into the blank top
+    // spacer, so no mounted row sat above it, at scrollTop 56k; that is not the
+    // top of the history
+    setTop(59_079);
+    setTop(56_358);
     expect(store.loadOlder).not.toHaveBeenCalled();
-    setTop(5000); // re-arm downward
-    machine = false;
-    setTop(1500); // reader flick: loads
+  });
+
+  test('a wheel pull toward the top loads only at the top', () => {
+    const {container, setTop} = mountPager();
+    setTop(3000);
+    container.dispatchEvent(new WheelEvent('wheel', {deltaY: -100}));
+    expect(store.loadOlder).not.toHaveBeenCalled();
+    container.scrollTop = 0;
+    container.dispatchEvent(new WheelEvent('wheel', {deltaY: -100}));
     expect(store.loadOlder).toHaveBeenCalledTimes(1);
   });
 });

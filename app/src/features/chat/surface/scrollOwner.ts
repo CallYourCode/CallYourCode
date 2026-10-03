@@ -11,6 +11,9 @@
 //                      behaviour off it yet.
 //   - isMachineScroll  the history pager's R7 question (was this offset a machine
 //                      re-seat?), delegated to the shared machine-top tag.
+//   - atTop            the pager's other R7 question (is the view at the top of
+//                      the loaded history?), read off the offsets, never the
+//                      mounted window's edge.
 //   - nearBottom       storeBindings' R8 question (is the reader near the end?),
 //                      tracked off the scroll event with the SAME formula and the
 //                      same "no synchronous measure in the notify path" property.
@@ -77,6 +80,9 @@ export interface ScrollOwnerDeps {
   listBanked(): boolean;
   // The existing readers, so each owner answer is identical to today's.
   isMachineScroll(top: number): boolean;
+  // The model offset of the viewport top (scrollTop plus any banked correction):
+  // 0 is the start of the loaded history.
+  modelTop(): number;
   nearBottomPx(): number;
   isPinned(): boolean;
   // How far the view sits above the true end, in px.
@@ -89,6 +95,10 @@ export interface ScrollOwnerDeps {
   bankShift(delta: number): void;
   onTeardown(d: () => void): void;
 }
+
+// A view within this many px of the start of the loaded history is at its top:
+// the history pager loads older pages from there.
+const HISTORY_TOP_PX = 100;
 
 export function createScrollOwner(deps: ScrollOwnerDeps) {
   const {scroll} = deps;
@@ -342,6 +352,16 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     // reader flick (load older)? Delegates to the shared machine-top tag, so the
     // answer is identical to calling isMachineScroll directly.
     isMachineScroll: (top: number) => deps.isMachineScroll(top),
+    // R7's other half: older history loads only at the top of the LOADED
+    // history: the view's model offset within HISTORY_TOP_PX of 0, or the box's
+    // own offset while a reader drives with the rows above banked out of the
+    // spacer (the box's top is then as high as the reader can go; the settle
+    // hands the bank back). Not the first MOUNTED row near the viewport: in the
+    // virtual window that is the window's own top edge, met anywhere in the
+    // history whenever the view outruns the window (BZ Distributor, 2026-10-03:
+    // older history loaded 24 times at scrollTop 56k to 203k while the owner
+    // scrolled down).
+    atTop: () => Math.min(scroll.scrollTop, deps.modelTop()) <= HISTORY_TOP_PX,
     // R8 (storeBindings): the reader is near the end and a live reply should keep
     // the view pinned. Same formula, same scroll-tracked value.
     nearBottom: () => nearBottomFlag,
