@@ -21,7 +21,7 @@ import { recordVoiceOp } from "./voicelog.ts";
 import { newCid } from "../../../shared/logbook.ts";
 import { realClock, type Clock } from "../runtime/clock.ts";
 import { stampTs, logChat, type ChatSession } from "../chat/chatlog.ts";
-import { markReadOnUtterance, type ReadStateSession } from "../sessions/readstate.ts";
+import type { ReadStateSession } from "../sessions/readstate.ts";
 import { admitPartial, noteDecodeStart, noteDecodeResult, wordsOf, release,
   setTranscriptRecordLog, type DecodeMode } from "./transcript-record.ts";
 import type { ChatMsg, UploadRec } from "../chat/chatmsg.ts";
@@ -373,7 +373,6 @@ export function showPendingVoiceNote(s: NoteSession, d: PendingNote, rescue: Pro
   const msg: ChatMsg = { id: s.id, role: "user", text: "", ts, cid: d.cid,
     ...d.extra, transcriptPending: true };
   logChat(s, msg);
-  markReadOnUtterance(s, ts); // his own message reads everything above it (#452)
   dd.broadcast({ t: "chat", ...msg });
   dd.log("utterance.shown-pending", { cid: d.cid, session: s.id, msgId: d.msgId, ts,
     why: "the note is long; shown now with the audio safe and the transcript pending, " +

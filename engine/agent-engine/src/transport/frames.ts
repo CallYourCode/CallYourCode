@@ -280,7 +280,14 @@ export async function dispatchClientFrame(ws: Sock, m: any): Promise<void> {
    * socket with the full frame, exactly as hello does; an app too old to send
    * this never does, and never needs to. */
   else if (m.t === "sessions-resync") sendFullSessions(ws);
-  else if (m.t === "attach") onAttach(ws, m);
+  else if (m.t === "attach") {
+    onAttach(ws, m);
+    /* Opening a chat on a page that says, on this very frame, that it can be
+     * seen is a visible claim for that chat (a phone already visible on another
+     * chat sends no new visible frame when he taps this one). A page in the
+     * background never stamps it, so a resumed re-attach cancels nothing. */
+    if (m.visible === true) cancelForVisible(ws);
+  }
   else if (m.t === "progress") onProgress(m);
   /* NOT AWAITED: a message held while its recording decodes must not stop this
    * socket reading the next frame; onUtterance decides delivery order. */

@@ -925,6 +925,24 @@ test("a beat restating the same visibility is not a presence change, and is not 
   expect(lines.some((l) => l.includes("[presence]"))).toBe(false);
 });
 
+test("opening the chat on a visible page takes its queued banner back; a background re-attach does not", async () => {
+  /* The phone is visible on another chat, so no new visible frame is sent when
+   * he taps this one: the attach frame says it is visible (the app stamps
+   * `visible: true` only while the document is shown). */
+  const c = await phoneJustHidden();
+  await say("for the chat he is about to open");
+  c.attached("some-other-chat");
+  c.setVisible(true, core.clock.now());
+  await dispatchClientFrame(c.sock, { t: "attach", id: wireId(PANE), frontier: -1 });
+  expect(saidSomething("[notify] dropped")).toBe(false); // no visible stamp: nothing
+  c.attached("some-other-chat");
+  await dispatchClientFrame(c.sock, { t: "attach", id: wireId(PANE), frontier: -1, visible: true });
+  expect(said().find((l) => l.includes("[notify] dropped"))).toContain("said visible on this chat");
+  await quietWindow();
+  expect(hits()).toHaveLength(0);
+  expect(unreadOf(session())).toBe(1); // opening is not seeing
+});
+
 test("a phone back on ANOTHER chat does not take this chat's banner back", async () => {
   const c = await phoneJustHidden();
   await say("for the chat you are not on");

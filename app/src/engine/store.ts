@@ -628,13 +628,9 @@ export function attach(sessionId: string) {
   evictCold(sessionId);
   s.olderFloor = undefined; // a fresh open re-probes the axis from the tail
   /* Opening the chat is coming back to it: drop any deliberate mark-unread
-   * intent so the row's badge lifts and the engine's read (reported as he
-   * scrolls the tail into view) is honoured from here on. */
+   * intent. The count is NOT zeroed here: opening is not seeing, and the badge
+   * falls as the engine's marker moves with what is actually on screen. */
   markedUnread.delete(sessionId);
-  if (s.unread) {
-    s.unread = 0;
-    notify();
-  }
   const owner = connOf(s.engineKey);
   for (const c of conns) {
     if (c !== owner) c.client.detach();
@@ -760,6 +756,14 @@ export function canOlder(sessionId: string): boolean {
   if (!s || s.loadingOlder) return false;
   // more is available if the store holds rows below the loaded floor, or the
   // replicator is still backfilling older pages that will land in the store.
+  return rowStore.windowHasMoreBelow(sessionId) || replBackfilling(sessionId);
+}
+
+/* Whether rows older than the open window exist (stored below its floor, or
+ * still being backfilled), whether or not a load is in flight. The read rule asks
+ * this: a marker below the window has unloaded rows after it, which this device
+ * cannot have seen. */
+export function historyBelowWindow(sessionId: string): boolean {
   return rowStore.windowHasMoreBelow(sessionId) || replBackfilling(sessionId);
 }
 

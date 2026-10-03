@@ -32,22 +32,6 @@ function pendingOf(sessionId: string): ReadMarker | undefined {
   return p.mid ? {mid: p.mid, ts: p.ts} : {ts: p.ts};
 }
 
-/* A PRESS-TIME optimistic mark for this device's OWN row, held in memory only.
- * A just-sent row has no engine identity yet and its durable sighting is queued
- * on delivery (admit.ts); until then this keeps the unread divider from
- * stranding above his own message without putting a heard intent in the drain
- * to compete with the send it belongs to (reads drain ahead of sends). It is
- * forward-only and superseded the moment the durable sighting or the broadcast
- * reaches the same row (effectiveMarkerOf takes the furthest). */
-const localMarks = new Map<string, ReadMarker>();
-
-export function sightLocalRow(sessionId: string, marker: ReadMarker): void {
-  const s = sessions.get(sessionId);
-  const msgs = (s?.messages ?? []) as CycEngineMessage[];
-  const cur = localMarks.get(sessionId);
-  localMarks.set(sessionId, furthest(msgs, cur, marker) ?? marker);
-}
-
 /* The store index of a marker's row, resolved by durable IDENTITY ALONE: the
  * mid. -1 when the marker has no mid, or its row is not in the loaded window
  * (aged out, or never loaded). Time is never identity here: there is no
@@ -85,8 +69,7 @@ function furthest(
  * read here. The divider, landing and speech all anchor on THIS. */
 export function effectiveMarkerOf(s: CycEngineSession): ReadMarker | undefined {
   const msgs = s.messages as CycEngineMessage[];
-  const broadcastPlusDurable = furthest(msgs, s.readThrough ?? undefined, pendingOf(s.id));
-  return furthest(msgs, broadcastPlusDurable, localMarks.get(s.id));
+  return furthest(msgs, s.readThrough ?? undefined, pendingOf(s.id));
 }
 
 /* MAY A CLIP AUTOPLAY AS A LIVE ARRIVAL? The SAME truth the unread count and the
@@ -212,7 +195,6 @@ export function __resetReadStateFreshForTest(): void {
 export function forgetSighting(sessionId: string): void {
   const i = intents.all().find((x) => x.kind === 'heard' && x.sessionId === sessionId);
   if (i) intents.remove(i.id);
-  localMarks.delete(sessionId);
 }
 
 export function reportSighting(

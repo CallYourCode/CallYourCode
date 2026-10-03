@@ -368,6 +368,7 @@ function buildApp() {
     heardTsOf: (s) => heardTsOf(s),
     readMarkerOf: (s) => readMarkerOf(s),
     reportViewedThrough: (id) => reportViewedThrough(id),
+    noteOnScreen: (id) => noteOnScreen(id),
     play: (sid, mid, text) => play(sid, mid, text),
     suppressAutoSpeak: () => suppressAutoSpeak,
     clearSuppressAutoSpeak: () => {
@@ -589,14 +590,16 @@ function buildApp() {
 
   let suppressAutoSpeak = false;
 
-  const {heardTsOf, readMarkerOf, markSeen, reportViewedThrough, markHeard} = createHeardProgress({
-    store: engine,
-    isLive: () => dataState.mode === 'live',
-    activeId: () => sessionState.activeId,
-    isChatViewOpen: () => mainColumns.dataset.view === 'chat',
-    onScreenThrough: (id) => cs.newestOnScreen(id),
-    onHeardMarked: (sessionId, marker) => noteHeardMarked(sessionId, marker)
-  });
+  const {heardTsOf, readMarkerOf, markSeen, reportViewedThrough, markHeard, noteOnScreen} =
+    createHeardProgress({
+      store: engine,
+      isLive: () => dataState.mode === 'live',
+      activeId: () => sessionState.activeId,
+      isChatViewOpen: () => mainColumns.dataset.view === 'chat',
+      onScreenRows: (id) => cs.onScreenRows(id),
+      historyBelowWindow: (id) => engine.historyBelowWindow(id),
+      onHeardMarked: (sessionId, marker) => noteHeardMarked(sessionId, marker)
+    });
 
   const {
     sessionAttachments,

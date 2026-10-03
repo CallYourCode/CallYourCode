@@ -92,15 +92,14 @@ function applySessionRow(
         if (es.alive !== false) endDeathGrace(s.id);
         s.churnGrey = false;
       }
-      /* The attached (open) chat normally shows no badge for its own live
-       * activity -- you are reading it -- so its count is zeroed here. The one
-       * exception is a deliberate mark-unread: the engine moved the marker back
-       * and this frame carries that, so honour it. Cleared on open
-       * (store.attach), so the badge still lifts the moment he comes back. */
-      s.unread = s.id === ctx.attachedId() && !markedUnread.has(s.id) ? 0 : es.unread;
-      // The badge above is zeroed for the attached chat; keep the engine's real
-      // count beside it so speech-on-open reads the same unread authority the
-      // divider does even while the owner is reading this chat.
+      /* THE ENGINE'S COUNT, for the attached chat too (owner, 2026-10-03). It
+       * used to be zeroed here for the open chat ("you are reading it"), which
+       * was a read nobody saw: on a phone, back to the list keeps the chat
+       * attached, so replies that landed meanwhile showed 0, the re-open landed
+       * at the bottom with no divider, and the rows above were read on every
+       * device. The count now falls only as rows are actually seen (sightings
+       * move the engine's marker). */
+      s.unread = es.unread;
       s.engineUnread = es.unread;
 
       /* THE ENGINE IS THE ONE AUTHORITY (fix-unread): adopt its broadcast

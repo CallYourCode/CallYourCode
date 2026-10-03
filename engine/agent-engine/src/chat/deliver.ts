@@ -16,7 +16,6 @@ import { PaneNotReady, DeliveryStranded } from "../adapters/mux-adapter.ts";
 import { deliverToPane } from "./pane-deliver.ts";
 import { stampTs, logChat, noticeChat, awaitingQueue, armAwaiting, clearAwaiting, armQueueClear,
   QUEUE_STUCK_MS } from "./chatlog.ts";
-import { markReadOnUtterance } from "../sessions/readstate.ts";
 import { audio, clipOnDisk, haveClip, adoptStagedClip } from "./clips.ts";
 import { attachmentsOf, attachmentFields, uploadIds, type ChatMsg, type UploadRec } from "./chatmsg.ts";
 import { persistPatch, type Session } from "../sessions/session-state.ts";
@@ -800,7 +799,7 @@ export async function injectUserMessage(
       clearAwaiting(cid); // an idle pane never queues: drop the pre-arm
     }
     const msg = commitDelivery(s, inj, ts, willQueue);
-    markReadOnUtterance(s, ts); // his own message reads everything above it (#452)
+    // No read on send (owner, 2026-10-03; was #452): see readstate.ts.
     D().log("utterance.delivered", { cid, session: s.id, msgId: msg.msgId, ts,
       queued: willQueue, consumedEarly: consumedEarly || undefined,
       chars: text.length, how: inj.how,
@@ -813,7 +812,6 @@ export async function injectUserMessage(
   const ts = inj.completesTs ?? stampTs(s);
   send(s.ws, { t: "transcript", text });
   const msg = commitDelivery(s, inj, ts, false);
-  markReadOnUtterance(s, ts); // his own message reads everything above it (#452)
   D().log("utterance.delivered", { cid, session: s.id, msgId: msg.msgId, ts,
     transport: "socket", chars: text.length, how: inj.how,
     completing: inj.completesTs != null || undefined });

@@ -137,9 +137,16 @@ export function markAllRead(s: ReadStateSession): boolean {
   return markRead(s, last.ts);
 }
 
-export function markReadOnUtterance(s: ReadStateSession, ts: number): void {
-  if (markRead(s, ts)) deps.broadcastSessions();
-}
+/* NO READ ON SEND (owner, 2026-10-03). markReadOnUtterance used to stand here
+ * (#452: "his own message reads everything above it"), so the unread count meant
+ * "things I have not seen" rather than "things since I last tapped". It read
+ * rows nobody saw: a hands-free note from a locked phone read every reply above
+ * it on every device and dismissed its banner. The owner's rule replaces it: a
+ * row is read only when the app has had it on screen (or heard it to the end),
+ * through a contiguous run from the marker. A typed send scrolls the chat to the
+ * bottom, so what he was actually looking at is still read, by its sighting; the
+ * reply after his message is still news, because nothing reads past what was
+ * seen. */
 
 /* MARK IT UNREAD AGAIN: the one marker, moved BACKWARDS. The
  * marker is put back to just before the agent's last message and every view

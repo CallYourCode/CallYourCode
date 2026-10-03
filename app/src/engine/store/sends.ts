@@ -9,7 +9,6 @@ import type {CycUpload} from '../contract';
 import type {CycEngineMessage} from './types';
 import {connOf, findLocal, notifyNow, sessions} from './registry';
 import {stampRowId} from './rows/core';
-import {sightLocalRow} from './readState';
 import {retryVoiceClip} from './voiceUpload';
 import {retryAttachConversion} from './attachSend';
 import * as transfers from '../transfers/worker';
@@ -552,13 +551,9 @@ export function sendText(
   if (opts.wire?.words.length) msg.wordsPending = true;
 
   s.messages.push(msg);
-  // Optimism (fix-unread): the moment his own row is on screen, mark it read in
-  // memory so the unread divider never strands above his own message while the
-  // send is in flight. This is NOT a wire sighting -- the row has no engine
-  // identity yet and its durable sighting is queued on delivery (admit.ts), so
-  // nothing here competes with the send in the drain. No timestamp math: the
-  // engine stays the authority and this overlay collapses to its marker.
-  sightLocalRow(sessionId, {ts: msg.ts});
+  // No read on send (owner, 2026-10-03): the press-time optimistic mark that
+  // stood here moved this device's marker past every reply above his row, seen
+  // or not. The divider only lands on agent rows, so it cannot strand on his.
   s.thinking = true;
   notifyNow();
 

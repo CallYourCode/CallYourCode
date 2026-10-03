@@ -304,7 +304,10 @@ export class WsEngineClient implements EngineClient {
       t: 'attach',
       id: sessionId,
       frontier,
-      ...(verifyFrom !== undefined && verifyFrom >= 0 ? {verifyFrom} : {})
+      ...(verifyFrom !== undefined && verifyFrom >= 0 ? {verifyFrom} : {}),
+      // Opening a chat on a page he can see takes its queued banner back on the
+      // engine, as a visible frame does; a page in the background never says so.
+      ...(document.hidden ? {} : {visible: true})
     });
 
     if (this.sealReady() && this.awaitingInboundBy === null) {
