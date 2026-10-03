@@ -12,6 +12,7 @@ import {
 } from './messageContent';
 import {messageFrameEl, docFrameEl} from './messageFrame';
 import {MEDIA_SECONDARY_TEXT, paintOnTheme} from '@/features/media/mediaPaint';
+import {cancelDownload, downloadLive, paintDownloadCard} from '@/features/media/downloadCards';
 import {paintPresentation, type Presentation} from '@/components/presentation';
 import {
   formatBytes,
@@ -309,6 +310,9 @@ export function downloadMessage(
   // A lone card carries the stamp at the inline end of its size row (inside the
   // card's `pe-11`, clear of the download button).
   doc.append(docFootRow(sizeDiv, captionText ? null : footStamp(m)), dl);
+  // A download in progress (or finished, or failed) paints its state here, so a
+  // card the list re-renders mid-download shows where it is.
+  paintDownloadCard(doc, f);
   container.append(docWrapper);
   message.append(container);
 
@@ -317,7 +321,9 @@ export function downloadMessage(
 
     dl.addEventListener('click', (e) => {
       e.stopPropagation();
-      onOpenFile(m);
+      // While it downloads, the button is the cancel.
+      if (downloadLive(f.docId)) cancelDownload(f.docId);
+      else onOpenFile(m);
     });
   }
 
