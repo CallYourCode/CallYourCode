@@ -46,7 +46,9 @@ export interface StoreBindingsDeps {
   restoreVoiceBlock: ComposerWiring['restoreVoiceBlock'];
   clipCid: ComposerWiring['clipCid'];
   vaultKeyOf: ComposerWiring['vaultKeyOf'];
-  releaseMicIfIdle(): void;
+  // `grace` keeps a just-used mic open for the next take (composer wiring's
+  // MIC_GRACE_MS); without it the mic is released at once.
+  releaseMicIfIdle(grace?: boolean): void;
   markHeard: (sessionId: string, msgId: string) => void;
   reportViewedThrough(id: string): void;
   setSuppressAutoSpeak(v: boolean): void;
@@ -406,7 +408,6 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       if (!restoredActive && engine.list().length && tryRestoreActive() === 'opened') return;
       const s = active();
       const count = s ? s.messages.length : -1;
-
 
       const overlayActive = !!s && engine.overlayOn(s.id);
       const evCount = overlayActive ? (s as CycEngineSession).events.length : -1;
