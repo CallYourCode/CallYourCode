@@ -260,6 +260,7 @@ function mkListDeps(): ListPaneDeps {
     loadDraft: vi.fn(),
     releaseMicIfIdle: vi.fn(),
     rowAudioClick: vi.fn(),
+    playerToggle: vi.fn(),
     openPlayingMessage: vi.fn(),
     restored: vi.fn(),
     cancelPendingOpens: vi.fn(),

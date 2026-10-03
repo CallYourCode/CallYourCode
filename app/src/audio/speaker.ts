@@ -1,4 +1,4 @@
-import {resolveAudioUrl} from './audioCache';
+import {streamAudioUrl} from './audioCache';
 import {WebAudioClip, unlockPlayback} from './webAudioClip';
 import {cyclog} from '@/shared/logging';
 
@@ -24,11 +24,17 @@ type SpeakerItem = {
 
   durationS?: number;
 
+  /** A user command (a tap), not automatic speech: it starts now even while a
+   *  capture holds the speaker (setBusy), and a kept utterance that began before
+   *  it does not cancel it (supersede). */
   manual?: boolean;
   /** WHY this clip is playing (audioPlayback.PlayReason): 'autoplay-open',
    *  'autoplay-arrival' or 'tap'. Kept as a string here so the speaker owns no
    *  app-surface types; it rides onto the clip.play log line for diagnosis. */
   reason?: string;
+  /** performance.now() when it was enqueued: orders it against a capture's start
+   *  (supersede) and times tap-to-sound on the clip.started line. */
+  at?: number;
 };
 
 type SpeakerStateName = 'idle' | 'loading' | 'speaking' | 'paused' | 'finished' | 'blocked';
@@ -55,6 +61,9 @@ class Speaker {
   private get busy(): boolean {
     return this.busyClaims.size > 0;
   }
+  holds(): string[] {
+    return [...this.busyClaims];
+  }
   private lastBySession = new Map<string, SpeakerItem>();
   private stateName: SpeakerStateName = 'idle';
   private stateListeners = new Set<StateListener>();
@@ -78,11 +87,26 @@ class Speaker {
 
     this.audio.addEventListener('error', () => {
       if (!this.current) return;
-      const bad = this.current;
-      this.current = null;
-      for (const fn of this.errorListeners) fn(bad);
-      this.playNext();
+      this.failed(this.current, 'media', 'the player could not decode or load the clip');
     });
+  }
+
+  /* Every way a clip can fail to sound ends here, so none is silent: a log line,
+   * the error listeners (a toast), and the queue moves on. */
+  private failed(item: SpeakerItem, stage: string, err: unknown): void {
+    cyclog('clip.fail', {
+      session: item.sessionId,
+      msg: item.msgId,
+      reason: item.reason ?? 'tap',
+      stage,
+      err,
+      ms: item.at === undefined ? undefined : Math.round(performance.now() - item.at)
+    });
+    if (this.current === item) this.current = null;
+    for (const fn of this.errorListeners) fn(item);
+    // Never left in 'loading' (a spinner with nothing behind it), busy or not.
+    if (this.queue.length) this.playNext();
+    else this.emit('idle');
   }
 
   private releaseMedia(): void {
@@ -220,6 +244,10 @@ class Speaker {
     dbg('unlock done');
   }
 
+  /* The busy hold (setBusy: a capture recording or awaiting its verdict) delays
+   * AUTOMATIC speech only. A manual item is a tap, the user's latest command, and
+   * starts now: holding it left the button idle with no trace while a long
+   * transcription ran (play-tap, 2026-10-03). */
   enqueue(item: SpeakerItem): void {
     if (this.current && this.current.sessionId !== item.sessionId) this.stopAll();
 
@@ -227,9 +255,27 @@ class Speaker {
       dbg('enqueue duplicate dropped', item.msgId);
       return;
     }
+    item.at = performance.now();
+    this.started.delete(item);
     this.queue.push(item);
 
-    if (!this.current && !this.busy) this.playNext();
+    if (!this.current && (!this.busy || item.manual)) this.playNext();
+  }
+
+  /* The user just said something (pipeline: a capture that began at `since` was
+   * kept): what the speaker was saying or holding from before is stale and goes.
+   * A tap made after `since` is newer than the utterance and stays. */
+  supersede(since: number): void {
+    const fresh = (it: SpeakerItem) => !!it.manual && (it.at ?? -Infinity) >= since;
+    const keep = this.queue.filter(fresh);
+    if (this.current && fresh(this.current)) {
+      this.queue = keep;
+      return;
+    }
+    this.stopAll();
+    if (!keep.length) return;
+    this.queue = keep;
+    this.playNext();
   }
 
   pause(): void {
@@ -244,7 +290,15 @@ class Speaker {
 
   resume(): void {
     dbg('resume', this.current?.msgId);
-    if (!this.current) return;
+    if (!this.current) {
+      // Blocked by the autoplay policy: the clip went back to the head of the
+      // queue, and a press on play is the gesture that starts it.
+      if (this.stateName === 'blocked' && this.queue.length) this.playNext();
+      return;
+    }
+    // Still fetching: playing now would run the player with no source and drop
+    // the clip. The load in flight starts it.
+    if (this.stateName === 'loading') return;
 
     if (!this.mayStart(this.current)) {
       dbg('resume refused by the gate');
@@ -315,25 +369,44 @@ class Speaker {
         dbg('playEl playing');
 
         this.suppressMediaSession();
+        const item = this.current;
+        // Timed once, from the enqueue; a resume is not a start.
+        if (item && item.at !== undefined && !this.started.has(item)) {
+          this.started.add(item);
+          cyclog('clip.started', {
+            msg: item.msgId,
+            reason: item.reason ?? 'tap',
+            backend: this.audio.backend,
+            ms: Math.round(performance.now() - item.at)
+          });
+        }
         onPlaying();
       })
       .catch((e) => {
         dbg('playEl rejected', String(e).slice(0, 60), gen === this.playGen ? 'current' : 'stale');
         if (gen !== this.playGen) return;
+        const item = this.current;
+        if (!item) return;
 
-        if ((e as DOMException)?.name === 'NotAllowedError' && this.current) {
-          this.queue.unshift(this.current);
+        if ((e as DOMException)?.name === 'NotAllowedError') {
+          cyclog('clip.blocked', {
+            session: item.sessionId,
+            msg: item.msgId,
+            reason: item.reason ?? 'tap',
+            why: 'the browser refused play() without a user gesture; the next press starts it'
+          });
+          this.queue.unshift(item);
           this.current = null;
           this.armGesture();
           return;
         }
-        this.current = null;
-        this.playNext();
+        this.failed(item, 'play', e);
       });
   }
 
   private gestureArmed = false;
   private busyGuard = 0;
+  private started = new WeakSet<SpeakerItem>();
 
   private armGesture(): void {
     if (this.gestureArmed) return;
@@ -370,7 +443,7 @@ class Speaker {
     if (this.rateResolver) this.setRate(this.rateResolver());
     this.emit('loading', item);
 
-    void resolveAudioUrl(item.msgId, new URL(item.url, location.href).href)
+    void streamAudioUrl(item.msgId, new URL(item.url, location.href).href)
       .then((src) => {
         if (this.current !== item) {
           dbg('cache resolve dropped', item.msgId);
@@ -393,9 +466,7 @@ class Speaker {
       })
       .catch((e) => {
         if (this.current !== item) return;
-        console.warn('[speaker] clip unavailable', item.msgId, e);
-        this.current = null;
-        this.emit('idle');
+        this.failed(item, 'fetch', e);
       });
   }
 }

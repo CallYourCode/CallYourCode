@@ -1210,7 +1210,7 @@ class Pipeline {
     const {id, forCapture, durationS} = released;
     const text = heard.text;
 
-    speaker.stopAll();
+    speaker.supersede(cap.startedAt);
 
     const blob = heard.blob ?? (await blobWithin());
 

@@ -5,6 +5,7 @@ import type {CycVoiceState} from '@/features/sessions/header/voiceStrip';
 import {makeIcon} from '@/components/iconGlyphs';
 import {karaokeFor, karaokeUpdate, type Karaoke} from '@/features/chat/content';
 import {toast} from '@/components/widgets';
+import {cyclog} from '@/shared/logging';
 
 export type MessageRef = {ts: number; role: 'user' | 'claude'; seq?: number};
 
@@ -31,6 +32,9 @@ export type SpeakerLike = {
   seek(ratio: number): void;
   times(): {t: number; dur: number};
   progress(): {ratio: number; msgId?: string | null};
+  /** The busy claims holding automatic speech (a capture in flight), for the
+   *  clip.tap line. */
+  holds?(): string[];
 };
 
 export type AudioPlaybackDeps = {
@@ -135,24 +139,57 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
     for (const s of deps.allSessions()) sessionList.setRowAudioState(s.id, rowAudioState(s.id));
   }
 
+  /* EVERY press on a play control lands here first, with what it did, so a
+   * "I pressed it and nothing happened" is never invisible in the log again.
+   * What follows a 'play' (clip.play, clip.started, clip.fail, clip.blocked) is
+   * the speaker's to log. */
+  type TapOutcome = 'play' | 'pause' | 'resume' | 'loading' | 'not-live' | 'nothing';
+  function logTap(control: string, sessionId: string | undefined, msgId: string | undefined, outcome: TapOutcome) {
+    const st = speaker.state;
+    const holds = speaker.holds?.() ?? [];
+    cyclog('clip.tap', {
+      control,
+      session: sessionId,
+      msg: msgId,
+      outcome,
+      was: st.state,
+      wasMsg: st.msgId ? (st.msgId === msgId ? 'same' : st.msgId) : undefined,
+      held: holds.length ? holds.join(',') : undefined
+    });
+  }
+
+  function notLive(control: string, sessionId: string | undefined, msgId: string | undefined) {
+    logTap(control, sessionId, msgId, 'not-live');
+    toast('Needs a live engine');
+  }
+
   function rowAudioClick(id: string) {
     const st = speaker.state;
+    const latest = latestSpeakable(id);
     if (st.sessionId === id) {
       if (st.state === 'speaking') {
+        logTap('row', id, st.msgId ?? undefined, 'pause');
         speaker.pause();
         return;
       }
       if (st.state === 'paused') {
+        logTap('row', id, st.msgId ?? undefined, 'resume');
         speaker.resume();
         return;
       }
+      if (st.state === 'loading' && st.msgId === latest?.msgId) {
+        logTap('row', id, st.msgId ?? undefined, 'loading');
+        return;
+      }
     }
-    const latest = latestSpeakable(id);
     if (!latest) {
+      logTap('row', id, undefined, 'nothing');
       toast('Nothing to play yet');
       return;
     }
 
+    logTap('row', id, latest.msgId, 'play');
+    speaker.stopAll();
     play(id, latest.msgId, latest.text, 'tap');
   }
 
@@ -160,19 +197,28 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
     const em = m as CycEngineMessage;
     const s = deps.active();
 
-    if (!deps.isLive() || !em.msgId || !s) return;
+    if (!em.msgId || !s) return;
+    if (!deps.isLive()) return notLive('message', s.id, em.msgId);
     const st = speaker.state;
     if (st.msgId === em.msgId) {
       if (st.state === 'speaking') {
+        logTap('message', s.id, em.msgId, 'pause');
         speaker.pause();
         return;
       }
       if (st.state === 'paused') {
+        logTap('message', s.id, em.msgId, 'resume');
         speaker.resume();
+        return;
+      }
+      // Already on its way: the spinner is up; a second press must not restart it.
+      if (st.state === 'loading') {
+        logTap('message', s.id, em.msgId, 'loading');
         return;
       }
     }
 
+    logTap('message', s.id, em.msgId, 'play');
     speaker.stopAll();
     play(s.id, em.msgId, m.text, 'tap');
 
@@ -187,16 +233,30 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
   function onMessageSeek(m: CycMessage, ratio: number) {
     const em = m as CycEngineMessage;
     const s = deps.active();
-    if (!deps.isLive() || !em.msgId || !s) return;
+    if (!em.msgId || !s) return;
+    if (!deps.isLive()) return notLive('seek', s.id, em.msgId);
     const st = speaker.state;
     if (st.msgId === em.msgId && (st.state === 'speaking' || st.state === 'paused')) {
+      logTap('seek', s.id, em.msgId, st.state === 'paused' ? 'resume' : 'play');
       speaker.seek(ratio);
       if (st.state === 'paused') speaker.resume();
       return;
     }
+    logTap('seek', s.id, em.msgId, 'play');
     pendingSeek = {msgId: em.msgId, ratio};
     speaker.stopAll();
     play(s.id, em.msgId, m.text, 'tap');
+  }
+
+  /* The player bar's play/pause. resume() is a no-op while loading (the load
+   * starts it) and replays a clip the autoplay policy blocked. */
+  function playerToggle() {
+    const st = speaker.state;
+    const outcome: TapOutcome =
+      st.state === 'speaking' ? 'pause' : st.state === 'loading' ? 'loading' : 'resume';
+    logTap('player', st.sessionId ?? undefined, st.msgId ?? undefined, outcome);
+    if (st.state === 'speaking') speaker.pause();
+    else speaker.resume();
   }
 
   let tickMsgId = '';
@@ -420,6 +480,7 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
     rowAudioClick,
     onMessagePlay,
     onMessageSeek,
+    playerToggle,
     updateMessagePlays,
     updateAudioJumpChip,
     updatePlayerBar,

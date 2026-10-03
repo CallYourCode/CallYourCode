@@ -151,6 +151,9 @@ export class WebAudioClip {
 
     el.preservesPitch = true;
     (el as HTMLAudioElement & {webkitPreservesPitch?: boolean}).webkitPreservesPitch = true;
+    // ManagedMediaSource (how an iPhone streams a reply, audioCache) plays only
+    // on an element that opts out of AirPlay.
+    el.disableRemotePlayback = true;
     el.addEventListener('ended', () => {
       if (this.elMode && el.src !== SILENT_WAV) this.fire('ended');
     });
