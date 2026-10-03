@@ -26,9 +26,10 @@ import { bumpRowsGen } from "../chat/wirecache.ts";
 import { evictContextFor } from "./context-cache.ts";
 import { sessions, restoredChats, restoredLogs, agentMetas, chatStore, metaFor, indexSession,
   sessionIndex, flushAgentSave, scheduleAgentSave, getManualOrder, setManualOrder,
-  bindingOf, purgeSessionState, mintAxis } from "./session-state.ts";
+  bindingOf, purgeSessionState, mintAxis, chatRefFor } from "./session-state.ts";
 import type { ChatMsg } from "../chat/chatmsg.ts";
 import { srcKey, type SessionRec } from "../chat/sessionrec.ts";
+import { rowsBySeq } from "../chat/chatstore.ts";
 import type { Session } from "./session-state.ts";
 
 /** What makes one row THE SAME row under two agents. A ChatMsg's `id` is the
@@ -72,6 +73,41 @@ export function mergeLogs(
     chat: rows.filter((r) => !recSet.has(r)) as ChatMsg[],
     log: rows.filter((r) => recSet.has(r)) as SessionRec[],
   };
+}
+
+/** The fold that KEEPS the target's seq axis. A provisional lives only while
+ *  its pane has not announced yet, so what it said is normally newer than
+ *  everything the target holds: those rows go on past the target's newest seq,
+ *  in ts order, and no row a device already holds moves. mergeLogs re-sequenced
+ *  the whole history instead, so folding one status line into Hunter
+ *  (2026-10-03) renumbered all 2494 of its rows and every device held a dead
+ *  axis under the same session id. Returns the rows to append (both kinds, seqs
+ *  stamped), or null when one of them would land inside the target's history:
+ *  only a re-sequence orders an interleave, and that is a new axis (and a new
+ *  epoch, session-state.ts mintAxis). */
+export function appendOnly(
+  a: { chat: ChatMsg[]; log: SessionRec[] }, b: { chat: ChatMsg[]; log: SessionRec[] },
+): { chat: ChatMsg[]; log: SessionRec[] } | null {
+  const recKey = (r: SessionRec) => srcKey(r) ?? `id:${r.id}`;
+  const msgs = new Map<string, ChatMsg>();
+  for (const m of a.chat) msgs.set(rowKey(m), m);
+  const recs = new Map<string, SessionRec>();
+  for (const r of a.log) recs.set(recKey(r), r);
+  let newest = -Infinity;
+  let tail = -1;
+  for (const r of [...a.chat, ...a.log]) {
+    if (r.ts > newest) newest = r.ts;
+    if ((r.seq ?? -1) > tail) tail = r.seq ?? -1;
+  }
+  const chat: ChatMsg[] = [];
+  const log: SessionRec[] = [];
+  for (const m of b.chat) if (!msgs.has(rowKey(m))) { msgs.set(rowKey(m), m); chat.push(m); }
+  for (const r of b.log) if (!recs.has(recKey(r))) { recs.set(recKey(r), r); log.push(r); }
+  const added: (ChatMsg | SessionRec)[] = [...chat, ...log].sort((x, y) => x.ts - y.ts);
+  if (added.some((r) => r.ts < newest)) return null;
+  added.forEach((r, i) => { r.seq = tail + 1 + i; });
+  const bySeq = (x: { seq?: number }, y: { seq?: number }) => (x.seq ?? 0) - (y.seq ?? 0);
+  return { chat: chat.sort(bySeq), log: log.sort(bySeq) };
 }
 
 /** A harness session id becomes this agent's current one. Idempotent: the id
@@ -153,10 +189,12 @@ export function absorb(provisional: Session, targetId: string): void {
   const targetRows = target?.chat ?? restoredChats.get(targetId) ?? [];
   const targetLog = target?.log ?? restoredLogs.get(targetId) ?? [];
   // a row's `id` is the session it is shown under: the survivor's from now on
-  const rows = provisional.chat.length || provisional.log.length
-    ? mergeLogs({ chat: targetRows, log: targetLog },
-        { chat: provisional.chat.map((m) => ({ ...m, id: targetId })), log: provisional.log })
-    : null;
+  const said = { chat: provisional.chat.map((m) => ({ ...m, id: targetId })), log: provisional.log };
+  const has = provisional.chat.length || provisional.log.length;
+  // newer than all the target holds (the usual case): appended, the axis kept
+  const fold = has ? appendOnly({ chat: targetRows, log: targetLog }, said) : null;
+  // an interleave: the whole log re-sequenced, a new axis
+  const rows = has && !fold ? mergeLogs({ chat: targetRows, log: targetLog }, said) : null;
   // THE IN-MEMORY MOVE IS SYNCHRONOUS (reconcile builds the target's row in
   // the same tick); the disk writes follow in order: the tombstone first, the
   // merged chat after, so a crash between them leaves a pointer, never a twin.
@@ -172,6 +210,26 @@ export function absorb(provisional: Session, targetId: string): void {
   }
   // any past ids the provisional gathered point at the survivor now
   for (const [sid, aid] of sessionIndex) if (aid === provisional.id) sessionIndex.set(sid, targetId);
+  if (fold && (fold.chat.length || fold.log.length)) {
+    if (target) {
+      target.chat.push(...fold.chat);
+      target.log.push(...fold.log);
+      bumpRowsGen(target);
+    } else {
+      restoredChats.set(targetId, [...targetRows, ...fold.chat]);
+      restoredLogs.set(targetId, [...targetLog, ...fold.log]);
+    }
+    // appended to the target's own file, in seq order, behind the tombstone,
+    // so a crash before the tombstone lands leaves no twin; a live line the
+    // target writes next queues behind these, so the file stays in seq order
+    const { aid, chatId } = chatRefFor(targetId);
+    chatStore.after(aid, chatId, disk);
+    const recSet = new Set<unknown>(fold.log);
+    for (const r of rowsBySeq(fold.chat, fold.log)) {
+      if (recSet.has(r)) chatStore.appendRec(aid, chatId, r as SessionRec);
+      else chatStore.appendMsg(aid, chatId, r as Parameters<typeof chatStore.appendMsg>[2]);
+    }
+  }
   if (rows) {
     // the merge re-sequenced the whole log: a new axis, so a new epoch, served
     // from this same tick (session-state.ts axisOf)
@@ -201,5 +259,6 @@ export function absorb(provisional: Session, targetId: string): void {
   const order = getManualOrder();
   if (order.includes(provisional.id)) setManualOrder(order.filter((x) => x !== provisional.id));
   console.log(`[carry] ${provisional.id} absorbed into ${targetId}` +
-    (rows ? ` (${rows.chat.length} messages, ${rows.log.length} records)` : ""));
+    (fold ? ` (appended ${fold.chat.length} messages, ${fold.log.length} records on its axis)` : "") +
+    (rows ? ` (${rows.chat.length} messages, ${rows.log.length} records, re-sequenced: new axis)` : ""));
 }

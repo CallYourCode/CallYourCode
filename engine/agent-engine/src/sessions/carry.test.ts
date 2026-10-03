@@ -227,18 +227,50 @@ test("absorb folds the session records too, onto ONE seq axis with the messages,
   S.metaFor(pid);
   absorb(prov, agentId);
 
-  // one axis, in ts order, dense from 0
+  // one axis, in ts order: the target's rows keep their seqs, the parked ones
+  // follow its tail
   expect(target.chat.map((m) => [m.text, m.seq])).toEqual([["before", 0], ["parked", 3]]);
   expect(target.log.map((r) => [r.text, r.seq])).toEqual([["status: working", 1], ["Allow?", 2], ["Read a", 4]]);
-  // on disk: the merged file carries both kinds, interleaved by seq
-  await until(async () => (await readChatLog(root, U1)).length === 2, { what: "the merged chat on disk" });
+  // on disk: both kinds appended to the target's own file, in seq order (the
+  // seeded file held the message only; the in-memory record is the fixture's)
+  await until(async () => (await readChatLog(root, U1)).length === 2, { what: "the folded rows on disk" });
   const meta = S.metaFor(agentId);
   const loaded = await S.chatStore.loadLog(agentId, meta.chat!);
-  expect(loaded.recs.map((r) => r.seq)).toEqual([1, 2, 4]);
+  expect(loaded.recs.map((r) => r.seq)).toEqual([2, 4]);
   expect(loaded.msgs.map((m) => m.seq)).toEqual([0, 3]);
 });
 
 // ------------------------------------------------- the axis epoch (fix-log-epoch)
+
+test("a provisional newer than the target folds onto its axis: no seq moves, same file, same epoch", async () => {
+  // the Hunter shape: a gappy axis (seq 3 was an old patch line's), then one
+  // status line said by the provisional before its pane announced
+  const { agentId, chatId } = await seedAgent(root, U1, [row("x", "one", 1000, { seq: 0, mid: "mr-1" }),
+    row("x", "two", 2000, { seq: 4, mid: "mr-2" })]);
+  const file = join(data, "agents", agentId, "chats", `${chatId}.jsonl`);
+  const rec = { t: "s", seq: 1, ts: 1500, id: "se-w", kind: "status", text: "status: working", status: "working" };
+  await Bun.write(file, (await Bun.file(file).text()) + JSON.stringify(rec) + "\n");
+  await S.loadSessionState(deps);
+  S.sessionStateReady();
+  const target = live(agentId, U1, S.restoredChats.get(agentId)!);
+  target.log = S.restoredLogs.get(agentId)!;
+  expect(S.axisOf(agentId), "the epoch is the chat file").toBe(chatId);
+
+  const pid = S.freshAgentId();
+  const prov = live(pid, null, []);
+  prov.log = [{ seq: 0, ts: 3000, id: "se-idle", kind: "status", text: "status: idle", status: "idle" }];
+  S.metaFor(pid);
+  absorb(prov, agentId);
+
+  expect(target.chat.map((m) => m.seq), "the target's seqs are untouched").toEqual([0, 4]);
+  expect(target.log.map((r) => [r.id, r.seq]), "the folded record follows the tail").toEqual([["se-w", 1], ["se-idle", 5]]);
+  expect(S.axisOf(agentId), "the same axis, the same epoch").toBe(chatId);
+  expect(S.metaFor(agentId).chat).toBe(chatId);
+  const disk = async () => (await S.chatStore.loadLog(agentId, chatId)).recs;
+  await until(async () => (await disk()).length === 2, { what: "the record appended to the target's file" });
+  expect((await disk()).map((r) => r.seq)).toEqual([1, 5]);
+  expect((await S.chatStore.loadLog(agentId, chatId)).msgs.map((m) => m.seq)).toEqual([0, 4]);
+});
 
 test("a provisional row older than the target's newest re-sequences the log: a new epoch in the same tick", async () => {
   const { agentId, chatId } = await seedAgent(root, U1, [row("x", "one", 1000, { seq: 0, mid: "mr-1" }),
