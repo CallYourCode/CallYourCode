@@ -125,6 +125,14 @@ export function rowsBySeq<M extends { seq?: number }, R extends { seq: number }>
   return out;
 }
 
+/** A whole log as file lines in storage order (records interleaved by seq). */
+function logBody(msgs: StoredMsg[], recs: SessionRec[]): string {
+  const recSet = new Set<unknown>(recs);
+  return rowsBySeq(msgs as (StoredMsg & { seq?: number })[], recs)
+    .map((r) => JSON.stringify(recSet.has(r) ? { t: "s", ...r } : { t: "m", ...r }))
+    .join("\n");
+}
+
 export class ChatStore {
   /* One append chain per chat file, so the line order on disk is the call
    * order even when appends interleave with awaits. The chain never rejects;
@@ -189,24 +197,51 @@ export class ChatStore {
     return replayLogText(await f.text());
   }
 
-  /** Write a whole log as a NEW chat file (merge, trim) and return its id.
-   *  Never touches an existing file; the caller flips the meta pointer. The
+  /** Write a whole log as a NEW chat file (the boot migration) and return its
+   *  id. Never touches an existing file; the caller flips the meta pointer. The
    *  records, when given, are interleaved with the messages by seq so the new
-   *  file's line order is its storage order. A rewrite that re-sequenced the
-   *  rows passes the id it already serves as the axis epoch (mintAxis). */
-  async writeNew(agentId: string, msgs: StoredMsg[], recs: SessionRec[] = [],
-    chatId: string = newChatId()): Promise<string> {
+   *  file's line order is its storage order. */
+  async writeNew(agentId: string, msgs: StoredMsg[], recs: SessionRec[] = []): Promise<string> {
+    const chatId = newChatId();
     // both paths before the first await: dataDir() is read per call (agentmeta.ts saveAgentMeta)
     const dir = agentChatsDir(agentId);
     const path = agentChatFile(agentId, chatId);
     await mkdirPrivate(dir);
     // build the whole body, one append: a new file either exists whole or not at all
-    const recSet = new Set<unknown>(recs);
-    const body = rowsBySeq(msgs as (StoredMsg & { seq?: number })[], recs)
-      .map((r) => JSON.stringify(recSet.has(r) ? { t: "s", ...r } : { t: "m", ...r }))
-      .join("\n");
+    const body = logBody(msgs, recs);
     await appendPrivate(path, body.length ? body + "\n" : "");
     return chatId;
+  }
+
+  /** A NEW chat file for a log that stays live while it lands (a re-sequence:
+   *  carry absorb, trim). The body is serialized NOW, from the rows as they are
+   *  this instant, and the write is the first entry on the new file's append
+   *  chain, after `after` (a write that must land first) and before `then` (the
+   *  caller flips and saves the meta pointer there). Every append the caller
+   *  routes to `chatId` from this instant queues behind both, so it can never
+   *  reach disk before the body or before the pointer that makes it readable,
+   *  and it is not in the body (it was not in the rows yet). Resolves true once
+   *  the body and `then` landed, false when the body could not be written. */
+  writeNewQueued(agentId: string, chatId: string, msgs: StoredMsg[], recs: SessionRec[],
+    opts: { after?: Promise<unknown>; then: () => Promise<void> }): Promise<boolean> {
+    const dir = agentChatsDir(agentId);
+    const path = agentChatFile(agentId, chatId);
+    const body = logBody(msgs, recs);
+    const prev = this.chains.get(path) ?? Promise.resolve();
+    const done = prev
+      .then(() => opts.after)
+      .then(async () => {
+        await mkdirPrivate(dir);
+        await appendPrivate(path, body.length ? body + "\n" : "");
+        await opts.then();
+        return true;
+      })
+      .catch((e) => {
+        this.onError(e, path);
+        return false;
+      });
+    this.chains.set(path, done.then(() => {}));
+    return done;
   }
 
   /** The chat ids that have files on disk for this agent, no order promised. */

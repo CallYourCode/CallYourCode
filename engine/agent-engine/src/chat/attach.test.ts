@@ -25,7 +25,7 @@
 import { test, expect, afterAll, afterEach } from "bun:test";
 
 import { wireCore, sessionsFrame, type WireCore, type FakeClient, wireId } from "../test-utils/wire-core.ts";
-import { chatStore, chatRefFor, persistPatch, axisOf, mintAxis } from "../sessions/session-state.ts";
+import { chatStore, chatRefFor, persistPatch, axisOf, rewriteLog } from "../sessions/session-state.ts";
 import { agentChatFile } from "../storage/datadir.ts";
 import { replayLogText } from "./chatstore.ts";
 import { PANE } from "../test-utils/fake-herdr.ts";
@@ -537,7 +537,11 @@ test("a device naming another epoch attaches cold however plausible its frontier
   expect(same.pages).toEqual([]);
   expect(same.deltaBase).toBe(12);
   // the log is re-sequenced (what absorb and the trim route do): a new epoch
-  const fresh = mintAxis(id);
+  const s = c.byHandle(PANE)!;
+  s.chat.forEach((m, i) => { m.seq = i; });
+  void rewriteLog(id, s.chat, s.log);
+  const fresh = axisOf(id)!;
+  expect(fresh).not.toBe(held);
   const ok = await attach(c, PANE, c.client(), { frontier: 5, axis: held });
   expect(ok.axis).toBe(fresh);
   expect(ok.deltaBase, "cold: served from the bottom of the newest pages, not from 6").toBe(0);

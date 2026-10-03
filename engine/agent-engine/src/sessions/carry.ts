@@ -26,7 +26,7 @@ import { bumpRowsGen } from "../chat/wirecache.ts";
 import { evictContextFor } from "./context-cache.ts";
 import { sessions, restoredChats, restoredLogs, agentMetas, chatStore, metaFor, indexSession,
   sessionIndex, flushAgentSave, scheduleAgentSave, getManualOrder, setManualOrder,
-  bindingOf, purgeSessionState, mintAxis, chatRefFor } from "./session-state.ts";
+  bindingOf, purgeSessionState, rewriteLog, chatRefFor } from "./session-state.ts";
 import type { ChatMsg } from "../chat/chatmsg.ts";
 import { srcKey, type SessionRec } from "../chat/sessionrec.ts";
 import { rowsBySeq } from "../chat/chatstore.ts";
@@ -231,23 +231,12 @@ export function absorb(provisional: Session, targetId: string): void {
     }
   }
   if (rows) {
-    // the merge re-sequenced the whole log: a new axis, so a new epoch, served
-    // from this same tick (session-state.ts axisOf)
-    const cid = mintAxis(targetId);
+    // the merge re-sequenced the whole log: a new axis, a new file and a new
+    // epoch from this same tick; every write from now on goes to the new file,
+    // behind the tombstone (session-state.ts rewriteLog)
     if (target) { target.chat = rows.chat; target.log = rows.log; bumpRowsGen(target); }
     else { restoredChats.set(targetId, rows.chat); restoredLogs.set(targetId, rows.log); }
-    void disk.then(async () => {
-      try {
-        const tm = metaFor(targetId);
-        await chatStore.writeNew(targetId,
-          rows.chat as unknown as Parameters<typeof chatStore.writeNew>[1], rows.log, cid);
-        tm.chat = cid;
-        tm.chats = [...(tm.chats ?? []), { id: cid, createdAt: Date.now() }];
-        scheduleAgentSave(targetId);
-      } catch (e) {
-        console.error(`[carry] could not write the merged chat for ${targetId}:`, e);
-      }
-    });
+    void rewriteLog(targetId, rows.chat, rows.log, disk);
   }
   // the provisional row leaves the list; its place in the manual order goes too
   sessions.delete(provisional.id);

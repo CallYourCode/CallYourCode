@@ -25,6 +25,8 @@ import * as S from "./session-state.ts";
 import { adoptSession, absorb, mergeChats, carryDirectHandleBind } from "./carry.ts";
 import { tmpDataDir } from "../test-utils/tmp.ts";
 import { seedAgent, readAgentMetas, readChatLog } from "../test-utils/builders.ts";
+import { initChatlog, logChat, logSession } from "../chat/chatlog.ts";
+import { replayLogText } from "../chat/chatstore.ts";
 import { until } from "../test-utils/wait.ts";
 import type { ChatMsg } from "../chat/chatmsg.ts";
 
@@ -293,6 +295,104 @@ test("a provisional row older than the target's newest re-sequences the log: a n
   // and the new file, once written, carries exactly that id
   await until(async () => S.metaFor(agentId).chat === fresh, { what: "the pointer flip to the epoch's file" });
   expect((await S.chatStore.loadLog(agentId, fresh)).msgs.map((m) => m.seq)).toEqual([0, 1, 2]);
+  expect(S.axisOf(agentId)).toBe(fresh);
+});
+
+/* THE RE-SEQUENCE RACE (fix-log-epoch). A re-sequence swaps the in-memory log
+ * synchronously, but the new chat file and the meta pointer land only after
+ * awaits (the tombstone, the body write, the pointer save). Every row, record
+ * and patch the target writes in that window used to go to the OLD file under
+ * a NEW-axis seq: those written after the new body was serialized existed
+ * nowhere a restart would read (message loss), and the rest landed twice. The
+ * writer below appends on every macrotask from the instant of the swap until
+ * the new pointer is on disk, and a few more after. */
+test("rows written while a re-sequence lands go to the new file only, each exactly once, and survive a restart", async () => {
+  // a real-sized log, so the new file's body takes its time to land
+  const bulk = Array.from({ length: 4000 }, (_, i) =>
+    row("x", `old ${i} `.padEnd(400, "."), 3001 + i, { seq: 2 + i, mid: `mr-old-${i}` }));
+  const { agentId, chatId: oldChat } = await seedAgent(root, U1, [row("x", "one", 1000, { seq: 0, mid: "mr-1" }),
+    row("x", "three", 3000, { seq: 1, mid: "mr-3" }), ...bulk]);
+  await S.loadSessionState(deps);
+  S.sessionStateReady();
+  initChatlog({
+    chatOf: (id) => S.sessions.get(id)?.chat ?? S.restoredChats.get(id),
+    restoredChats: () => S.restoredChats,
+    persistPatch: (id, mts, set, unset) => S.persistPatch(id, mts, set, unset),
+    broadcast: () => {},
+    chatRefFor: (id) => S.chatRefFor(id),
+    indexMsgBlobs: () => {},
+    appendMsg: (aid, chatId, m) => S.chatStore.appendMsg(aid, chatId, m as never),
+    appendRec: (aid, chatId, rec) => S.chatStore.appendRec(aid, chatId, rec),
+  });
+  const target = live(agentId, U1, S.restoredChats.get(agentId)!);
+  const oldFile = join(data, "agents", agentId, "chats", `${oldChat}.jsonl`);
+  const oldBytes = await Bun.file(oldFile).text();
+
+  // a provisional that reached disk (so the tombstone write is in the window)
+  // and said something OLDER than the target's newest row: an interleave
+  const pid = S.freshAgentId();
+  const prov = live(pid, null, [row(pid, "two", 2000, { msgId: "m-2", mid: "mr-2", seq: 0 })]);
+  S.metaFor(pid);
+  S.chatRefFor(pid);
+  await S.flushAgentSave(pid);
+
+  absorb(prov, agentId);
+  const fresh = S.axisOf(agentId)!;
+  expect(fresh).not.toBe(oldChat);
+
+  let n = 0;
+  const said: string[] = [];
+  const write = () => {
+    n++;
+    if (n % 3 === 0) {
+      const r = logSession(target as never, { ts: 10_000 + n, kind: "status", text: `status ${n}`, status: "idle" });
+      said.push("e:" + r!.id);
+    } else {
+      logChat(target as never, row(agentId, `live ${n}`, 10_000 + n, { mid: `mr-live-${n}` }));
+      said.push(`m:mr-live-${n}`);
+    }
+  };
+  // an edit to a row the old file holds, made inside the window
+  write();
+  const three = target.chat.find((m) => m.mid === "mr-3")!;
+  (three as Record<string, unknown>).durationS = 7; // the caller edits, then persists
+  S.persistPatch(agentId, 3000, { durationS: 7 });
+  const onDisk = async () => JSON.parse(await Bun.file(join(data, "agents", agentId, "meta.json")).text()).chat;
+  for (let i = 0; i < 2000 && (await onDisk()) !== fresh; i++) {
+    write();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  expect(await onDisk(), "the pointer reached the new file").toBe(fresh);
+  for (let i = 0; i < 5; i++) { write(); await new Promise((r) => setTimeout(r, 0)); }
+  await S.chatStore.flush();
+  await S.settleAgentSaves();
+  expect(n, "the writer ran inside the window").toBeGreaterThan(3);
+
+  // the old file is untouched: nothing was written to it after the swap
+  expect(await Bun.file(oldFile).text()).toBe(oldBytes);
+
+  // the new file holds every row exactly once, on one strictly increasing axis,
+  // the same axis the engine serves from memory
+  const keyOf = (r: Record<string, unknown>) => (typeof r.mid === "string" ? `m:${r.mid}` : `e:${r.id}`);
+  const replay = replayLogText(await Bun.file(join(data, "agents", agentId, "chats", `${fresh}.jsonl`)).text());
+  const rows = [...replay.msgs, ...replay.recs].sort((a, b) => Number(a.seq ?? 0) - Number(b.seq ?? 0)) as Record<string, unknown>[];
+  const keys = rows.map(keyOf);
+  expect(new Set(keys).size, "no row twice").toBe(keys.length);
+  for (const k of ["m:mr-1", "m:mr-2", "m:mr-3", ...said]) expect(keys, `${k} on disk`).toContain(k);
+  expect(keys.length).toBe(3 + bulk.length + said.length);
+  const seqs = rows.map((r) => r.seq as number);
+  expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+  expect(new Set(seqs).size).toBe(seqs.length);
+  const mem = new Map([...target.chat, ...target.log].map((r) => [keyOf(r as never), r.seq]));
+  for (const r of rows) expect(r.seq, `${keyOf(r)} at its in-memory seq`).toBe(mem.get(keyOf(r)));
+  expect((replay.msgs.find((m) => m.mid === "mr-3") as Record<string, unknown>).durationS, "the edit landed").toBe(7);
+
+  // and a restart reads exactly that
+  await S.settleAgentSaves();
+  S.resetForTest();
+  await S.loadSessionState(deps);
+  const back = [...(S.restoredChats.get(agentId) ?? []), ...(S.restoredLogs.get(agentId) ?? [])];
+  expect(back.map((r) => keyOf(r as never)).sort()).toEqual([...keys].sort());
   expect(S.axisOf(agentId)).toBe(fresh);
 });
 

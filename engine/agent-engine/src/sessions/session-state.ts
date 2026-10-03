@@ -19,7 +19,7 @@
 
 import { writeAtomicPrivate } from "../../../shared/runfiles.ts";
 import { settingsFile, stateFile, agentDocsDir, agentDocStateDir, agentPhotosDir, agentThumbsDir } from "../storage/datadir.ts";
-import { ChatStore, newChatId } from "../chat/chatstore.ts";
+import { ChatStore, newChatId, type StoredMsg } from "../chat/chatstore.ts";
 import { loadAgentMetas, saveAgentMeta, mintAgentId, type AgentMeta } from "../runtime/agentmeta.ts";
 import { isHarnessSessionId } from "../runtime/ids.ts";
 import { parseOrder } from "../chat/order.ts";
@@ -679,7 +679,8 @@ export function chatRefFor(agentId: string): { aid: string; chatId: string } {
     meta.chats = [...(meta.chats ?? []), { id: meta.chat, createdAt: Date.now() }];
     scheduleAgentSave(agentId);
   }
-  return { aid: meta.agentId, chatId: meta.chat };
+  // a re-sequence still landing: its new file is where the log lives now
+  return { aid: meta.agentId, chatId: pendingAxis.get(meta.agentId) ?? meta.chat };
 }
 
 /* THE AXIS EPOCH (fix-log-epoch). A chat log's seq axis is a pure function of
@@ -690,29 +691,76 @@ export function chatRefFor(agentId: string): { aid: string; chatId: string } {
  * identity, and that is the epoch every device stamps its rows with. A device
  * holding rows of another epoch holds a dead axis: its seqs, cursor, holes and
  * fingerprints describe pages that no longer exist, and it must drop them
- * rather than guess (SYNC-CONTRACT.md, the axis epoch).
+ * rather than guess (SYNC-CONTRACT.md, the axis epoch). Undefined only for an
+ * agent with no chat file yet, which holds no rows to stamp.
  *
- * A rewrite renumbers the in-memory rows SYNCHRONOUSLY, but the new file is
- * written and the meta pointer flipped only later (append-only discipline), so
- * the new epoch is minted with the renumber (mintAxis) and served from here
- * until the pointer catches up. A crash in between replays the old file under
- * the old pointer: old epoch, old axis, still consistent. Undefined only for
- * an agent with no chat file yet, which holds no rows to stamp. */
+ * A rewrite re-sequences the in-memory rows SYNCHRONOUSLY; the new file and the
+ * meta pointer land later (rewriteLog). From the instant of the re-sequence the
+ * new file is where this agent's log lives: its id is the epoch served, and
+ * chatRefFor routes every append there, queued behind the body and the pointer
+ * save. Nothing is written to the old file after the swap (the absorb race: a
+ * row logged while the new file landed went to the old file under a new-axis
+ * seq, and one logged after the body was serialized existed nowhere a restart
+ * would read). A crash before the pointer is on disk replays the old file under
+ * the old epoch with nothing written after the swap: the same loss as any
+ * crash with appends still queued, never a row that is on disk but unread. */
 const pendingAxis = new Map<string, string>();
+// The rewrite still landing per agent: a second one queues behind it, so the
+// pointer only ever moves forward through the files in the order they were cut.
+const rewriteLanding = new Map<string, Promise<unknown>>();
 
 export function axisOf(agentId: string): string | undefined {
   const aid = agentIdFor(agentId);
   return pendingAxis.get(aid) ?? agentMetas.get(aid)?.chat ?? undefined;
 }
 
-/** Mint the id of the NEW chat file a rewrite is about to write, and serve it
- *  as this agent's epoch from this instant. Call in the same synchronous step
- *  that re-sequences the in-memory rows; pass the id to chatStore.writeNew. */
-export function mintAxis(agentId: string): string {
+/** THE ONE RE-SEQUENCE WRITE. Call in the same synchronous step that put the
+ *  re-sequenced `chat`/`log` in memory: a new chat file is cut from them as
+ *  they are now, served as the epoch at once, and every later append goes to
+ *  it (chatRefFor). `after` is a write that must reach disk first (an absorb's
+ *  tombstone). Resolves true once the file and the meta pointer naming it are
+ *  on disk; false when the file could not be written (logged, and a fresh file
+ *  is cut from the in-memory log and tried again, a bounded number of times). */
+export function rewriteLog(agentId: string, chat: readonly ChatMsg[], log: readonly SessionRec[],
+  after?: Promise<unknown>, attempt = 1): Promise<boolean> {
+  const meta = metaFor(agentId);
+  const aid = meta.agentId;
   const cid = newChatId();
-  pendingAxis.set(agentIdFor(agentId), cid);
-  return cid;
+  pendingAxis.set(aid, cid);
+  const landed = chatStore.writeNewQueued(aid, cid, chat as unknown as StoredMsg[], [...log], {
+    after: Promise.all([after, rewriteLanding.get(aid)]),
+    then: async () => {
+      meta.chat = cid;
+      meta.chats = [...(meta.chats ?? []), { id: cid, createdAt: Date.now() }];
+      // a save serialized before the flip must not land after it
+      await settleAgentSaves();
+      await flushAgentSave(aid);
+    },
+  }).then((ok) => {
+    if (!ok) console.error(`[chat] could not write the re-sequenced log ${cid} for ${aid}`);
+    return ok;
+  });
+  rewriteLanding.set(aid, landed);
+  void landed.then((ok) => {
+    if (rewriteLanding.get(aid) === landed) rewriteLanding.delete(aid);
+    if (pendingAxis.get(aid) !== cid) return; // a later rewrite owns the log now
+    if (ok) { pendingAxis.delete(aid); return; }
+    // The file could not be written (a disk error) and appends since the swap
+    // are queued for it. Cut a fresh file from the log as it is in memory NOW,
+    // which holds every one of them, until one lands.
+    if (attempt < REWRITE_TRIES) {
+      setTimeout(() => {
+        if (pendingAxis.get(aid) !== cid) return;
+        const chatNow = sessions.get(aid)?.chat ?? restoredChats.get(aid) ?? [];
+        const logNow = sessions.get(aid)?.log ?? restoredLogs.get(aid) ?? [];
+        void rewriteLog(aid, chatNow, logNow, undefined, attempt + 1);
+      }, REWRITE_RETRY_MS);
+    }
+  });
+  return landed;
 }
+const REWRITE_TRIES = 5;
+const REWRITE_RETRY_MS = 2000;
 
 /** One appended patch line: edit the message whose ts is `mts`. */
 export function persistPatch(agentId: string, mts: number,
@@ -943,6 +991,7 @@ export function resetForTest(): void {
   restoredChats.clear();
   restoredLogs.clear();
   pendingAxis.clear();
+  rewriteLanding.clear();
   paneBindings.clear();
   engineSettingsOnDisk = {};
   settingsWriteChain = Promise.resolve();
