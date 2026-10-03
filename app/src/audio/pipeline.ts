@@ -209,6 +209,7 @@ class Pipeline {
       this.active || this.pttDown ? 'recording' : this.inFlight.size ? 'transcribing' : 'idle';
     if (next === this.recState) return;
     this.recState = next;
+    speaker.setRecording(next === 'recording');
     this.emit('recording', next);
   }
 

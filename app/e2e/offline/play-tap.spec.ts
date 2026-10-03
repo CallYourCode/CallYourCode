@@ -180,13 +180,16 @@ test('play tap: a press while a capture awaits its transcript (the field case)',
   const engine = await startBz(fetches);
   try {
     await boot(page, engine.port, browserName);
-    // pipeline.fire, then the press is released: the capture is in flight,
-    // holding the speaker until its verdict.
+    // pipeline.fire, then the press is released (releaseAndMeasure: active
+    // cleared, recState to transcribing): the capture is in flight, holding the
+    // speaker until its verdict.
     await page.evaluate(() => {
-      const p = (window as unknown as {__cycPipeline: Record<string, unknown> & {fire(): void}})
-        .__cycPipeline;
+      const p = (window as unknown as {
+        __cycPipeline: {fire(): void; active: unknown; syncRecordingState(): void};
+      }).__cycPipeline;
       p.fire();
-      (p as {active: unknown}).active = null;
+      p.active = null;
+      p.syncRecordingState();
     });
     const t0 = await now(page);
     // He presses once a second while the press shows him nothing (no spinner,
@@ -262,6 +265,72 @@ test('play tap: a press while a capture awaits its transcript (the field case)',
       expect(data.spinnerAfterFirstPressMs!).toBeLessThan(300);
       expect(data.stillSpeakingAfterVerdict, 'the kept utterance did not cancel it').toBe(true);
       expect(data.clipTap).toBe(1);
+    }
+  } finally {
+    await engine.close();
+  }
+});
+
+test('play tap: a press while the mic is recording waits, shown, and plays on release', async ({
+  page,
+  browserName
+}) => {
+  test.setTimeout(60_000);
+  const fetches: string[] = [];
+  const engine = await startBz(fetches);
+  try {
+    await boot(page, engine.port, browserName);
+    // pipeline.fire: a capture is recording (a press held, locked, or hands-free).
+    await page.evaluate(() =>
+      (window as unknown as {__cycPipeline: {fire(): void}}).__cycPipeline.fire()
+    );
+    const t0 = await now(page);
+    await press(page, SHORT, browserName);
+    await page.waitForTimeout(300);
+    const shown = await page.evaluate(
+      (sel) => {
+        const el = document.querySelector(sel);
+        return el ? {wait: el.classList.contains('cyc-clip-wait'), title: el.getAttribute('title')} : null;
+      },
+      playButton(SHORT)
+    );
+    // Recording for 3 s more: nothing may sound into it.
+    await page.waitForTimeout(3_000);
+    const soundedWhileRecording = (await rec(page)).states.some(
+      (x) => x.t >= t0 && x.state === 'speaking'
+    );
+    const releasedAt = await now(page);
+    // releaseAndMeasure: the recording ends; the transcript is still pending.
+    await page.evaluate(() => {
+      const p = (window as unknown as {
+        __cycPipeline: {active: unknown; syncRecordingState(): void};
+      }).__cycPipeline;
+      p.active = null;
+      p.syncRecordingState();
+    });
+    await expect
+      .poll(() => speaking(page, SHORT), {timeout: FRAME_MS * 4 + 10_000})
+      .toBe(true)
+      .catch(() => {});
+    const r = await rec(page);
+    const sound = firstSpeaking(r, SHORT, t0);
+    const data = {
+      frameMs: FRAME_MS,
+      shownAfter300ms: shown,
+      soundedWhileRecording,
+      releaseToSoundMs: sound === null ? null : Math.round(sound - releasedAt),
+      clipTap: r.logs.filter((l) => l.event === 'clip.tap').map((l) => l.fields),
+      states: r.states.map((x) => `${Math.round(x.t - t0)}:${x.state}`)
+    };
+    record('recording', browserName, data);
+    if (TAG === 'after') {
+      expect(data.shownAfter300ms).toEqual({wait: true, title: 'Plays after your recording'});
+      expect(data.soundedWhileRecording, 'nothing sounds into a live recording').toBe(false);
+      expect(data.releaseToSoundMs, 'it starts once the recording is released').not.toBeNull();
+      expect(data.releaseToSoundMs!).toBeLessThan(FRAME_MS + 1_500);
+      expect(data.clipTap).toEqual([
+        expect.objectContaining({outcome: 'after-recording', recording: true})
+      ]);
     }
   } finally {
     await engine.close();

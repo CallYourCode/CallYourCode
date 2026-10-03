@@ -292,7 +292,8 @@ export function textMessage(
         "[&.cyc-pending]:after:content-[''] [&.cyc-pending]:after:absolute [&.cyc-pending]:after:inset-[10%]",
         '[&.cyc-pending]:after:rounded-full [&.cyc-pending]:after:border-[2.5px] [&.cyc-pending]:after:border-solid',
         '[&.cyc-pending]:after:border-[rgba(var(--cyc-accent-rgb,51,144,236),0.3)] [&.cyc-pending]:after:border-t-(--cyc-accent)',
-        '[&.cyc-pending]:after:[animation:cyc-spin_0.8s_linear_infinite]'
+        '[&.cyc-pending]:after:[animation:cyc-spin_0.8s_linear_infinite]',
+        '[&.cyc-clip-wait]:[animation:cyc-clip-wait_900ms_ease-in-out_infinite]'
       ].join(' '),
       {'data-msg-id': msgId, title: 'Play'}
     );

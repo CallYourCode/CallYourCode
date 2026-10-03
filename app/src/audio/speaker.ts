@@ -25,8 +25,9 @@ type SpeakerItem = {
   durationS?: number;
 
   /** A user command (a tap), not automatic speech: it starts now even while a
-   *  capture holds the speaker (setBusy), and a kept utterance that began before
-   *  it does not cancel it (supersede). */
+   *  capture's transcript is pending (setBusy), it waits only while the mic is
+   *  recording (recording), and a kept utterance that began before it does not
+   *  cancel it (supersede). */
   manual?: boolean;
   /** WHY this clip is playing (audioPlayback.PlayReason): 'autoplay-open',
    *  'autoplay-arrival' or 'tap'. Kept as a string here so the speaker owns no
@@ -37,7 +38,16 @@ type SpeakerItem = {
   at?: number;
 };
 
-type SpeakerStateName = 'idle' | 'loading' | 'speaking' | 'paused' | 'finished' | 'blocked';
+/* 'waiting': a tap made while the mic is recording, shown on its button and
+ * started the moment the recording is released. */
+type SpeakerStateName =
+  | 'idle'
+  | 'loading'
+  | 'speaking'
+  | 'paused'
+  | 'finished'
+  | 'blocked'
+  | 'waiting';
 
 export type SpeakerState = {
   state: SpeakerStateName;
@@ -63,6 +73,29 @@ class Speaker {
   }
   holds(): string[] {
     return [...this.busyClaims];
+  }
+
+  /* THE RULE for a tap: nothing sounds into a live recording. While the mic is
+   * recording (a press held or locked, or a hands-free capture: the pipeline's
+   * recState, plus the composer's 'press' claim that covers the press before
+   * the mic answers), a tap waits, visibly ('waiting'), and starts the moment
+   * the recording is released. Once released (only the transcript pending), a
+   * tap plays at once. Automatic speech is held for the whole capture either
+   * way (setBusy). */
+  private micRecording = false;
+  recording(): boolean {
+    return this.micRecording || this.busyClaims.has('press');
+  }
+  setRecording(on: boolean): void {
+    const was = this.recording();
+    this.micRecording = on;
+    this.recordingMayHaveEnded(was);
+  }
+  private recordingMayHaveEnded(was: boolean): void {
+    if (!was || this.recording() || this.stateName !== 'waiting') return;
+    dbg('recording released: starting the waiting tap');
+    if (this.current) this.resume();
+    else if (this.queue.length) this.playNext();
   }
   private lastBySession = new Map<string, SpeakerItem>();
   private stateName: SpeakerStateName = 'idle';
@@ -172,7 +205,8 @@ class Speaker {
   }
 
   get state(): SpeakerState {
-    const about = this.current || undefined;
+    // A waiting tap that has not started is the queue head.
+    const about = this.current || (this.stateName === 'waiting' ? this.queue[0] : undefined);
     return {
       state: this.stateName,
       sessionId: about?.sessionId,
@@ -299,6 +333,11 @@ class Speaker {
     // Still fetching: playing now would run the player with no source and drop
     // the clip. The load in flight starts it.
     if (this.stateName === 'loading') return;
+    // Not into a live recording: it resumes when the recording is released.
+    if (this.recording()) {
+      this.emit('waiting', this.current);
+      return;
+    }
 
     if (!this.mayStart(this.current)) {
       dbg('resume refused by the gate');
@@ -327,9 +366,11 @@ class Speaker {
 
   setBusy(busy: boolean, claim = ALL_CLAIMS): void {
     const was = this.busy;
+    const wasRecording = this.recording();
     if (busy) this.busyClaims.add(claim);
     else if (claim === ALL_CLAIMS) this.busyClaims.clear();
     else this.busyClaims.delete(claim);
+    this.recordingMayHaveEnded(wasRecording);
     if (this.busyGuard) {
       clearTimeout(this.busyGuard);
       this.busyGuard = 0;
@@ -423,6 +464,12 @@ class Speaker {
   }
 
   private playNext(): void {
+    if (this.queue[0]?.manual && this.recording()) {
+      dbg('playNext: the mic is recording; the tap waits', this.queue[0].msgId);
+      this.current = null;
+      this.emit('waiting', this.queue[0]);
+      return;
+    }
     if (this.queue.length && !this.mayStart(this.queue[0])) {
       dbg('playNext refused by the gate', this.queue[0].msgId, this.queue.length);
       this.current = null;

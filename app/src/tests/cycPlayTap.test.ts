@@ -198,6 +198,89 @@ describe('the pipeline commit (a kept utterance) and a press made after it began
   });
 });
 
+describe('a press while the mic is recording waits, visibly, and starts on release', () => {
+  test('recording: the tap waits (nothing fetched, nothing sounds), then plays once released', async () => {
+    speaker.setBusy(true, 'capture:12');
+    speaker.setRecording(true);
+    tap('reply');
+    expect(speaker.state).toMatchObject({state: 'waiting', msgId: 'reply'});
+    expect(streamAudioUrl).not.toHaveBeenCalled();
+    expect(clip.playCalls).toBe(0);
+    // Released: the transcript is still pending (the capture claim holds), and
+    // the waiting tap starts at once.
+    speaker.setRecording(false);
+    expect(speaker.holds()).toEqual(['capture:12']);
+    expect(speaker.state).toMatchObject({state: 'loading', msgId: 'reply'});
+    await land('reply');
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+  });
+
+  test('the press before the mic answers counts as recording', async () => {
+    speaker.setBusy(true, 'press');
+    tap('reply');
+    expect(speaker.state).toMatchObject({state: 'waiting', msgId: 'reply'});
+    speaker.setBusy(false, 'press');
+    expect(speaker.state).toMatchObject({state: 'loading', msgId: 'reply'});
+  });
+
+  test('released before the press: the tap plays at once', async () => {
+    speaker.setBusy(true, 'capture:12');
+    speaker.setRecording(true);
+    speaker.setRecording(false);
+    tap('reply');
+    expect(speaker.state).toMatchObject({state: 'loading', msgId: 'reply'});
+  });
+
+  test('resuming a paused clip while recording waits too, and resumes on release', async () => {
+    tap('reply');
+    await land('reply');
+    speaker.pause();
+    const before = clip.playCalls;
+    speaker.setRecording(true);
+    speaker.resume();
+    expect(speaker.state).toMatchObject({state: 'waiting', msgId: 'reply'});
+    expect(clip.playCalls).toBe(before);
+    speaker.setRecording(false);
+    await flush();
+    expect(clip.playCalls).toBe(before + 1);
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+  });
+
+  test('through the pipeline: fire records, release starts the tap, the kept verdict keeps it', async () => {
+    const {pipeline} = await import('../audio/pipeline');
+    const p = pipeline as unknown as {
+      active: {id: number; startedAt: number} | null;
+      inFlight: Map<number, unknown>;
+      syncRecordingState(): void;
+      commitUtterance(cap: unknown, released: unknown, heard: unknown, blob: unknown): Promise<void>;
+    };
+    // pipeline.fire, reduced to its speaker effects: the claim and the recState.
+    const cap = {id: 13, cid: 'c-13', startedAt: performance.now(), wasPlaying: false};
+    speaker.setBusy(true, 'capture:13');
+    p.active = cap;
+    p.inFlight.set(13, cap);
+    p.syncRecordingState();
+    expect(speaker.recording()).toBe(true);
+    await new Promise((r) => setTimeout(r, 2));
+    speaker.stopAll();
+    tap('reply');
+    expect(speaker.state).toMatchObject({state: 'waiting', msgId: 'reply'});
+    // releaseAndMeasure: the recording ends, the transcript is pending.
+    p.active = null;
+    p.syncRecordingState();
+    expect(speaker.recording()).toBe(false);
+    expect(speaker.state).toMatchObject({state: 'loading', msgId: 'reply'});
+    await land('reply');
+    await p.commitUtterance(
+      cap,
+      {id: 13, forCapture: undefined, durationS: 9},
+      {text: 'a note', streamed: true, failed: false, decoded: true, blob: new Blob(['x'])},
+      async (): Promise<Blob | null> => null
+    );
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+  });
+});
+
 describe('nothing fails silently', () => {
   test('a fetch that fails is an error the user sees, and the spinner goes', async () => {
     tap('gone');

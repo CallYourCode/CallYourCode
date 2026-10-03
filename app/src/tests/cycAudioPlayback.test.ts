@@ -240,6 +240,40 @@ describe('every press on play is visible and logged (play-tap)', () => {
     expect(speaker.enqueue).toHaveBeenCalledTimes(1);
     expect(taps().map((t) => t.outcome)).toEqual(['play', 'loading']);
   });
+  test('a press while the mic is recording says it plays after, and logs after-recording', () => {
+    const speaker = {...fakeSpeaker(), holds: () => ['capture:12', 'press'], recording: () => true};
+    const {api, session} = mk({speaker});
+    session.messages.push({id: 1, role: 'claude', text: 'a', ts: 1, msgId: 'm1'} as never);
+    api.onMessagePlay(session.messages[0]!, document.createElement('div'));
+    expect(speaker.enqueue).toHaveBeenCalledWith(expect.objectContaining({msgId: 'm1', manual: true}));
+    expect(toast).toHaveBeenCalledWith('Plays after your recording');
+    expect(taps()[0]).toMatchObject({outcome: 'after-recording', recording: true});
+    // a second press while it waits is a no-op
+    speaker.state.msgId = 'm1';
+    speaker.state.state = 'waiting';
+    api.onMessagePlay(session.messages[0]!, document.createElement('div'));
+    expect(speaker.enqueue).toHaveBeenCalledTimes(1);
+    expect(taps()[1]).toMatchObject({outcome: 'waiting'});
+  });
+  test('the waiting state shows on the button until it plays', () => {
+    const speaker = fakeSpeaker({state: 'waiting', msgId: 'm1', sessionId: 's1'});
+    const {api, deps} = mk({speaker});
+    const card = document.createElement('div');
+    card.className = 'cyc-clip cyc-voice';
+    card.dataset.msgId = 'm1';
+    const toggle = document.createElement('div');
+    toggle.className = 'cyc-clip-toggle';
+    card.append(toggle);
+    deps.messageListInner.append(card);
+    api.updateMessagePlays();
+    expect(toggle.classList.contains('cyc-clip-wait')).toBe(true);
+    expect(toggle.getAttribute('title')).toBe('Plays after your recording');
+    speaker.state.state = 'loading';
+    api.updateMessagePlays();
+    expect(toggle.classList.contains('cyc-clip-wait')).toBe(false);
+    expect(toggle.classList.contains('cyc-pending')).toBe(true);
+    expect(toggle.hasAttribute('title')).toBe(false);
+  });
   test('the player bar toggle logs too', () => {
     const {api, speaker} = mk();
     speaker.state.state = 'speaking';
