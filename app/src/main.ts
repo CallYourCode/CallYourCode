@@ -539,15 +539,22 @@ function buildApp() {
 
   composer.mountAsk(askPanel.el);
 
-  chatEl.addEventListener('click', (e) => {
-    if (nav.settingsOpen()) {
-      setSettingsOpen(false);
-      return;
-    }
+  // Capture phase: a click anywhere on the chat closes settings or the tablet
+  // drawer, even on a control that stops the click's propagation (the stamp's
+  // copy and quote), and the click still goes on to do its own action.
+  chatEl.addEventListener(
+    'click',
+    (e) => {
+      if (nav.settingsOpen()) {
+        setSettingsOpen(false);
+        return;
+      }
 
-    if ((e.target as HTMLElement).closest('.cyc-pane-header')) return;
-    if (inDrawerRegime() && drawerOpen() && sessionState.activeId) setView('chat');
-  });
+      if ((e.target as HTMLElement).closest('.cyc-pane-header')) return;
+      if (inDrawerRegime() && drawerOpen() && sessionState.activeId) setView('chat');
+    },
+    {capture: true}
+  );
 
   const {rightPane, profile} = createProfilePane({
     onTeardown,

@@ -9,8 +9,8 @@ import {describe, expect, test, vi} from 'vitest';
 import {createComposer} from '../features/composer/components/messageComposer';
 import type {CycReplyTo} from '../types';
 
-// The pill is the input box (fix-reply-focus): a press on its bare surface
-// focuses the input, and the decision is read off pointerdown, the true hit,
+// The pill is the input box (fix-reply-focus): a press anywhere in it that is
+// not a control focuses the input (quote cards included), and the decision is read off pointerdown, the true hit,
 // because a touch tap's mouse events and click are retargeted by the browser to
 // a nearby control (WebKit snaps a tap under the reply card onto the card). The
 // real hit-testing is proven in e2e/offline/reply-focus.spec.ts; this pins the
@@ -82,12 +82,36 @@ describe('composer surface press', () => {
     c.el.remove();
   });
 
-  test('a press on the reply card itself still jumps to the replied message', () => {
-    const {c, panel, onJumpToReply} = setup();
+  test('a press on the reply card itself jumps, and the caret goes to the input', () => {
+    const {c, input, panel, onJumpToReply} = setup();
     pointerdown(panel);
-    mousedown(panel);
+    const md = mousedown(panel);
     click(panel);
+    expect(md.defaultPrevented).toBe(true);
     expect(onJumpToReply).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(input);
+    c.el.remove();
+  });
+
+  test('a press on a quote card focuses the input', () => {
+    const {c, input} = setup();
+    c.addQuote('quoted words', 'Agent', REPLY);
+    const text = c.el.querySelector('.cyc-block-quote-text') as HTMLElement;
+    pointerdown(text);
+    const md = mousedown(text);
+    expect(md.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(input);
+    c.el.remove();
+  });
+
+  test('a press on a control (the quote remove button) is left to the control', () => {
+    const {c, input} = setup();
+    c.addQuote('quoted words', 'Agent', REPLY);
+    const x = c.el.querySelector('.cyc-block-quote button') as HTMLElement;
+    pointerdown(x);
+    const md = mousedown(x);
+    expect(md.defaultPrevented).toBe(false);
+    expect(document.activeElement).not.toBe(input);
     c.el.remove();
   });
 
