@@ -313,3 +313,109 @@ describe('a press that records nothing gives back exactly the reply it paused', 
     expect(state()).toBe('paused');
   });
 });
+
+// One standing machine pause: whatever press or take paused the reply, it is
+// given back when the last of them lets go, so a press that ends empty while
+// an earlier take is still being judged gets its reply back at that verdict.
+describe('an empty press while an earlier take is still being judged', () => {
+  type Cap = {id: number};
+  type Takes = {
+    fire(): void;
+    active: Cap | null;
+    syncRecordingState(): void;
+    abandonCapture(cap: Cap, s: number, b: null, w: string): void;
+    commitUtterance(cap: Cap, released: unknown, heard: unknown, blob: unknown): Promise<void>;
+  };
+  const takes = () => pipeline as unknown as Takes;
+  const state = () => speaker.state.state;
+  // A take released by the finger, its verdict pending; nothing was playing.
+  const takeInFlight = () => {
+    pipeline.stream = {getAudioTracks: () => [{readyState: 'live', muted: false}]};
+    pipeline.actx = {state: 'running', currentTime: 0};
+    takes().fire();
+    const cap = takes().active!;
+    takes().active = null;
+    takes().syncRecordingState();
+    return cap;
+  };
+  // The reply tapped while that take's transcript is pending: it plays at once.
+  const tapReply = async () => {
+    speaker.enqueue({
+      msgId: 'reply',
+      url: '/audio/reply.mp3',
+      text: 'reply',
+      sessionId: 's1',
+      manual: true
+    });
+    await settle();
+    expect(state()).toBe('speaking');
+  };
+  const drop = (cap: Cap) => takes().abandonCapture(cap, 1, null, 'test: dropped');
+  const keep = (cap: Cap) =>
+    takes().commitUtterance(
+      cap,
+      {id: cap.id, forCapture: undefined, durationS: 3},
+      {text: 'a note', streamed: true, failed: false, decoded: true, blob: new Blob(['x'])},
+      async (): Promise<Blob | null> => null
+    );
+
+  test('the mic failed to open: the reply comes back at the dropped verdict', async () => {
+    const take = takeInFlight();
+    await tapReply();
+    pipeline.holdForPress();
+    pipeline.refusePress('the microphone could not be opened (getUserMedia failed)');
+    pipeline.endPTT();
+    await settle();
+    expect(state()).toBe('paused');
+    drop(take);
+    await settle();
+    expect(state()).toBe('speaking');
+  });
+
+  test('released before getUserMedia answered: the reply comes back at the dropped verdict', async () => {
+    const take = takeInFlight();
+    await tapReply();
+    pipeline.holdForPress();
+    pipeline.endPTT();
+    await settle();
+    drop(take);
+    await settle();
+    expect(state()).toBe('speaking');
+  });
+
+  test('a kept verdict keeps a reply asked for after its take began, and gives it back', async () => {
+    const take = takeInFlight();
+    await new Promise((r) => setTimeout(r, 2));
+    await tapReply();
+    pipeline.holdForPress();
+    pipeline.endPTT();
+    await keep(take);
+    await settle();
+    expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
+  });
+});
+
+// A re-acquire that answers after the mic was released must not leave a live
+// track behind: nobody wants the mic any more.
+describe('a re-acquire that answers after the mic was disposed', () => {
+  test('stops the new tracks and installs nothing', async () => {
+    const track = {readyState: 'live', muted: false, stop: vi.fn(), addEventListener() {}};
+    const next = {getTracks: () => [track], getAudioTracks: () => [track]};
+    let answer!: () => void;
+    const gum = vi.fn(() => new Promise((r) => (answer = () => r(next))));
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {getUserMedia: gum},
+      configurable: true
+    });
+    const dead = {readyState: 'ended', muted: false, stop: vi.fn()};
+    pipeline.stream = {getTracks: () => [dead], getAudioTracks: () => [dead]};
+    pipeline.actx = null;
+    const reacquire = (pipeline as unknown as {reacquireStream(): Promise<void>}).reacquireStream();
+    expect(gum).toHaveBeenCalledTimes(1);
+    (pipeline as unknown as {dispose(): void}).dispose();
+    answer();
+    await reacquire.catch(() => {});
+    expect(track.stop).toHaveBeenCalled();
+    expect(pipeline.stream).toBeNull();
+  });
+});

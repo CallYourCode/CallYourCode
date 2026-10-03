@@ -358,7 +358,9 @@ describe('a press is a press made now: the kept verdict keeps what the user aske
   test('a machine resume (a dropped take giving the clip back) is not a press: a later kept take still drops it', async () => {
     const p = await pipe();
     await playing();
-    speaker.giveBack(speaker.interrupt());
+    speaker.interrupt();
+    speaker.setBusy(true, 'capture:20');
+    speaker.setBusy(false, 'capture:20');
     await flush();
     expect(speaker.state).toMatchObject({state: 'speaking', msgId: 'reply'});
     await new Promise((r) => setTimeout(r, 2));

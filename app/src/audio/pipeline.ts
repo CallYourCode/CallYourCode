@@ -1,4 +1,4 @@
-import {speaker, type Interruption} from './speaker';
+import {speaker} from './speaker';
 import {playbackContextOpen, releasePlaybackContext, setCallPlayback} from './webAudioClip';
 import {releaseToneContext, toneContextOpen} from './turnTones';
 import {Pcm16kChunker, PCM_TAP_PROCESSOR_NAME, PCM_TAP_WORKLET_JS, STT_RATE} from './pcm';
@@ -93,8 +93,6 @@ type Capture = {
   audioFrom: number;
   dbs: number[];
   wasPlaying: boolean;
-  // What this take paused, given back if it is dropped.
-  paused: Interruption | null;
 
   fromPress: boolean;
   slot: Slot | null;
@@ -164,8 +162,6 @@ class Pipeline {
   private above = 0;
   private lastVoiceAt = 0;
   private pttDown = false;
-  // What the press paused, until its capture takes it or the press ends empty.
-  private pressPaused: Interruption | null = null;
   private handsFreeId: string | null = null;
 
   private captureSeq = 0;
@@ -248,25 +244,19 @@ class Pipeline {
     }
     cap.streamOpen = false;
     this.emit('ignored', '', 'error', blob ?? undefined, cap.id, durationS);
-    this.release(cap, cap.wasPlaying);
+    this.release(cap);
   }
 
-  private release(cap: Capture, resume: boolean): void {
+  // The speaker gives back what the takes and the press paused once the last
+  // of them lets go (speaker.giveBack).
+  private release(cap: Capture): void {
     this.inFlight.delete(cap.id);
     cap.arbitrating = false;
     cap.streamOpen = false;
     cap.wasPlaying = false;
     if (this.tailFor === cap) this.tailFor = null;
     speaker.setBusy(false, `capture:${cap.id}`);
-    if (resume) this.giveBack(cap.paused);
     this.syncRecordingState();
-  }
-
-  // Not while the user is still talking or a take is still being judged: a
-  // kept take drops what it interrupted. The last one out gives it back (every
-  // holder of a machine pause shares its token).
-  private giveBack(paused: Interruption | null): void {
-    if (!this.pttDown && !this.active && !this.inFlight.size) speaker.giveBack(paused);
   }
 
   private workletReady = false;
@@ -592,6 +582,12 @@ class Pipeline {
     const next = await navigator.mediaDevices.getUserMedia({
       audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}
     });
+    // Disposed while getUserMedia was answering (the press ended, the mic was
+    // released): the new tracks would hold the mic open for nobody.
+    if (!this.stream) {
+      next.getTracks().forEach((t) => t.stop());
+      return;
+    }
     this.unbindTracks?.();
     this.ring.stop();
     if (this.srcNode) {
@@ -900,11 +896,10 @@ class Pipeline {
     this.syncRecordingState();
   }
 
-  // The composer's press takes the speaker before it asks for the mic: the
-  // 'press' claim, and the reply it pauses, recorded so that a press that
-  // records nothing gives back exactly that.
+  // The composer's press takes the speaker before it asks for the mic: it
+  // pauses the reply and claims the speaker until the press ends.
   holdForPress(): void {
-    this.pressPaused = speaker.interrupt();
+    speaker.interrupt();
     speaker.setBusy(true, 'press');
   }
 
@@ -953,29 +948,21 @@ class Pipeline {
     this.endEmptyPress();
   }
 
-  // A press that ends with no recording (refused, released or cancelled before
-  // the mic or its recovery answered) gives back everything it took: the press
-  // itself, its capture id, the recording state, the 'press' claim, and the
-  // reply it paused, so nothing waits behind a recording that never started.
+  // A press that ends with no recording (refused, or cancelled before the mic
+  // or its recovery answered) gives back everything it took: the press itself,
+  // its capture id, the recording state and the 'press' claim, so nothing
+  // waits behind a recording that never started.
   private endEmptyPress(): void {
     this.pttDown = false;
     this.pttCaptureId = 0;
     speaker.setBusy(false, 'press');
     this.syncRecordingState();
-    const paused = this.pressPaused;
-    this.pressPaused = null;
-    this.giveBack(paused);
   }
 
   private beginPress(): void {
     if (!this.active) this.fire();
 
-    if (this.active) {
-      this.active.fromPress = true;
-      // The take now holds what the press paused; its verdict gives it back.
-      this.active.paused ??= this.pressPaused;
-    }
-    this.pressPaused = null;
+    if (this.active) this.active.fromPress = true;
     this.pttCaptureId = this.active?.id ?? 0;
     this.lastVoiceAt = performance.now();
     this.syncRecordingState();
@@ -986,9 +973,7 @@ class Pipeline {
     // pttDown): its claim on the speaker goes with it, or every later tap would
     // wait for a recording that is not happening.
     speaker.setBusy(false, 'press');
-    // Released before the press reached the pipeline (getUserMedia had not
-    // answered), or after it was refused.
-    if (!this.pttDown) return this.endEmptyPress();
+    if (!this.pttDown) return;
     this.pttDown = false;
     this.pttCaptureId = 0;
 
@@ -1002,7 +987,7 @@ class Pipeline {
         'the press ended with no capture running, so nothing was recorded ' +
         'and no event will follow'
     });
-    this.endEmptyPress();
+    this.syncRecordingState();
   }
 
   forceEnd(): void {
@@ -1030,7 +1015,7 @@ class Pipeline {
     cap.slot = null;
     if (this.stream) this.ring.start(this.stream);
     speaker.setBusy(false, 'press');
-    this.release(cap, cap.wasPlaying);
+    this.release(cap);
   }
 
   enableHandsFree(sessionId: string): void {
@@ -1139,7 +1124,6 @@ class Pipeline {
       audioFrom: now,
       dbs: [],
       wasPlaying: speaker.isPlaying(),
-      paused: null,
       slot: null,
       stream: null,
       streamOpen: false,
@@ -1149,7 +1133,7 @@ class Pipeline {
 
       fromPress: false
     };
-    cap.paused = speaker.interrupt();
+    speaker.interrupt();
     speaker.setBusy(true, `capture:${cap.id}`);
 
     this.active = cap;
@@ -1447,7 +1431,6 @@ class Pipeline {
     blobWithin: () => Promise<Blob | null>
   ): Promise<void> {
     const {id, durationS} = released;
-    const resume = cap.wasPlaying;
     if (normText(heard.text)) {
       this.emit('ignored', heard.text, undefined, undefined, id, durationS);
     } else {
@@ -1462,7 +1445,7 @@ class Pipeline {
       );
     }
 
-    this.release(cap, resume);
+    this.release(cap);
   }
 
   private async commitUtterance(
@@ -1480,7 +1463,7 @@ class Pipeline {
 
     if (text) this.emit('partial', text, forCapture, text.length, id);
 
-    this.release(cap, false);
+    this.release(cap);
     if (text) this.emit('utterance', text, forCapture, blob ?? null, durationS, id);
   }
 }
