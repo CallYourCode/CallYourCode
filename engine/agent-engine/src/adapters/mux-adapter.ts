@@ -582,6 +582,10 @@ export type DeliverDeps = {
    *  the reader's parseScreen presence, folded from the old dialogs/composer
    *  profile fields. */
   canParseScreen: (handle: string) => boolean;
+  /** Called (and awaited) before the first keystroke ("typing") and right
+   *  after the Enter returned ("submitted"), so the caller can keep how far a
+   *  delivery got on disk for a restart (chat/intake.ts Stage). */
+  progress?: (stage: "typing" | "submitted") => Promise<void>;
 };
 
 /* `takenAt` is WHEN THE ENGINE TOOK THIS MESSAGE, and it is a parameter rather
@@ -1268,7 +1272,9 @@ export class MuxAdapter implements MultiplexerAdapter {
     if (this.inputMethod(handle) === "direct") {
       const endpoint = this.directEndpoints.get(handle);
       if (endpoint) {
+        await deps?.progress?.("typing");
         await endpoint.send(text);
+        await deps?.progress?.("submitted");
         return;
       }
     }
@@ -1279,6 +1285,7 @@ export class MuxAdapter implements MultiplexerAdapter {
       sessionFor: deps?.sessionFor ?? ((h) => this.sessionFor(h)),
       readScreen: deps?.readScreen ?? ((h) => this.parseScreen(h)),
       canParseScreen: deps?.canParseScreen ?? ((h) => this.canParseScreen(h)),
+      progress: deps?.progress,
     }, handle, text, deliveryId, takenAt);
   }
 

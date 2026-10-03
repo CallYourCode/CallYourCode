@@ -13,7 +13,7 @@
 
 import { safeCid, newCid } from "../../../shared/logbook.ts";
 import { PaneNotReady, DeliveryStranded } from "../adapters/mux-adapter.ts";
-import { deliverToPane } from "./pane-deliver.ts";
+import { deliverToPane, unsubmitted } from "./pane-deliver.ts";
 import { stampTs, logChat, noticeChat, awaitingQueue, armAwaiting, clearAwaiting, armQueueClear,
   QUEUE_STUCK_MS } from "./chatlog.ts";
 import { markReadOnUtterance } from "../sessions/readstate.ts";
@@ -26,7 +26,8 @@ import { admitPartial, wordsOf, keptPrefix, release } from "../voice/transcript-
 import type { ReplyDelivery } from "./reply-trace.ts";
 import type { OutgoingInput } from "../plugins/platform/core.ts";
 import { broadcast, send } from "../transport/wire.ts";
-import { noteTaken, forgetTaken, takenFor } from "./intake.ts";
+import { noteTaken, forgetTaken, takenFor, newAttempt, noteStage, stageFor, forgetStage,
+  noteFailed, clearFailed, type Taken } from "./intake.ts";
 import type { Sock } from "../transport/sock.ts";
 
 export type DeliverDeps = {
@@ -44,6 +45,10 @@ export type DeliverDeps = {
   /** the upload binder (uploads.ts instance) */
   bindOwnedUploads(claimed: UploadRec[], cid?: string, sessionId?: string): Promise<{ ups: UploadRec[]; missing: string[] }>;
   adoptStagedUploads(sessionId: string, ups: UploadRec[]): Promise<void>;
+  /** every chat append issued so far is on disk (chatStore.flush) */
+  flushChat?(): Promise<void>;
+  /** every log line written so far is on disk (the engine log's flush) */
+  flushLog?(): Promise<void>;
 };
 
 let deps: DeliverDeps | null = null;
@@ -90,7 +95,27 @@ export function resetForTest(): void {
   utterQueue.clear();
   ackQueue.clear();
   redrivenTaken.clear();
+  ownTakes.clear();
+  draining = false;
+  inPane = 0;
   deps = null;
+}
+
+/* THE SIGTERM DRAIN. A service-manager restart is the ordinary way an engine
+ * stops, and stopping between a message's first keystroke and its row is what
+ * delivered it twice. So on SIGTERM: no new frame is taken (it is not acked, so
+ * the app sends it to the next process), nothing new starts typing (it stays on
+ * disk and the next boot drives it), and the deliveries already typing finish,
+ * row on disk included, bounded by `maxMs`. Resolves with how many were still
+ * typing when the bound ran out (0 is the normal answer). */
+let draining = false;
+let inPane = 0;
+export async function drainDeliveries(maxMs: number): Promise<number> {
+  draining = true;
+  const until = Date.now() + maxMs;
+  while (inPane > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
+  await D().flushChat?.();
+  return inPane;
 }
 
 /* ONE SESSION TAKES ITS MESSAGES IN THE ORDER THEY WERE SENT.
@@ -146,6 +171,12 @@ export function onUtterance(ws: Sock, m: any): Promise<void> {
    * app delete the intent for a message that landed nowhere, so the answer is
    * the definitive nack (ack with err): the app keeps the message as not
    * delivered, and a tap sends it again. */
+  if (draining) {
+    D().log("utterance.not-taken", { cid, session: sid,
+      why: "the engine is stopping; the frame is not acked, so the app keeps it and sends " +
+        "it to the next process" });
+    return Promise.resolve();
+  }
   const s = D().sessionOf(sid);
   if (!s) {
     D().log("utterance.dropped", { cid, session: sid, kind: m.kind ?? "text",
@@ -185,6 +216,9 @@ export function onUtterance(ws: Sock, m: any): Promise<void> {
     return Promise.resolve();
   }
   cidsInFlight(s).add(cid);
+  clearFailed(sid, cid); // a retry of a send given up on: it is a new take
+  const t: Taken = { sessionId: sid, cid, takenAt, attempt: newAttempt(), frame: m };
+  ownTakes.add(t.attempt);
   /* TAKEN MEANS ON DISK (intake.ts). The app deletes its copy on the ack, so
    * the frame is written before it: a crash anywhere after the ack (a
    * recording being read, a message queued behind one) leaves the file, and
@@ -193,7 +227,7 @@ export function onUtterance(ws: Sock, m: any): Promise<void> {
    * write. A write that fails (a full disk) is logged and the message still
    * goes, exactly as before this existed. */
   const durable = inAckOrder(sid, async () => {
-    await noteTaken({ sessionId: sid, cid, takenAt, frame: m }).catch((e) => {
+    await noteTaken(t).catch((e) => {
       D().log("intake.unsaved", { cid, session: sid, err: String(e),
         why: "the taken frame could not be written; it is delivered, but a crash before " +
           "that would lose it" });
@@ -201,11 +235,22 @@ export function onUtterance(ws: Sock, m: any): Promise<void> {
     ack();
   });
   return inOrder(sid, async () => { await durable; return handleUtterance(ws, m, takenAt); })
-    .finally(() => {
-      cidsInFlight(s).delete(cid);
-      return forgetTaken(sid, cid);
-    });
+    .finally(() => settleTake(s, t));
 }
+
+/* A take is finished: the frame goes from disk only once what it wrote to the
+ * chat (the delivered row, or the pending row of a note still being read) is
+ * on disk too. */
+async function settleTake(s: CidSession, t: Taken): Promise<void> {
+  cidsInFlight(s).delete(t.cid);
+  await D().flushChat?.();
+  await forgetTaken(t);
+  ownTakes.delete(t.attempt);
+}
+
+/* The takes this process made (fresh or driven again), by attempt: a redrive
+ * or the orphan sweep only ever acts on what a stopped process left. */
+const ownTakes = new Set<string>();
 
 /* THE ACKS GO OUT IN THE ORDER THE FRAMES CAME IN, per session. A taken
  * frame's ack waits for its disk write; the rewrite of that same frame, acked
@@ -219,45 +264,74 @@ function inAckOrder(sessionId: string, f: () => Promise<void>): Promise<void> {
 
 /* THE TAKEN FRAMES A PREVIOUS PROCESS NEVER FINISHED (intake.ts), driven again
  * when their session is picked up live. Once per (session, cid) per process,
- * and never for a cid the chat log already holds (it was delivered, or shown
- * pending, and that row has its own re-drive): a message is not delivered
- * twice. A frame driven three times by three boots without finishing is
- * given up on, logged: a message that kills the engine must not do it on
- * every start. There is no socket to answer: a refusal is broadcast as
- * send-failed on the cid, which the device that sent it acts on. */
+ * and never for a cid the chat log already holds or this process is already
+ * delivering (a resend the app made after the restart): a message is not
+ * delivered twice. The cid is claimed in the same turn as that check, before
+ * any await, so a resend landing in between is a dup. How far the dead
+ * process's keystrokes got is the per-cid Stage, which injectUserMessage reads.
+ * A frame driven three times by three boots without finishing is given up on:
+ * a message that kills the engine must not do it on every start, and the
+ * sender is told with send-failed (its bubble goes to failed, with a retry). */
 const redrivenTaken = new Set<string>();
+export const GIVEN_UP_REASON = "the engine stopped three times while delivering it";
+export const ORPHAN_REASON = "the session it was sent to did not come back";
 export async function redriveTaken(s: CidSession & { id: string }): Promise<number> {
   let n = 0;
   for (const t of await takenFor(s.id)) {
+    if (ownTakes.has(t.attempt)) continue;
     const k = `${s.id}|${t.cid}`;
-    if (redrivenTaken.has(k)) continue;
-    redrivenTaken.add(k);
-    if (recentCids(s).has(t.cid) || cidsInFlight(s).has(t.cid) ||
+    if (redrivenTaken.has(k) || recentCids(s).has(t.cid) || cidsInFlight(s).has(t.cid) ||
       s.chat.some((r) => r.role === "user" && r.cid === t.cid)) {
       D().log("intake.finished", { cid: t.cid, session: s.id,
-        why: "the chat log holds this cid: the message landed before the engine went down" });
-      await forgetTaken(s.id, t.cid);
+        why: "the chat log holds this cid, or this process already has it: this take is done" });
+      await forgetTaken(t);
       continue;
     }
+    redrivenTaken.add(k);
     const redrives = (t.redrives ?? 0) + 1;
     if (redrives > 3) {
       D().log("intake.given-up", { cid: t.cid, session: s.id, redrives: t.redrives,
-        why: "three boots drove this frame and none finished it; it is dropped rather " +
-          "than allowed to take the engine down on every start" });
-      await forgetTaken(s.id, t.cid);
+        why: "three boots drove this frame and none finished it; it is dropped and the " +
+          "sender is told it failed, rather than letting it take the engine down on every start" });
+      await failTake(t, GIVEN_UP_REASON);
       continue;
     }
-    await noteTaken({ ...t, redrives });
+    cidsInFlight(s).add(t.cid); // claimed before any await (D3)
+    const next: Taken = { ...t, attempt: newAttempt(), redrives };
+    ownTakes.add(next.attempt);
     D().log("intake.redrive", { cid: t.cid, session: s.id, kind: t.frame.kind ?? "text",
       takenAt: t.takenAt, redrives,
       why: "this message was acked and the engine went down before it was delivered" });
-    cidsInFlight(s).add(t.cid);
+    await noteTaken(next).catch(() => {});
+    await forgetTaken(t);
+    await D().flushLog?.(); // the line survives whatever this drive does to the process
     n++;
     void inOrder(s.id, () => handleUtterance(null, t.frame, Date.now()))
-      .finally(() => {
-        cidsInFlight(s).delete(t.cid);
-        return forgetTaken(s.id, t.cid);
-      });
+      .finally(() => settleTake(s, next));
+  }
+  return n;
+}
+
+/* A take that will not be delivered: the sender is told (send-failed, and on
+ * every app that connects to this process later), and the frame goes. */
+async function failTake(t: Taken, reason: string): Promise<void> {
+  D().broadcast(noteFailed(t.sessionId, t.cid, reason));
+  await forgetTaken(t);
+  await forgetStage(t.sessionId, t.cid);
+}
+
+/* THE FRAMES WHOSE SESSION NEVER CAME BACK: a pane closed while the engine was
+ * down, an id absorbed into another. Its pickup never comes, so after a bound
+ * (server.ts, from boot) every frame no pickup drove is failed visibly. */
+export async function failOrphanedTaken(): Promise<number> {
+  let n = 0;
+  for (const t of await takenFor()) {
+    // taken by this process, or driven by a pickup already: not an orphan
+    if (ownTakes.has(t.attempt) || redrivenTaken.has(`${t.sessionId}|${t.cid}`)) continue;
+    D().log("intake.orphaned", { cid: t.cid, session: t.sessionId,
+      why: "the session this message was taken for never came back live; the sender is told it failed" });
+    await failTake(t, ORPHAN_REASON);
+    n++;
   }
   return n;
 }
@@ -812,28 +886,73 @@ export async function injectUserMessage(
      * try this message again: once a keystroke has left, a retry is a second
      * message. */
     if (!s.alive) return OFFLINE;
-    /* The agent gets a real path per attachment, in the order they were
-     * composed, and the caption (if any) rides along after them. ONE message:
-     * several attachments make the line longer, they never
-     * make it a second delivery, so the agent reads one turn however many
-     * files came with it. One attachment renders exactly the string this has
-     * always sent. */
-    const ups = inj.uploads ?? [];
-    const body = ups.length
-      ? ups.map((u) => `[attached ${u.image ? "image" : "file"}: ${u.path}]`).join(" ") +
-        (text ? ` ${text}` : "")
-      : text;
-    /* Fold every registered input-transform hook over the body (the reply-dials
-     * plugin's postfix hook appends the reply instruction). Then record the
-     * delivery for the Stop hook: just that a message went out, tagged with how
-     * it arrived. The hook is verbosity-unaware, so no channel demand travels
-     * with it. */
-    const delivered = `${inj.how}${inj.note ? ` (${inj.note})` : ""}: ` +
-      D().transformOutgoing({ sessionId: s.id, text: body, channels: s.channels });
+    // Stopping (drainDeliveries): nothing new starts typing; it stays owed on disk.
+    if (draining) await new Promise<never>(() => {});
+    inPane++;
+    try {
+      return await typeAndCommit(s, inj);
+    } finally {
+      inPane--;
+    }
+  }
+
+  if (!s.alive || !s.ws) return OFFLINE;
+
+  const ts = inj.completesTs ?? stampTs(s);
+  send(s.ws, { t: "transcript", text });
+  const msg = commitDelivery(s, inj, ts, false);
+  markReadOnUtterance(s, ts); // his own message reads everything above it (#452)
+  D().log("utterance.delivered", { cid, session: s.id, msgId: msg.msgId, ts,
+    transport: "socket", chars: text.length, how: inj.how,
+    completing: inj.completesTs != null || undefined });
+  return { ok: true, ts };
+}
+
+/* The keystroke half of injectUserMessage, for a live mux pane. HOW FAR A DEAD
+ * PROCESS GOT is the cid's Stage (intake.ts): `submitted` means its Enter went
+ * out, so nothing is typed again and only the missing row is written; `typing`
+ * means the body may be sitting in the box, so the stranded-body note is set and
+ * the guard presses Enter only when the box still holds it. The stage is written
+ * before the first keystroke and right after the Enter, and goes once the row is
+ * on disk. What is left: a stop in the few milliseconds between the Enter
+ * reaching the pane and `submitted` reaching the disk types it again (the
+ * SIGTERM drain takes ordinary restarts out of that window). */
+async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
+  const { cid, text } = inj;
+  const stage = await stageFor(s.id, cid);
+  /* The agent gets a real path per attachment, in the order they were
+   * composed, and the caption (if any) rides along after them. ONE message:
+   * several attachments make the line longer, they never
+   * make it a second delivery, so the agent reads one turn however many
+   * files came with it. One attachment renders exactly the string this has
+   * always sent. */
+  const ups = inj.uploads ?? [];
+  const body = ups.length
+    ? ups.map((u) => `[attached ${u.image ? "image" : "file"}: ${u.path}]`).join(" ") +
+      (text ? ` ${text}` : "")
+    : text;
+  /* Fold every registered input-transform hook over the body (the reply-dials
+   * plugin's postfix hook appends the reply instruction). Then record the
+   * delivery for the Stop hook: just that a message went out, tagged with how
+   * it arrived. The hook is verbosity-unaware, so no channel demand travels
+   * with it. */
+  const delivered = `${inj.how}${inj.note ? ` (${inj.note})` : ""}: ` +
+    D().transformOutgoing({ sessionId: s.id, text: body, channels: s.channels });
+  if (stage === "submitted") {
+    D().log("delivery.already-submitted", { cid, session: s.id,
+      why: "a previous process pressed Enter on this message and stopped before its row " +
+        "was written; the row is written now and nothing is typed again" });
+  } else {
     // On disk before the agent can possibly read the message: the Stop hook at
     // the end of this turn asks the state file whether a reply went out.
     const noted = D().noteDelivery(s.id, inj.how);
     D().writeHookState();
+    /* A previous process typed it and stopped: the note it held in memory is
+     * set again, so the guard presses Enter only if the box still holds it. A
+     * note this process already holds for it (a stranded retry) is kept as is. */
+    if (stage === "typing" && unsubmitted.get(s.muxHandle)?.deliveryId !== cid) {
+      unsubmitted.set(s.muxHandle, { deliveryId: cid, at: Date.now() });
+    }
     /* PRE-ARM the consumption listener BEFORE the keystrokes go out. The
      * current claude journals the message's `user` record ~0.45s after it is
      * typed, which is usually WHILE deliverToPane's echo gate is still
@@ -848,9 +967,13 @@ export async function injectUserMessage(
      * index off the delivered text is what the transcript echo matches on. */
     armAwaiting(cid, s.id, 0, delivered);
     try {
-      await deliverToPane(s.muxHandle, delivered, cid, inj.takenAt);
+      await deliverToPane(s.muxHandle, delivered, cid, inj.takenAt, (st) =>
+        noteStage(s.id, cid, st).catch((e) => D().log("intake.stage-unsaved", { cid, err: String(e) })));
     } catch (e) {
       clearAwaiting(cid);
+      // the stage follows what is in the box now: the body (stranded), or nothing
+      if (e instanceof DeliveryStranded) await noteStage(s.id, cid, "typing").catch(() => {});
+      else if (e instanceof PaneNotReady) await forgetStage(s.id, cid);
       /* Three failures now, and the user needs them told apart. A pane sitting
        * on a prompt (PaneNotReady, nothing typed) is "go and answer it". A body
        * typed but not submitted (DeliveryStranded) is "send it again and it will
@@ -890,52 +1013,43 @@ export async function injectUserMessage(
               "delivered and nothing was written to the chat log",
             tell: "(message not delivered; the session did not take it. Try again.)" };
     }
-    // Completing a note shown earlier keeps its ts, so the words fill that same
-    // bubble; an ordinary message takes the next one (#458).
-    const ts = inj.completesTs ?? stampTs(s);
-    /* The pre-armed entry is GONE when the transcript's user record already
-     * landed during the typing await: claude has the message in context, so
-     * the row is never marked queued at all. The pre-armed entry is keyed by
-     * the delivery id (cid), so this reads its absence AFTER the await, exactly
-     * as before -- consumption during the typing await cleared it. Load-bearing:
-     * it is what decides willQueue, and deleting it would leave the divider up
-     * on a message claude has already read. */
-    const consumedEarly = !awaitingQueue.has(cid);
-    // Only a message typed into a BUSY pane actually waits in claude's input
-    // queue; an idle pane takes it straight into context and logs no
-    // queue-operation record at all (measured: a message sent to an idle
-    // session produced no enqueue, so marking everything queued left the
-    // divider up forever).
-    const willQueue = s.busy && !consumedEarly;
-    if (willQueue) {
-      armAwaiting(cid, s.id, ts, delivered);
-      // Safety net: a queue record we never see (log rotation, a resume, an
-      // interrupted turn) must not strand the divider. It is a deadline, not a
-      // promise: `ts` is on disk with the message, so a restart re-arms what is
-      // left of this rather than losing it (see sweepRestoredQueued). Keyed by
-      // the delivery id (cid), the same key clearQueued matches under.
-      armQueueClear(s.id, ts, QUEUE_STUCK_MS, cid);
-    } else {
-      clearAwaiting(cid); // an idle pane never queues: drop the pre-arm
-    }
-    const msg = commitDelivery(s, inj, ts, willQueue);
-    markReadOnUtterance(s, ts); // his own message reads everything above it (#452)
-    D().log("utterance.delivered", { cid, session: s.id, msgId: msg.msgId, ts,
-      queued: willQueue, consumedEarly: consumedEarly || undefined,
-      chars: text.length, how: inj.how,
-      completing: inj.completesTs != null || undefined });
-    return { ok: true, ts };
   }
-
-  if (!s.alive || !s.ws) return OFFLINE;
-
+  // Completing a note shown earlier keeps its ts, so the words fill that same
+  // bubble; an ordinary message takes the next one (#458).
   const ts = inj.completesTs ?? stampTs(s);
-  send(s.ws, { t: "transcript", text });
-  const msg = commitDelivery(s, inj, ts, false);
+  /* The pre-armed entry is GONE when the transcript's user record already
+   * landed during the typing await: claude has the message in context, so
+   * the row is never marked queued at all. The pre-armed entry is keyed by
+   * the delivery id (cid), so this reads its absence AFTER the await, exactly
+   * as before -- consumption during the typing await cleared it. Load-bearing:
+   * it is what decides willQueue, and deleting it would leave the divider up
+   * on a message claude has already read. */
+  const consumedEarly = !awaitingQueue.has(cid);
+  // Only a message typed into a BUSY pane actually waits in claude's input
+  // queue; an idle pane takes it straight into context and logs no
+  // queue-operation record at all (measured: a message sent to an idle
+  // session produced no enqueue, so marking everything queued left the
+  // divider up forever).
+  const willQueue = s.busy && !consumedEarly;
+  if (willQueue) {
+    armAwaiting(cid, s.id, ts, delivered);
+    // Safety net: a queue record we never see (log rotation, a resume, an
+    // interrupted turn) must not strand the divider. It is a deadline, not a
+    // promise: `ts` is on disk with the message, so a restart re-arms what is
+    // left of this rather than losing it (see sweepRestoredQueued). Keyed by
+    // the delivery id (cid), the same key clearQueued matches under.
+    armQueueClear(s.id, ts, QUEUE_STUCK_MS, cid);
+  } else {
+    clearAwaiting(cid); // an idle pane never queues: drop the pre-arm
+  }
+  const msg = commitDelivery(s, inj, ts, willQueue);
   markReadOnUtterance(s, ts); // his own message reads everything above it (#452)
   D().log("utterance.delivered", { cid, session: s.id, msgId: msg.msgId, ts,
-    transport: "socket", chars: text.length, how: inj.how,
+    queued: willQueue, consumedEarly: consumedEarly || undefined,
+    chars: text.length, how: inj.how,
     completing: inj.completesTs != null || undefined });
+  await D().flushChat?.();
+  await forgetStage(s.id, cid);
   return { ok: true, ts };
 }
 

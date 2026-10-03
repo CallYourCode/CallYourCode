@@ -252,8 +252,10 @@ export function onPaneKeyboard<T>(fn: () => Promise<T>): Promise<T> {
  * override, so the call sites below stay unchanged and behaviour is identical.
  * (mux stays the adapter's own: the adapter was built over the same `mux`.) */
 export const deliverToPane =
-  (paneId: string, text: string, deliveryId: string, takenAt?: number): Promise<void> =>
+  (paneId: string, text: string, deliveryId: string, takenAt?: number,
+    progress?: (stage: "typing" | "submitted") => Promise<void>): Promise<void> =>
   D().sendInput(paneId, text, deliveryId, takenAt, {
+    progress,
     unsubmitted,
     onPaneKeyboard,
     sessionFor: (handle) => {

@@ -69,6 +69,7 @@ import type { PluginSpec } from "../plugins/platform/spec.ts";
 import { clients, send, broadcast, resetForTest as resetWire } from "../transport/wire.ts";
 import { initReadState, resetForTest as resetReadState } from "../sessions/readstate.ts";
 import { initClips, resetForTest as resetClips } from "../chat/clips.ts";
+import { resetForTest as resetIntake } from "../chat/intake.ts";
 import { initContextCache, claudeTitleOf,
   resetForTest as resetContextCache } from "../sessions/context-cache.ts";
 import { initSubagentCount,
@@ -322,6 +323,9 @@ export type WireCoreOpts = {
   // ---- what to start -----------------------------------------------------
   /** start the adapter's own snapshot/subscribe loop (most tests want this) */
   start?: boolean;
+  /** reset() only: keep the SAME fake herdr (its panes, input boxes and record
+   *  of what was submitted), the way a real herdr outlives an engine restart */
+  keepHerdr?: boolean;
   /** start the push sink even without the notify layer (it opens a real port) */
   push?: boolean;
 };
@@ -404,6 +408,7 @@ function resetAllModules(): void {
   resetChatlog();
   resetTts();
   resetClips(); // the hot clip cache dies with the process; a restart reads the disk
+  resetIntake(); // the given-up list is this process's memory
   resetAsks();
   resetContextCache();
   resetSubagentCount();
@@ -533,6 +538,8 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
   /* ---- the mutable handles a re-wire replaces --------------------------- */
 
   let herdr!: FakeHerdr;
+  let herdrPath = "";
+  let keepingHerdr = false;
   let hooks!: Hooks;
   let mux!: HerdrClient;
   let adapter!: MuxAdapter;
@@ -577,21 +584,23 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
      * parallel workers cannot collide on a path nobody else knows. The socket
      * name carries a sequence number so a reset()'s fresh herdr does not have
      * to unlink the old one out from under a client that is still closing. */
-    const path = sockPath(root, `herdr-${++sockSeq}.sock`);
-    submitted = [];
-    hooks = {};
-    herdr = fakeHerdr(
-      path, o.agentStatus, o.panes ?? [PANE], [], o.failKeys, submitted, hooks,
-      new Map(Object.entries(o.sessionIds ?? {})),
-      new Set(o.noSession ?? []),
-      new Map(Object.entries(o.agents ?? {})),
-    );
-    for (const [pane, screen] of Object.entries(o.screens ?? {})) herdr.screens.set(pane, screen);
+    if (!(o.keepHerdr && herdr)) {
+      herdrPath = sockPath(root, `herdr-${++sockSeq}.sock`);
+      submitted = [];
+      hooks = {};
+      herdr = fakeHerdr(
+        herdrPath, o.agentStatus, o.panes ?? [PANE], [], o.failKeys, submitted, hooks,
+        new Map(Object.entries(o.sessionIds ?? {})),
+        new Set(o.noSession ?? []),
+        new Map(Object.entries(o.agents ?? {})),
+      );
+      for (const [pane, screen] of Object.entries(o.screens ?? {})) herdr.screens.set(pane, screen);
+    }
     /* The adapter seam, exactly as makeAdapter() builds it for herdr: a
      * MuxAdapter over its own HerdrClient. The client is held so stop() can
      * cancel its 15s resnapshot poll and close its event socket; MuxAdapter
      * itself has no stop(). */
-    mux = new HerdrClient(path);
+    mux = new HerdrClient(herdrPath);
     adapter = new MuxAdapter(mux, refusingDriver());
 
     /* 1. the data tree, made and permission-repaired before anything reads or
@@ -1022,6 +1031,7 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
         writeHookState: () => writeHookState(),
         bindOwnedUploads: (claimed, c, sid) => uploads!.bindOwnedUploads(claimed, c, sid),
         adoptStagedUploads: (id, ups) => uploads!.adoptStagedUploads(id, ups),
+        flushChat: () => chatStore.flush(),
       });
     }
 
@@ -1094,7 +1104,7 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
     for (const c of made) c.close();
     made.length = 0;
     try { mux?.stop(); } catch { /* never started */ }
-    try { herdr?.stop(true); } catch { /* never listened */ }
+    if (!keepingHerdr) { try { herdr?.stop(true); } catch { /* never listened */ } }
     /* The app server goes with the wiring that dialled it: a re-wire that kept
      * the old sink would carry the previous wiring's pushes into the new one's
      * `hits`, and the port would leak one listener per reset. */
@@ -1135,9 +1145,12 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
     hello: (c) => sendHelloBurst(c.sock),
     registerInputTransform: (pluginId, hook) => inputTransforms.register(pluginId, hook),
     async reset(next) {
+      keepingHerdr = !!next?.keepHerdr;
       await teardown();
+      keepingHerdr = false;
       if (next) o = { ...o, ...next };
       await boot();
+      o = { ...o, keepHerdr: false };
     },
     async stop() {
       await teardown(); // which also stops the push sink

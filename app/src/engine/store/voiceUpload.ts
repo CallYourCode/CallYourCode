@@ -363,6 +363,37 @@ export function retryVoiceClip(sessionId: string, localId: string): boolean {
         drain.requeue(key);
         return;
       }
+      // The engine took it (its ack named the clip, msgId) and then gave up on
+      // delivering it: the intent went with the ack, the clip is on the engine.
+      // The retry is the same wire again, rebuilt from the bubble, same cid.
+      const s = sessions.get(sessionId);
+      if (!intent && cur.msgId && s) {
+        const wire = cur.wireText ?? (cur.draftCommitted !== undefined ? '' : cur.text);
+        cyclog('voiceclip.retry.taken', {cid: key, session: sessionId, localId, msgId: cur.msgId});
+        delete cur.failReason;
+        notifyNow();
+        intents.put({
+          id: key,
+          engineKey: s.engineKey,
+          sessionId,
+          kind: 'send-text',
+          localId,
+          payload: {
+            cid: key,
+            sessionId,
+            ts: cur.ts,
+            text: cur.text,
+            kind: 'voice',
+            durationS: cur.durationS,
+            msgId: cur.msgId,
+            replyTo: cur.replyTo,
+            wire,
+            ...(wire.includes(wordsMarker(key)) ? {words: [key]} : {})
+          }
+        });
+        drain.kick(s.engineKey);
+        return;
+      }
       cyclog('voiceclip.retry.no-bytes', {
         cid: key,
         session: sessionId,

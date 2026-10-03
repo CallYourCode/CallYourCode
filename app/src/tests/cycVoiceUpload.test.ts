@@ -44,7 +44,7 @@ import * as sync from '../engine/sync';
 import {conns, renderSubs, sessions, type Conn} from '../engine/store/registry';
 import {sendVoiceClip, retryVoiceClip} from '../engine/store/voiceUpload';
 import {commitVoiceNote, discardVoiceNote, updateVoiceNote} from '../engine/store/voiceNotes';
-import {hydrateSends, retrySend, __resetForTest as resetSends} from '../engine/store/sends';
+import {hydrateSends, retrySend, settleSend, __resetForTest as resetSends} from '../engine/store/sends';
 import type {CycEngineMessage, CycEngineSession} from '../engine/store';
 import type {TransferRow} from '../engine/transfers/rows';
 
@@ -452,6 +452,31 @@ describe('honest voice-clip send over the transfer queue', () => {
       wire: `> Done. Only remote roles.\n\n{{cyc-words:${NOTE_CID}}}\n\nand a caption`,
       words: [NOTE_CID]
     });
+  });
+
+  test('a quoted note the engine took and then gave up on retries the same wire, same cid, from the bubble', async () => {
+    vi.mocked(transfers.rowOf).mockImplementation((k) => queuedRow(k, s.id));
+    const id = quotedNote();
+    const m = s.messages.find((x) => x.id === id) as CycEngineMessage;
+    await flush();
+    const row = doneRow(NOTE_CID, s.id, 'srv-given-up');
+    vi.mocked(transfers.rowOf).mockReturnValue(row);
+    registeredOnResult(row);
+    await flush();
+    // the engine acked it (the intent goes with the ack, the bytes are released)
+    m.msgId = 'srv-given-up';
+    settleSend(NOTE_CID);
+    vi.mocked(transfers.rowOf).mockReturnValue(undefined);
+    planted.sent.length = 0;
+    // ...and later gave up on delivering it: send-failed made the bubble failed
+    m.status = 'failed';
+    expect(retryVoiceClip(s.id, id)).toBe(true);
+    await flush();
+    await flush();
+    expect(planted.sent).toHaveLength(1);
+    expect(planted.sent[0][1]).toBe(`> Done. Only remote roles.\n\n{{cyc-words:${NOTE_CID}}}\n\nand a caption`);
+    expect(planted.sent[0][2]).toMatchObject({kind: 'voice', msgId: 'srv-given-up', cid: NOTE_CID, words: [NOTE_CID]});
+    expect(m.status).toBe('sending');
   });
 
   test('a send made while disconnected still enqueues pending and moves no bytes', async () => {

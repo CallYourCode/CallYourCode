@@ -101,10 +101,32 @@ sequenceDiagram
 ### Delivery guarantees (PRODUCT.md section 5)
 
 The engine acks every utterance by cid BEFORE delivery work, and only once the
-frame is on its disk (`state/intake/`, removed when delivery has run): a crash
-after the ack leaves the frame, and the session's next live pickup drives it
-again, deduped by cid against the chat log. A note shown with its words
-pending is completed at that same pickup. `dup:true` marks
+frame is on its disk (`state/intake/`). Acks go out in frame order per session,
+so a frame's ack and delivery wait behind that one small write (a slow disk
+slows them; a full one is logged and the message still goes, unprotected).
+The frame is removed only after delivery has run AND what it wrote to the chat
+is on disk. A crash after the ack leaves the frame, and the session's next
+live pickup drives it again, deduped by cid against the chat log; a note shown
+with its words pending is completed at that same pickup.
+
+Exactly once across a stop. Each delivery keeps how far its keystrokes got,
+per cid: `typing` before the first keystroke, `submitted` right after the
+Enter returned (pi's direct input: around the send). A drive after a restart
+never types a `submitted` message again (it writes the missing row) and, for
+`typing`, presses Enter only when the box still holds the body. On SIGTERM or
+SIGINT the engine drains: no new frame is taken (not acked, so the app sends it
+to the next process), nothing new starts typing (it stays on disk), and the
+deliveries already typing finish, rows on disk, within 10 s; a second signal
+exits at once. What remains: a kill -9 (or a drain past 10 s) in the few
+milliseconds between the Enter reaching the pane and `submitted` reaching the
+disk types the message again.
+
+Failures the sender is told: a frame driven by three boots without finishing,
+and a frame whose session is not picked up live within 10 minutes of boot,
+are dropped with `send-failed {id, cid, reason}`, broadcast and repeated to
+every app that connects to that process (a further restart before any app
+connects does not repeat it). The row goes to failed with a retry; the retry
+is the same cid taken fresh. `dup:true` marks
 a re-sent cid; `err` / `send-failed` are definitive refusals that keep the
 cid retriable. The app arms a per-cid ack deadline (`store/sends.ts armAck`);
 a deadline reached with no ack redelivers the SAME cid (`drain.redeliver`)

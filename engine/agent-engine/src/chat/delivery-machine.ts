@@ -180,6 +180,7 @@ export async function runDeliveryMachine(
     // STATE gateDeadline2 (row 6): the second deadline gate, just before typing.
     if (outOfTime()) return gaveUp("the pane was still not answering when its turn came");
     // STATE type (row 6): type the body and set the note.
+    await io.progress?.("typing");
     await io.mux.sendText(paneId, text);
     io.unsubmitted.set(paneId, { deliveryId, at: Date.now() });
     typedThisAttempt = true;
@@ -242,6 +243,7 @@ export async function runDeliveryMachine(
     await new Promise((r) => setTimeout(r, settleMs()));
     await io.mux.sendKeys(paneId, "enter");
   }
+  await io.progress?.("submitted");
 
   /* STATE confirmSettle (row 10): so commitDelivery is reached only past a check
    * that the keystrokes were consumed. The deadline is NOT consulted from here

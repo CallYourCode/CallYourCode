@@ -204,7 +204,7 @@ test("L4: a frame left on disk for a message that DID land is not delivered agai
   await until(() => c.submitted.length === 1, { what: "the message to land" });
   // the crash between the commit and the file going
   const sid = resolveSession(PANE_SID)!.id;
-  await noteTaken({ sessionId: sid, cid, takenAt: Date.now(), frame: f });
+  await noteTaken({ sessionId: sid, cid, takenAt: Date.now(), attempt: "dead", frame: f });
 
   await restart(c);
   await until(() => has(c, cid, "intake.finished"), { what: "the boot to look at the left frame" });

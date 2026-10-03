@@ -89,6 +89,8 @@ export const BATCH_MS = 2_000;
  *  at the keyboard would. */
 export type Hooks = {
   clearInput?: (pane: string) => void;
+  /** put text in a pane's input box, as a body typed and not submitted leaves it */
+  setInput?: (pane: string, text: string) => void;
   setScreen?: (pane: string, screen: string | null) => void;
   /* THE STRANDED-BODY CASE, measured: an enter that RETURNS SUCCESS but does
    * not submit -- claude takes a rapid burst as one bracketed paste and an enter
@@ -234,6 +236,7 @@ export function fakeHerdr(path: string, agentStatus = "idle", panes: string[] = 
    * own actions can cover that, so it is the case that separates "I checked
    * the pane" from "I believe what I noted down". */
   if (hooks) hooks.clearInput = (pane: string) => input.set(pane, "");
+  if (hooks) hooks.setInput = (pane: string, text: string) => input.set(pane, text);
   /* Panes whose next enter must strand rather than submit, mapped to the screen
    * pane.read then answers (a box that still holds the body). One-shot. */
   const strandOnce = new Map<string, string>();

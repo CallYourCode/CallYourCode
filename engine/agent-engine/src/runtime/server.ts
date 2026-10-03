@@ -63,7 +63,8 @@ import { sessions, sessionByHandle, resolveSession, loadSessionState, sessionSta
   scheduleAgentSave, scheduleHeardSave, nameOverrideOf, voiceOverrideOf, setVoiceOverride, adoptAgentId,
   globalVoice, setDefaultVoice, voiceFor, docDirFor, type Session } from "../sessions/session-state.ts";
 import { initPaneDeliver, onPaneKeyboard, deliverToPane } from "../chat/pane-deliver.ts";
-import { initDeliver, inOrder, injectUserMessage, deliverToAgent, redriveTaken } from "../chat/deliver.ts";
+import { initDeliver, inOrder, injectUserMessage, deliverToAgent, redriveTaken, drainDeliveries,
+  failOrphanedTaken } from "../chat/deliver.ts";
 import { initReply, deliverReply } from "../chat/reply.ts";
 import { initNotify, notifyUnlessWatched, notifyDevices, notifyEngineDevices, sendDismissal, flushUnread } from "../chat/notify.ts";
 import { initPresence } from "../sessions/presence.ts";
@@ -156,15 +157,26 @@ process.on("unhandledRejection", (reason: unknown) => {
  * is safe) and then exit with the signal's conventional 128+n code. Tiny and
  * synchronous on purpose: no async ceremony that could hang the shutdown. The
  * diagnostic uncaughtException/unhandledRejection handlers above are unchanged. */
+/* AND THE DELIVERIES IN FLIGHT FINISH FIRST (deliver.ts drainDeliveries): a
+ * restart between a message's first keystroke and its row delivered it twice.
+ * Bounded at 10 s; a second signal exits at once. */
+let stopping = false;
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, () => {
+    const code = sig === "SIGINT" ? 130 : 143;
+    if (stopping) process.exit(code);
+    stopping = true;
     try {
       const n = killAllTrackedBridgesSync();
       if (n > 0) console.log(`[terminal] killed ${n} bridge(s) on ${sig}`);
     } catch {
       // best-effort: a failure here must never stop the process from exiting
     }
-    process.exit(sig === "SIGINT" ? 130 : 143);
+    void drainDeliveries(10_000).catch(() => 0).then(async (left) => {
+      LOG.line("shutdown.drained", { signal: sig, stillTyping: left });
+      await LOG.flush().catch(() => {});
+      process.exit(code);
+    });
   });
 }
 
@@ -562,6 +574,10 @@ initPaneDeliver({
   quitKeys: (kind) => adapter.quitKeys(kind),
 });
 const CLAUDE_COMMAND = adapter.launchCommand("claude")!;
+
+/* A message taken for a session that never comes back live is never driven by
+ * a pickup; ten minutes after boot it is failed visibly (deliver.ts). */
+setTimeout(() => { void failOrphanedTaken(); }, 10 * 60_000);
 
 /* SCHEDULES LIVE IN THE CRONS PLUGIN NOW (blueprint section 2). The store,
  * the cron math, the ticker, the fire wording and the seeding are all owned by
@@ -1077,6 +1093,8 @@ initDeliver({
   writeHookState: () => writeHookState(),
   bindOwnedUploads: (claimed, cid, sid) => uploads.bindOwnedUploads(claimed, cid, sid),
   adoptStagedUploads: (id, ups) => uploads.adoptStagedUploads(id, ups),
+  flushChat: () => chatStore.flush(),
+  flushLog: () => LOG.flush(),
 });
 
 // MCP show: show-handler.ts.
