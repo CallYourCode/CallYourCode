@@ -5,6 +5,7 @@ import type {CycVoiceState} from '@/features/sessions/header/voiceStrip';
 import {makeIcon} from '@/components/iconGlyphs';
 import {karaokeFor, karaokeUpdate, type Karaoke} from '@/features/chat/content';
 import {toast} from '@/components/widgets';
+import {cyclog} from '@/shared/logging';
 
 export type MessageRef = {ts: number; role: 'user' | 'claude'; seq?: number};
 
@@ -31,6 +32,11 @@ export type SpeakerLike = {
   seek(ratio: number): void;
   times(): {t: number; dur: number};
   progress(): {ratio: number; msgId?: string | null};
+  /** The busy claims holding automatic speech (a capture in flight), for the
+   *  clip.tap line. */
+  holds?(): string[];
+  /** The mic is recording: a tap waits ('waiting') until it is released. */
+  recording?(): boolean;
 };
 
 export type AudioPlaybackDeps = {
@@ -135,24 +141,75 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
     for (const s of deps.allSessions()) sessionList.setRowAudioState(s.id, rowAudioState(s.id));
   }
 
+  /* EVERY press on a play control lands here first, with what it did, so a
+   * "I pressed it and nothing happened" is never invisible in the log again.
+   * What follows a 'play' (clip.play, clip.started, clip.fail, clip.blocked) is
+   * the speaker's to log. */
+  type TapOutcome =
+    | 'play'
+    | 'pause'
+    | 'resume'
+    | 'loading'
+    | 'waiting'
+    | 'after-recording'
+    | 'not-live'
+    | 'nothing';
+  function logTap(control: string, sessionId: string | undefined, msgId: string | undefined, outcome: TapOutcome) {
+    const st = speaker.state;
+    const holds = speaker.holds?.() ?? [];
+    cyclog('clip.tap', {
+      control,
+      session: sessionId,
+      msg: msgId,
+      outcome,
+      was: st.state,
+      wasMsg: st.msgId ? (st.msgId === msgId ? 'same' : st.msgId) : undefined,
+      held: holds.length ? holds.join(',') : undefined,
+      recording: speaker.recording?.() || undefined
+    });
+  }
+
+  /* The speaker's rule: a tap never sounds into a live recording; it waits,
+   * shown on its button, and starts when the recording is released. */
+  const AFTER_RECORDING = 'Plays after your recording';
+  function startOrWait(outcome: 'play' | 'resume'): TapOutcome {
+    if (!speaker.recording?.()) return outcome;
+    toast(AFTER_RECORDING);
+    return 'after-recording';
+  }
+
+  function notLive(control: string, sessionId: string | undefined, msgId: string | undefined) {
+    logTap(control, sessionId, msgId, 'not-live');
+    toast('Needs a live engine');
+  }
+
   function rowAudioClick(id: string) {
     const st = speaker.state;
+    const latest = latestSpeakable(id);
     if (st.sessionId === id) {
       if (st.state === 'speaking') {
+        logTap('row', id, st.msgId ?? undefined, 'pause');
         speaker.pause();
         return;
       }
       if (st.state === 'paused') {
+        logTap('row', id, st.msgId ?? undefined, startOrWait('resume'));
         speaker.resume();
         return;
       }
+      if ((st.state === 'loading' || st.state === 'waiting') && st.msgId === latest?.msgId) {
+        logTap('row', id, st.msgId ?? undefined, st.state);
+        return;
+      }
     }
-    const latest = latestSpeakable(id);
     if (!latest) {
+      logTap('row', id, undefined, 'nothing');
       toast('Nothing to play yet');
       return;
     }
 
+    logTap('row', id, latest.msgId, startOrWait('play'));
+    speaker.stopAll();
     play(id, latest.msgId, latest.text, 'tap');
   }
 
@@ -160,19 +217,29 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
     const em = m as CycEngineMessage;
     const s = deps.active();
 
-    if (!deps.isLive() || !em.msgId || !s) return;
+    if (!em.msgId || !s) return;
+    if (!deps.isLive()) return notLive('message', s.id, em.msgId);
     const st = speaker.state;
     if (st.msgId === em.msgId) {
       if (st.state === 'speaking') {
+        logTap('message', s.id, em.msgId, 'pause');
         speaker.pause();
         return;
       }
       if (st.state === 'paused') {
+        logTap('message', s.id, em.msgId, startOrWait('resume'));
         speaker.resume();
+        return;
+      }
+      // Already on its way (spinning, or waiting for the recording to end): a
+      // second press must not restart it.
+      if (st.state === 'loading' || st.state === 'waiting') {
+        logTap('message', s.id, em.msgId, st.state);
         return;
       }
     }
 
+    logTap('message', s.id, em.msgId, startOrWait('play'));
     speaker.stopAll();
     play(s.id, em.msgId, m.text, 'tap');
 
@@ -187,16 +254,34 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
   function onMessageSeek(m: CycMessage, ratio: number) {
     const em = m as CycEngineMessage;
     const s = deps.active();
-    if (!deps.isLive() || !em.msgId || !s) return;
+    if (!em.msgId || !s) return;
+    if (!deps.isLive()) return notLive('seek', s.id, em.msgId);
     const st = speaker.state;
     if (st.msgId === em.msgId && (st.state === 'speaking' || st.state === 'paused')) {
+      logTap('seek', s.id, em.msgId, st.state === 'paused' ? startOrWait('resume') : 'play');
       speaker.seek(ratio);
       if (st.state === 'paused') speaker.resume();
       return;
     }
+    logTap('seek', s.id, em.msgId, startOrWait('play'));
     pendingSeek = {msgId: em.msgId, ratio};
     speaker.stopAll();
     play(s.id, em.msgId, m.text, 'tap');
+  }
+
+  /* The player bar's play/pause. resume() is a no-op while loading (the load
+   * starts it) and replays a clip the autoplay policy blocked. */
+  function playerToggle() {
+    const st = speaker.state;
+    const outcome: TapOutcome =
+      st.state === 'speaking'
+        ? 'pause'
+        : st.state === 'loading' || st.state === 'waiting'
+          ? st.state
+          : startOrWait('resume');
+    logTap('player', st.sessionId ?? undefined, st.msgId ?? undefined, outcome);
+    if (st.state === 'speaking') speaker.pause();
+    else speaker.resume();
   }
 
   let tickMsgId = '';
@@ -217,19 +302,34 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
   }
 
   let paintedPlayId = '';
-  function paintPlayState(msgId: string, playing: boolean, loading: boolean, clearFill: boolean) {
+  // `waiting`: pressed while the mic records; it pulses until the recording ends.
+  function paintWaiting(el: Element | null, waiting: boolean) {
+    if (!el) return;
+    el.classList.toggle('cyc-clip-wait', waiting);
+    if (waiting) el.setAttribute('title', AFTER_RECORDING);
+    else if (el.getAttribute('title') === AFTER_RECORDING) el.removeAttribute('title');
+  }
+  function paintPlayState(
+    msgId: string,
+    playing: boolean,
+    loading: boolean,
+    clearFill: boolean,
+    waiting = false
+  ) {
     if (!msgId) return;
     const sel = (what: string) => `${what}[data-msg-id="${CSS.escape(msgId)}"]`;
     messageListInner.querySelectorAll<HTMLElement>(sel('.cyc-msg-play')).forEach((btn) => {
       btn.classList.toggle('cyc-audible', playing);
 
       btn.classList.toggle('cyc-pending', loading);
+      paintWaiting(btn, waiting);
       btn.replaceChildren(makeIcon(playing ? 'pause' : 'play'));
     });
 
     messageListInner.querySelectorAll<HTMLElement>(sel('.cyc-clip.cyc-voice')).forEach((audioEl) => {
       audioEl.querySelector('.cyc-clip-toggle')?.classList.toggle('playing', playing);
       audioEl.querySelector('.cyc-clip-toggle')?.classList.toggle('cyc-pending', loading);
+      paintWaiting(audioEl.querySelector('.cyc-clip-toggle'), waiting);
 
       if (clearFill) {
         const wf = audioEl.querySelector<HTMLElement>('.cyc-signal-progress');
@@ -242,7 +342,13 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
     const st = speaker.state;
     const now = st.msgId ?? '';
     if (paintedPlayId && paintedPlayId !== now) paintPlayState(paintedPlayId, false, false, true);
-    paintPlayState(now, st.state === 'speaking', st.state === 'loading', false);
+    paintPlayState(
+      now,
+      st.state === 'speaking',
+      st.state === 'loading',
+      false,
+      st.state === 'waiting'
+    );
     paintedPlayId = now;
     if (st.state === 'speaking') startProgressTicker();
 
@@ -278,7 +384,7 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
     audioJumpChip.classList.toggle('is-down', dir === 'down');
   }
 
-  const playerStates = new Set(['loading', 'speaking', 'paused', 'blocked']);
+  const playerStates = new Set(['loading', 'speaking', 'paused', 'blocked', 'waiting']);
 
   function playerSubject(): {session: CycSession; msgId: string} | null {
     const st = speaker.state;
@@ -420,6 +526,7 @@ export function createAudioPlayback(deps: AudioPlaybackDeps) {
     rowAudioClick,
     onMessagePlay,
     onMessageSeek,
+    playerToggle,
     updateMessagePlays,
     updateAudioJumpChip,
     updatePlayerBar,

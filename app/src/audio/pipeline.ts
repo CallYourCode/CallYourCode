@@ -1,5 +1,6 @@
 import {speaker} from './speaker';
-import {setCallPlayback} from './webAudioClip';
+import {playbackContextOpen, releasePlaybackContext, setCallPlayback} from './webAudioClip';
+import {releaseToneContext, toneContextOpen} from './turnTones';
 import {Pcm16kChunker, PCM_TAP_PROCESSOR_NAME, PCM_TAP_WORKLET_JS, STT_RATE} from './pcm';
 import {openSttStream} from '../engine/store/audioDocs';
 import {transcriptAtRelease} from './releaseDecode';
@@ -7,10 +8,12 @@ import type {SttStream, SttStreamHandlers} from '../engine/contract';
 import {cyclog, newCid} from '@/shared/logging';
 import {
   applyMicFix,
+  canRecord,
   decideMicFix,
   isMicLive,
   readContextState,
   readTrackReadyState,
+  type GraphFlow,
   type MicSnapshot
 } from './micLive';
 import {arbitrate, normText, ECHO_DENSITY_DB, type Verdict} from './arbiter';
@@ -36,6 +39,15 @@ const BLOB_DEADLINE_MS = 15_000;
 
 const BATCH_GRACE_MS = 6_000;
 const PRE_ROLL_SAMPLES = STT_RATE;
+
+// How long a press waits for the graph to deliver before judging it stalled.
+// The tap posts every ~21ms, so a running graph answers well inside this.
+const FLOW_BOUND_MS = 500;
+// A frame this recent proves the graph delivers without waiting for another.
+const FLOW_FRESH_MS = 250;
+// Closing a context whose render is dead may never answer; a rebuild waits for
+// the old contexts to close no longer than this.
+const CLOSE_WAIT_MS = 500;
 
 export type RecordingState = 'idle' | 'recording' | 'transcribing';
 
@@ -209,6 +221,7 @@ class Pipeline {
       this.active || this.pttDown ? 'recording' : this.inFlight.size ? 'transcribing' : 'idle';
     if (next === this.recState) return;
     this.recState = next;
+    speaker.setRecording(next === 'recording');
     this.emit('recording', next);
   }
 
@@ -231,17 +244,18 @@ class Pipeline {
     }
     cap.streamOpen = false;
     this.emit('ignored', '', 'error', blob ?? undefined, cap.id, durationS);
-    this.release(cap, cap.wasPlaying);
+    this.release(cap);
   }
 
-  private release(cap: Capture, resume: boolean): void {
+  // The speaker gives back what the takes and the press paused once the last
+  // of them lets go (speaker.giveBack).
+  private release(cap: Capture): void {
     this.inFlight.delete(cap.id);
     cap.arbitrating = false;
     cap.streamOpen = false;
     cap.wasPlaying = false;
     if (this.tailFor === cap) this.tailFor = null;
     speaker.setBusy(false, `capture:${cap.id}`);
-    if (resume && !this.pttDown && !this.active && !this.inFlight.size) speaker.resume();
     this.syncRecordingState();
   }
 
@@ -250,8 +264,29 @@ class Pipeline {
   private unbindTracks: (() => void) | null = null;
   private unbindContext: (() => void) | null = null;
   private lifeBound = false;
-  private recoverWait: Promise<boolean> | null = null;
+  private recoverWait: Promise<MicSnapshot | null> | null = null;
+  // The mic session (bumped by dispose): a recovery belongs to the one that started it.
+  private micGen = 0;
   private lastReacquireAt = 0;
+
+  // Proof that audio flows through the graph: the tap's deliveries (or, with no
+  // tap, ticks on which the render clock advanced), counted per graph.
+  private flowFrames = 0;
+  private lastFlowAt = 0;
+  private firstFlowAt = 0;
+  private graphBuiltAt = 0;
+  // Hands-free has no press to check the graph: a stall the voice detector
+  // sees gets one recovery, and the next frame (or a new turn edge: hands-free
+  // switched on, the app back in front) re-arms it.
+  private stallHandled = false;
+  // The app came back to the front at foregroundAt, and the first time the mic
+  // is read after that (a press, or hands-free listening) is logged once as
+  // mic.foreground: whether it delivered on its own or what healed it.
+  private wasHidden = false;
+  private foregroundAt = 0;
+  private foregroundJudged = true;
+  private lastClock = -1;
+  private flowWaiters = new Set<() => void>();
 
   async init(opts: PipelineInitOptions): Promise<void> {
     if (this.stream) {
@@ -280,16 +315,27 @@ class Pipeline {
 
   private async finishInit(): Promise<void> {
     await speaker.unlock();
+    await this.buildGraph();
 
-    this.actx = new AudioContext();
-    if (this.actx.state === 'suspended') await this.actx.resume();
-    this.analyser = this.actx.createAnalyser();
+    this.ring.start(this.stream!);
+    this.pollTimer = setInterval(() => this.tick(), POLL_MS);
+    this.bindLifecycle();
+    this.watchTracks();
+  }
+
+  // A fresh context with the analyser and the PCM tap on the current track.
+  private async buildGraph(): Promise<void> {
+    const actx = new AudioContext();
+    this.actx = actx;
+    if (actx.state === 'suspended') await actx.resume();
+    this.analyser = actx.createAnalyser();
     this.analyser.fftSize = 1024;
     this.buf = new Float32Array(this.analyser.fftSize);
 
-    const source = this.actx.createMediaStreamSource(this.stream!);
+    const source = actx.createMediaStreamSource(this.stream!);
     source.connect(this.analyser);
     this.srcNode = source;
+    this.graphBuilt();
 
     if (this.streamFactory) {
       try {
@@ -298,69 +344,223 @@ class Pipeline {
         this.streamFactory = null;
       }
     }
-
-    this.ring.start(this.stream!);
-    this.pollTimer = setInterval(() => this.tick(), POLL_MS);
-    this.bindLifecycle();
     this.bindContextWatch();
-    this.watchTracks();
   }
 
-  ensureLive(engaging = false): Promise<boolean> {
-    if (!this.stream && !this.actx) return Promise.resolve(false);
-    if (this.recoverWait) return this.recoverWait;
-    this.recoverWait = this.runRecover(engaging).finally(() => {
-      this.recoverWait = null;
+  // Take the capture graph down, leaving the track and the recorder running.
+  // Resolves when its context has closed.
+  private teardownGraph(): Promise<void> {
+    this.stopPcmTap();
+    if (this.srcNode) {
+      try {
+        this.srcNode.disconnect();
+      } catch {}
+      this.srcNode = null;
+    }
+    this.unbindContext?.();
+    const actx = this.actx;
+    this.actx = null;
+    this.analyser = null;
+    this.buf = null;
+    this.workletReady = false;
+    return actx ? actx.close().catch(() => {}) : Promise.resolve();
+  }
+
+  private graphBuilt(): void {
+    this.graphBuiltAt = performance.now();
+    this.lastFlowAt = 0;
+    this.firstFlowAt = 0;
+    this.flowFrames = 0;
+    this.lastClock = -1;
+  }
+
+  private markFlow(): void {
+    this.flowFrames++;
+    this.lastFlowAt = performance.now();
+    if (!this.firstFlowAt) this.firstFlowAt = this.lastFlowAt;
+    this.stallHandled = false;
+    if (this.flowWaiters.size) for (const w of [...this.flowWaiters]) w();
+  }
+
+  // What the graph has proven without waiting: a recent frame, or nothing yet.
+  private flowNow(): GraphFlow {
+    if (!this.srcNode) return 'unknown';
+    return this.lastFlowAt && performance.now() - this.lastFlowAt <= FLOW_FRESH_MS
+      ? 'flowing'
+      : 'unknown';
+  }
+
+  // The graph's next frame, or FLOW_BOUND_MS of nothing.
+  private awaitFlow(): Promise<GraphFlow> {
+    const now = this.flowNow();
+    if (now === 'flowing' || !this.srcNode) return Promise.resolve(now);
+    return new Promise((resolve) => {
+      const done = (flow: GraphFlow) => {
+        clearTimeout(timer);
+        this.flowWaiters.delete(onFrame);
+        resolve(flow);
+      };
+      const onFrame = () => done('flowing');
+      const timer = setTimeout(() => done('stalled'), FLOW_BOUND_MS);
+      this.flowWaiters.add(onFrame);
     });
-    return this.recoverWait;
   }
 
-  private readSnapshot(engaging: boolean): MicSnapshot {
+  ensureLive(engaging = false, listening = false): Promise<MicSnapshot | null> {
+    if (!this.stream && !this.actx) return Promise.resolve(null);
+    if (this.recoverWait) return this.recoverWait;
+    const wait = this.runRecover(engaging, listening).finally(() => {
+      if (this.recoverWait === wait) this.recoverWait = null;
+    });
+    return (this.recoverWait = wait);
+  }
+
+  private readSnapshot(engaging: boolean, listening = false): MicSnapshot {
     const track = this.stream?.getAudioTracks()[0];
     return {
       contextState: readContextState(this.actx?.state),
       trackReadyState: readTrackReadyState(track?.readyState),
       trackMuted: !!track?.muted,
+      flow: this.flowNow(),
       visible: typeof document !== 'undefined' && document.visibilityState === 'visible',
-      engaging
+      engaging,
+      listening
     };
   }
 
-  private async runRecover(engaging: boolean): Promise<boolean> {
-    const snap = this.readSnapshot(engaging);
-    if (isMicLive(snap)) return true;
+  // The snapshot a decision is made on. A reader of the graph (a press, or
+  // hands-free listening) waits for its own output when the reported states
+  // are healthy: they cannot show a graph that renders nothing, only its
+  // frames can.
+  private async inspect(engaging: boolean, listening = false): Promise<MicSnapshot> {
+    const s = this.readSnapshot(engaging, listening);
+    const reading = engaging || listening;
+    if (!reading || s.flow === 'flowing' || s.contextState !== 'running' || !canRecord(s)) {
+      return s;
+    }
+    const flow = await this.awaitFlow();
+    return {...this.readSnapshot(engaging, listening), flow};
+  }
+
+  // The first read of the mic after the app came back to the front, once:
+  // 'clean' when the graph delivered with no fix (no idle context was left to
+  // hold a dead output), 'healed' with the fixes that revived it, 'still-dead'
+  // when none did. This is the line that says on a real phone which path ran.
+  private judgeForeground(path: 'clean' | 'healed' | 'still-dead', by: string, steps = ''): void {
+    if (this.foregroundJudged) return;
+    this.foregroundJudged = true;
+    const now = performance.now();
+    cyclog('mic.foreground', {
+      path,
+      by,
+      fix: steps || undefined,
+      sinceVisibleMs: Math.round(now - this.foregroundAt),
+      graphNew: this.graphBuiltAt > this.foregroundAt,
+      firstFrameMs: this.firstFlowAt ? Math.round(this.firstFlowAt - this.graphBuiltAt) : null,
+      playbackOpen: playbackContextOpen(),
+      toneOpen: toneContextOpen()
+    });
+  }
+
+  private async runRecover(engaging: boolean, listening = false): Promise<MicSnapshot> {
+    const by = engaging ? 'press' : listening ? 'hands-free' : '';
+    const snap = await this.inspect(engaging, listening);
+    if (isMicLive(snap)) {
+      if (by) this.judgeForeground('clean', by);
+      return snap;
+    }
     const fix = decideMicFix(snap);
-    if (fix === 'none') return false;
+    if (fix === 'none') {
+      if (by) this.judgeForeground('still-dead', by);
+      return snap;
+    }
     if (
       fix === 'reacquire' &&
       !engaging &&
       this.lastReacquireAt &&
       performance.now() - this.lastReacquireAt < 1000
     ) {
-      return isMicLive(this.readSnapshot(engaging));
+      return this.readSnapshot(engaging);
     }
     try {
-      const ok = await applyMicFix(snap, {
+      const r = await applyMicFix(snap, {
         resume: () => this.resumeContext(),
+        rebuild: () => this.rebuildGraph(),
         reacquire: () => this.reacquireStream(),
-        inspect: () => this.readSnapshot(engaging)
+        inspect: () => this.inspect(engaging, listening)
       });
-      cyclog(ok ? 'mic.recovered' : 'mic.recover.still-dead', {
-        fix,
+      const recorderOnly = !r.live && canRecord(r.after);
+      cyclog(r.live ? 'mic.recovered' : 'mic.recover.still-dead', {
+        fix: r.steps.join('>'),
         engaging,
+        listening: listening || undefined,
         visible: snap.visible,
         from: {
           contextState: snap.contextState,
           track: snap.trackReadyState,
-          muted: snap.trackMuted
+          muted: snap.trackMuted,
+          flow: snap.flow
         },
-        to: this.readSnapshot(engaging)
+        to: {
+          contextState: r.after.contextState,
+          track: r.after.trackReadyState,
+          muted: r.after.trackMuted,
+          flow: r.after.flow
+        },
+        why: recorderOnly
+          ? 'the track is live but the graph still delivers no audio; a take records ' +
+            'on the recorder alone, with no waveform or live words, and its words come ' +
+            'from the clip'
+          : undefined
       });
-      return ok;
+      if (by) this.judgeForeground(r.live ? 'healed' : 'still-dead', by, r.steps.join('>'));
+      return r.after;
     } catch (err) {
-      cyclog('mic.recover.failed', {err, fix, engaging});
-      return isMicLive(this.readSnapshot(engaging));
+      cyclog('mic.recover.failed', {err, fix, engaging, listening: listening || undefined});
+      return this.readSnapshot(engaging);
     }
+  }
+
+  // The context reports running on a live, unmuted track and the graph
+  // delivers nothing: rebuild it on the same track (no getUserMedia, so no
+  // prompt). WebKit renders every AudioContext of a page with the same output
+  // format through one shared output, and a fresh context joins whatever output
+  // the page's other contexts hold: a fresh capture context per take stayed
+  // dead for the rest of the page's life (2026-10-03, every take after the
+  // first background). So the page's idle playback and tone contexts are
+  // closed with the old graph and the new graph starts on an output of its own.
+  private async rebuildGraph(): Promise<void> {
+    if (!this.stream) return;
+    const actx = this.actx;
+    const now = performance.now();
+    cyclog('mic.rebuild', {
+      contextState: actx?.state ?? null,
+      clockS: actx ? Math.round(actx.currentTime * 1000) / 1000 : null,
+      graphAgeMs: Math.round(now - this.graphBuiltAt),
+      frames: this.flowFrames,
+      lastFrameAgoMs: this.lastFlowAt ? Math.round(now - this.lastFlowAt) : null,
+      why:
+        `the context reports ${actx?.state ?? 'nothing'} on a live, unmuted track and ` +
+        `the graph delivered no audio within ${FLOW_BOUND_MS}ms; it is rebuilt on the same ` +
+        'track, and the idle audio contexts that share its output are closed with it'
+    });
+    const playback = releasePlaybackContext();
+    const closing = Promise.all([this.teardownGraph(), playback, releaseToneContext()]);
+    const closed = await Promise.race([
+      closing.then(() => true),
+      new Promise<boolean>((r) => setTimeout(() => r(false), CLOSE_WAIT_MS))
+    ]);
+    if (!closed || !playback) {
+      cyclog('mic.rebuild.release', {
+        closed,
+        playbackKept: !playback,
+        why: !playback
+          ? 'a clip is sounding through the playback context, so it was kept; the new ' +
+            'graph may share its output'
+          : `the old contexts did not finish closing within ${CLOSE_WAIT_MS}ms`
+      });
+    }
+    await this.buildGraph();
   }
 
   private async resumeContext(): Promise<void> {
@@ -371,6 +571,8 @@ class Pipeline {
   }
 
   private async reacquireStream(): Promise<void> {
+    // Disposed while a recovery was waiting on the graph: nobody wants the mic.
+    if (!this.stream) return;
     cyclog('mic.reacquire', {
       contextState: this.actx?.state ?? null,
       tracks: (this.stream?.getAudioTracks() ?? []).map((t) => ({
@@ -379,9 +581,16 @@ class Pipeline {
       }))
     });
     this.lastReacquireAt = performance.now();
+    const gen = this.micGen;
     const next = await navigator.mediaDevices.getUserMedia({
       audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}
     });
+    // Disposed while getUserMedia was answering (the press ended, the mic was
+    // released, maybe reopened): the new tracks would hold the mic for nobody.
+    if (gen !== this.micGen) {
+      next.getTracks().forEach((t) => t.stop());
+      return;
+    }
     this.unbindTracks?.();
     this.ring.stop();
     if (this.srcNode) {
@@ -400,33 +609,32 @@ class Pipeline {
     this.stream = next;
 
     if (!this.actx || this.actx.state === 'closed') {
-      this.stopPcmTap();
-      this.unbindContext?.();
-      this.workletReady = false;
-      this.actx = new AudioContext();
-      if (this.actx.state === 'suspended') await this.actx.resume();
-      this.analyser = this.actx.createAnalyser();
-      this.analyser.fftSize = 1024;
-      this.buf = new Float32Array(this.analyser.fftSize);
-      this.bindContextWatch();
-    } else if (this.actx.state !== 'running') {
-      await this.actx.resume();
-    }
-
-    const source = this.actx.createMediaStreamSource(this.stream);
-    source.connect(this.analyser!);
-    this.srcNode = source;
-    if (this.streamFactory) {
-      try {
-        this.stopPcmTap();
-        await this.initPcmTap(source);
-      } catch {
-        this.streamFactory = null;
+      void this.teardownGraph();
+      await this.buildGraph();
+    } else {
+      if (this.actx.state !== 'running') await this.actx.resume();
+      const source = this.actx.createMediaStreamSource(this.stream);
+      source.connect(this.analyser!);
+      this.srcNode = source;
+      this.graphBuilt();
+      if (this.streamFactory) {
+        try {
+          this.stopPcmTap();
+          await this.initPcmTap(source);
+        } catch {
+          this.streamFactory = null;
+        }
       }
     }
     this.ring.start(this.stream!);
     if (!this.pollTimer) this.pollTimer = setInterval(() => this.tick(), POLL_MS);
     this.watchTracks();
+  }
+
+  constructor() {
+    // Bound for the page's life, mic open or not: a background with the mic
+    // released still has to be judged on the next press.
+    if (typeof document !== 'undefined') this.bindLifecycle();
   }
 
   private bindLifecycle(): void {
@@ -436,7 +644,16 @@ class Pipeline {
   }
 
   private onVisibility = (): void => {
-    if (document.visibilityState !== 'visible') return;
+    if (document.visibilityState !== 'visible') {
+      this.wasHidden = true;
+      return;
+    }
+    if (this.wasHidden) {
+      this.wasHidden = false;
+      this.foregroundAt = performance.now();
+      this.foregroundJudged = false;
+      this.stallHandled = false;
+    }
     if (!this.stream && !this.actx) return;
     void this.ensureLive(this.pttDown);
   };
@@ -502,6 +719,7 @@ class Pipeline {
         channelCountMode: 'explicit'
       });
       node.port.onmessage = (e) => {
+        this.markFlow();
         if (typeof e.data === 'number') {
           this.workletLevelDb = 20 * Math.log10(e.data + 1e-10);
           this.workletLevelActive = true;
@@ -516,6 +734,7 @@ class Pipeline {
 
     const sp = actx.createScriptProcessor(2048, 1, 1);
     sp.onaudioprocess = (e) => {
+      this.markFlow();
       this.chunker?.push(new Float32Array(e.inputBuffer.getChannelData(0)));
     };
     const sink = actx.createGain();
@@ -644,6 +863,8 @@ class Pipeline {
   }
 
   dispose(): void {
+    this.micGen++;
+    this.recoverWait = null;
     this.pttDown = false;
     this.pttCaptureId = 0;
     this.handsFreeId = null;
@@ -665,8 +886,7 @@ class Pipeline {
     cyclog('mic.disposed', {stillDecoding: [...this.inFlight.values()].map((c) => c.cid)});
     this.tailFor = null;
     this.unbindTracks?.();
-    this.unbindContext?.();
-    this.stopPcmTap();
+    void this.teardownGraph();
     this.ring.stop();
     this.ring.stopLingering();
     if (this.pollTimer) {
@@ -678,23 +898,14 @@ class Pipeline {
       this.stream = null;
     }
 
-    if (this.srcNode) {
-      try {
-        this.srcNode.disconnect();
-      } catch {}
-      this.srcNode = null;
-    }
-    if (this.actx) {
-      try {
-        this.actx.close();
-      } catch {}
-      this.actx = null;
-    }
-    this.workletReady = false;
-    this.analyser = null;
-    this.buf = null;
-
     this.syncRecordingState();
+  }
+
+  // The composer's press takes the speaker before it asks for the mic: it
+  // pauses the reply and claims the speaker until the press ends.
+  holdForPress(): void {
+    speaker.interrupt();
+    speaker.setBusy(true, 'press');
   }
 
   startPTT(): void {
@@ -707,38 +918,51 @@ class Pipeline {
       return;
     }
     if (!this.stream && !this.actx) {
-      cyclog('ptt.start.refused', {
-        why: 'the microphone is not open yet (getUserMedia has not answered)',
-        micOpen: !!this.stream,
-        pttDown: this.pttDown
-      });
+      this.refusePress('the microphone is not open yet (getUserMedia has not answered)');
       return;
     }
     this.pttDown = true;
     if (isMicLive(this.readSnapshot(true))) {
+      this.judgeForeground('clean', 'press');
       this.beginPress();
       return;
     }
 
     this.lastVoiceAt = performance.now();
     this.syncRecordingState();
-    void this.ensureLive(true).then((ok) => {
-      if (!this.pttDown) return;
-      if (!ok || !this.stream) {
-        cyclog('ptt.start.refused', {
-          why: !this.stream
+    // A live track records even when the graph could not be revived (see
+    // mic.recover.still-dead): the take is kept, without waveform or live words.
+    const gen = this.micGen;
+    void this.ensureLive(true).then((after) => {
+      if (!this.pttDown || gen !== this.micGen) return;
+      if (!after || !this.stream || !canRecord(after)) {
+        this.refusePress(
+          !this.stream
             ? 'the microphone is not open yet (getUserMedia has not answered)'
-            : 'the microphone was dead and could not be recovered',
-          micOpen: !!this.stream,
-          pttDown: this.pttDown
-        });
-        this.pttDown = false;
-        this.pttCaptureId = 0;
-        this.syncRecordingState();
+            : 'the microphone was dead and could not be recovered'
+        );
         return;
       }
       this.beginPress();
     });
+  }
+
+  // The press is refused (here, or by the composer when the mic cannot open).
+  // The release that follows finds no press down and does nothing.
+  refusePress(why: string): void {
+    cyclog('ptt.start.refused', {why, micOpen: !!this.stream, pttDown: this.pttDown});
+    this.endEmptyPress();
+  }
+
+  // A press that ends with no recording (refused, or cancelled before the mic
+  // or its recovery answered) gives back everything it took: the press itself,
+  // its capture id, the recording state and the 'press' claim, so nothing
+  // waits behind a recording that never started.
+  private endEmptyPress(): void {
+    this.pttDown = false;
+    this.pttCaptureId = 0;
+    speaker.setBusy(false, 'press');
+    this.syncRecordingState();
   }
 
   private beginPress(): void {
@@ -751,11 +975,14 @@ class Pipeline {
   }
 
   endPTT(): void {
+    // The press is over, whatever became of it (a refused start already cleared
+    // pttDown): its claim on the speaker goes with it, or every later tap would
+    // wait for a recording that is not happening.
+    speaker.setBusy(false, 'press');
     if (!this.pttDown) return;
     this.pttDown = false;
     this.pttCaptureId = 0;
 
-    speaker.setBusy(false, 'press');
     if (this.active) {
       void this.endCapture();
       return;
@@ -775,7 +1002,8 @@ class Pipeline {
 
   cancelCapture(): void {
     const cap = this.active;
-    if (!cap) return;
+    // Cancelled before a capture began (the mic or its recovery had not answered).
+    if (!cap) return this.endEmptyPress();
 
     cyclog('capture.cancelled', {
       cid: cap.cid,
@@ -793,11 +1021,12 @@ class Pipeline {
     cap.slot = null;
     if (this.stream) this.ring.start(this.stream);
     speaker.setBusy(false, 'press');
-    this.release(cap, cap.wasPlaying);
+    this.release(cap);
   }
 
   enableHandsFree(sessionId: string): void {
     this.handsFreeId = sessionId;
+    this.stallHandled = false;
 
     setCallPlayback(true);
   }
@@ -826,6 +1055,13 @@ class Pipeline {
 
   private tick(): void {
     if (!this.analyser) return;
+    // With no tap, the render clock moving is the graph's proof of life.
+    if (!this.tapNode && this.actx) {
+      const clock = this.actx.currentTime;
+      if (this.lastClock >= 0 && clock > this.lastClock) this.markFlow();
+      this.lastClock = clock;
+    }
+    if (this.handsFreeId) this.listenForFlow();
     const db = this.rmsDb();
     this.emitLevel(db);
 
@@ -859,6 +1095,24 @@ class Pipeline {
     }
   }
 
+  // Hands-free listening, every poll: the voice detector reads the analyser,
+  // and on a graph that renders nothing it reads zeros and never opens a turn.
+  // A graph at least FLOW_BOUND_MS old with no frame for FLOW_BOUND_MS goes
+  // through the same recovery as a press (rebuild on the same track), once per
+  // stall. Hidden pages are left alone, as for every other fix.
+  private listenForFlow(): void {
+    if (!this.srcNode || this.recoverWait) return;
+    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+    const now = performance.now();
+    if (!this.foregroundJudged && this.lastFlowAt > this.foregroundAt) {
+      this.judgeForeground('clean', 'hands-free');
+    }
+    if (this.stallHandled) return;
+    if (now - Math.max(this.graphBuiltAt, this.lastFlowAt) <= FLOW_BOUND_MS) return;
+    this.stallHandled = true;
+    void this.ensureLive(false, true);
+  }
+
   private fire(): void {
     if (this.active) {
       cyclog('capture.refire.ignored', {
@@ -885,7 +1139,7 @@ class Pipeline {
 
       fromPress: false
     };
-    if (cap.wasPlaying) speaker.pause();
+    speaker.interrupt();
     speaker.setBusy(true, `capture:${cap.id}`);
 
     this.active = cap;
@@ -1183,7 +1437,6 @@ class Pipeline {
     blobWithin: () => Promise<Blob | null>
   ): Promise<void> {
     const {id, durationS} = released;
-    const resume = cap.wasPlaying;
     if (normText(heard.text)) {
       this.emit('ignored', heard.text, undefined, undefined, id, durationS);
     } else {
@@ -1198,7 +1451,7 @@ class Pipeline {
       );
     }
 
-    this.release(cap, resume);
+    this.release(cap);
   }
 
   private async commitUtterance(
@@ -1210,13 +1463,13 @@ class Pipeline {
     const {id, forCapture, durationS} = released;
     const text = heard.text;
 
-    speaker.stopAll();
+    speaker.supersede(cap.startedAt);
 
     const blob = heard.blob ?? (await blobWithin());
 
     if (text) this.emit('partial', text, forCapture, text.length, id);
 
-    this.release(cap, false);
+    this.release(cap);
     if (text) this.emit('utterance', text, forCapture, blob ?? null, durationS, id);
   }
 }

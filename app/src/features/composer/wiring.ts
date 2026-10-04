@@ -4,7 +4,7 @@ import * as engine from '../../engine/store';
 import {sessionState, dataState, unsentWork, stagedBlocks} from '../../sessionState';
 import {speaker} from '../../audio/speaker';
 import {pipeline} from '../../audio/pipeline';
-import {ensureMic, mic, hiddenSilences} from '../../speechGate';
+import {ensureMic, mic} from '../../speechGate';
 import {cyclog} from '@/shared/logging';
 import {toast} from '../../components/widgets';
 import {
@@ -42,37 +42,23 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
   let voiceHoldStart = 0;
   let pttHolding = false;
 
-  // Keep a granted microphone stream alive for this long after a push-to-talk
-  // release before disposing it, so a second recording started inside the
-  // window reuses the live stream (pipeline.init's `if (this.stream)` guard)
-  // and getUserMedia is not called -- and, on iOS/WebKit, not re-prompted --
-  // once per recording. iOS still re-prompts across cold starts and some
-  // lifecycle transitions; this only removes the within-session per-recording
-  // prompt.
-  const MIC_GRACE_MS = 90_000;
-  let micGraceTimer = 0;
-  const cancelMicGrace = () => {
-    if (micGraceTimer) {
-      clearTimeout(micGraceTimer);
-      micGraceTimer = 0;
-    }
-  };
-  // Teardown is a hard release: drop any grace-held stream at once so keep-alive
-  // never leaves the mic (and its iOS in-use indicator) alive with no owner.
+  // The mic is held only while it is used: a press-and-hold take (until its
+  // capture settles) or hands-free. Every other moment it is released, so the
+  // iPhone's mic indicator and its play-and-record audio session are never
+  // held between takes, and replies always play outside them. The cost: each
+  // press opens the mic afresh (getUserMedia), so a take has no pre-roll from
+  // a warm recorder. This is how the phone has always behaved (app.log since
+  // 2026-08-24: mic.disposed within 2s of every take's verdict).
   deps.onTeardown(() => {
-    cancelMicGrace();
     if (mic.ready && !pttHolding && !pipeline.handsFreeSessionId) {
       pipeline.dispose();
       mic.ready = null;
     }
   });
 
-  // `grace` keeps the stream open for MIC_GRACE_MS across back-to-back PTT
-  // recordings. The hard-release triggers (backgrounding on a touch device via
-  // hiddenSilences, hands-free end, teardown) call this without it, so they
-  // dispose at once and never hold the mic (or its iOS in-use indicator) in the
-  // background.
-  function releaseMicIfIdle(grace = false) {
+  // Release the mic once nothing uses it: no press down, no hands-free, and no
+  // capture still settling (retried while one is).
+  function releaseMicIfIdle() {
     const p = mic.ready;
     if (!p) return;
     const attempt = (retries: number) => {
@@ -85,17 +71,6 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
         if (retries > 0) window.setTimeout(() => attempt(retries - 1), 400);
         return;
       }
-      // A backgrounded touch device is a hard release even on the grace path:
-      // the mic must not stay lit in the background.
-      if (grace && !hiddenSilences()) {
-        cancelMicGrace();
-        micGraceTimer = window.setTimeout(() => {
-          micGraceTimer = 0;
-          releaseMicIfIdle(false);
-        }, MIC_GRACE_MS);
-        return;
-      }
-      cancelMicGrace();
       pipeline.dispose();
       mic.ready = null;
     };
@@ -632,19 +607,15 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
 
       speaker.setBusy(false, 'press');
 
-      releaseMicIfIdle(true);
+      releaseMicIfIdle();
     },
     onVoiceStart: () => {
       voiceHoldStart = Date.now();
-      // A new recording claims the stream: cancel any pending grace-window
-      // dispose so it cannot pull the mic out from under this recording.
-      cancelMicGrace();
       cap.lastPartial = {text: '', committed: 0};
 
       if (dataState.mode !== 'live') return;
 
-      speaker.pause();
-      speaker.setBusy(true, 'press');
+      pipeline.holdForPress();
       pttHolding = true;
       void ensureMic()
         .then(() => {
@@ -653,8 +624,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
         })
         .catch(() => {
           pttHolding = false;
-          speaker.setBusy(false, 'press');
-          speaker.resume();
+          pipeline.refusePress('the microphone could not be opened (getUserMedia failed)');
           toast('Microphone unavailable');
         });
     },
@@ -698,7 +668,9 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           cid: pipeline.cidOf(undefined),
           capture: captureId,
           heldS: seconds,
-          why: 'the release beat getUserMedia: nothing was ever recorded, so no block was made'
+          why:
+            'nothing was ever recorded, so no block was made: the press ended before ' +
+            'the mic or its recovery answered, or it was refused (ptt.start.refused says why)'
         });
 
         if (interrupted) {
@@ -742,7 +714,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       }
       pipeline.endPTT();
 
-      releaseMicIfIdle(true);
+      releaseMicIfIdle();
     }
   });
 

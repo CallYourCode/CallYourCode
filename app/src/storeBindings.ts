@@ -407,7 +407,6 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       const s = active();
       const count = s ? s.messages.length : -1;
 
-
       const overlayActive = !!s && engine.overlayOn(s.id);
       const evCount = overlayActive ? (s as CycEngineSession).events.length : -1;
 

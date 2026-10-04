@@ -73,7 +73,6 @@ import {toast} from './components/widgets';
 import * as engine from './engine/store';
 import './engine/contract';
 import {speaker} from './audio/speaker';
-import {warmClipPlayback} from './audio/webAudioClip';
 import './components/pluginCard';
 import './components/pluginPanel';
 import './engine/limitsAge';
@@ -211,6 +210,7 @@ function buildApp() {
     loadDraft: (id) => loadDraft(id),
     releaseMicIfIdle: () => releaseMicIfIdle(),
     rowAudioClick: (id) => rowAudioClick(id),
+    playerToggle: () => playerToggle(),
     openPlayingMessage: () => openPlayingMessage(),
     restored,
     cancelPendingOpens,
@@ -668,6 +668,7 @@ function buildApp() {
     rowAudioClick,
     onMessagePlay,
     onMessageSeek,
+    playerToggle,
     updateMessagePlays,
     updatePlayerBar,
     openPlayingMessage,
@@ -724,8 +725,6 @@ function buildApp() {
   logSizeBeacon();
 
   requestPersistence();
-
-  warmClipPlayback();
 
   render();
 }

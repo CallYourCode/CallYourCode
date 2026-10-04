@@ -91,18 +91,18 @@ const pipelineMock = vi.hoisted(() => ({
   capturesInFlight: [] as number[],
   pressCaptureId: 0,
   cidOf: () => '',
+  holdForPress: vi.fn(),
   startPTT: vi.fn(),
+  refusePress: vi.fn(),
   endPTT: vi.fn(),
   cancelCapture: vi.fn(),
   forceEnd: vi.fn()
 }));
 vi.mock('../audio/pipeline', () => ({pipeline: pipelineMock}));
 const micMock = vi.hoisted(() => ({ready: null as Promise<void> | null}));
-const hiddenSilencesMock = vi.hoisted(() => ({value: false}));
 vi.mock('../speechGate', () => ({
   ensureMic: vi.fn(async () => {}),
-  mic: micMock,
-  hiddenSilences: () => hiddenSilencesMock.value
+  mic: micMock
 }));
 vi.mock('../audio/clipVault', () => ({release: vi.fn(async () => {})}));
 vi.mock('../sessionSelectors', () => ({
@@ -150,7 +150,6 @@ beforeEach(() => {
   pipelineMock.handsFreeSessionId = '';
   pipelineMock.captureBusy = false;
   micMock.ready = null;
-  hiddenSilencesMock.value = false;
   vi.clearAllMocks();
   vi.mocked(engine.engineCan).mockReturnValue(false);
 });
@@ -206,67 +205,60 @@ describe('releaseMicIfIdle', () => {
     expect(micMock.ready).not.toBeNull();
   });
 });
-// Bug 2: keep a granted mic stream alive across back-to-back push-to-talk
-// recordings (a grace window) so getUserMedia is not re-run -- and, on iOS, not
-// re-prompted -- per recording. Hard-release triggers still dispose at once.
-describe('mic keep-alive (Bug 2)', () => {
-  test('G6: a PTT release keeps the stream for the grace window, then disposes', async () => {
+// The mic is held only while used. A take releases it as soon as its capture
+// settles, on every platform: no grace window keeps it (and the iPhone's
+// play-and-record session and mic indicator) between takes. The phone has
+// always behaved this way (app.log since 2026-08-24).
+describe('mic release after a take', () => {
+  test('a PTT release disposes the mic at once; nothing holds it for later', async () => {
     vi.useFakeTimers();
     try {
       mk();
       micMock.ready = Promise.resolve();
-      (composerOpts.onVoiceEnd as (how: string) => void)('release');
-      await vi.advanceTimersByTimeAsync(50);
-      // Not disposed on release: the stream is held for the window.
-      expect(pipelineMock.dispose).not.toHaveBeenCalled();
-      expect(micMock.ready).not.toBeNull();
-      // The window elapses with nothing recorded: it disposes now.
-      await vi.advanceTimersByTimeAsync(90_000);
-      await vi.advanceTimersByTimeAsync(50);
-      expect(pipelineMock.dispose).toHaveBeenCalledTimes(1);
-      expect(micMock.ready).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-  test('G6: two recordings inside the window keep one stream; getUserMedia is not re-run', async () => {
-    vi.useFakeTimers();
-    try {
-      mk();
-      micMock.ready = Promise.resolve();
-      (composerOpts.onVoiceEnd as (how: string) => void)('release');
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(pipelineMock.dispose).not.toHaveBeenCalled();
-      // A second recording starts within the window: it reuses the live stream
-      // (mic.ready never went null, so ensureMic re-inits nothing) and cancels
-      // the pending grace dispose.
-      (composerOpts.onVoiceStart as () => void)();
-      expect(micMock.ready).not.toBeNull();
-      (composerOpts.onVoiceEnd as (how: string) => void)('release');
-      await vi.advanceTimersByTimeAsync(80_000);
-      // 80s after the SECOND release: the window (reset by it) has not elapsed.
-      expect(pipelineMock.dispose).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(20_000);
-      expect(pipelineMock.dispose).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-  test('G6: backgrounding on a touch device is a hard release: dispose at once', async () => {
-    vi.useFakeTimers();
-    try {
-      mk();
-      micMock.ready = Promise.resolve();
-      hiddenSilencesMock.value = true;
       (composerOpts.onVoiceEnd as (how: string) => void)('release');
       await vi.advanceTimersByTimeAsync(50);
       expect(pipelineMock.dispose).toHaveBeenCalledTimes(1);
       expect(micMock.ready).toBeNull();
+      // No timer is left to dispose anything later.
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
   });
-  test('G6: teardown is a hard release: a grace-held stream is disposed', () => {
+  test('the next press opens the mic afresh', async () => {
+    vi.useFakeTimers();
+    try {
+      mk();
+      micMock.ready = Promise.resolve();
+      (composerOpts.onVoiceEnd as (how: string) => void)('release');
+      await vi.advanceTimersByTimeAsync(50);
+      expect(micMock.ready).toBeNull();
+      micMock.ready = Promise.resolve();
+      (composerOpts.onVoiceEnd as (how: string) => void)('release');
+      await vi.advanceTimersByTimeAsync(50);
+      expect(pipelineMock.dispose).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  test('a capture still settling keeps the mic until it settles', async () => {
+    vi.useFakeTimers();
+    try {
+      mk();
+      micMock.ready = Promise.resolve();
+      pipelineMock.captureBusy = true;
+      (composerOpts.onVoiceEnd as (how: string) => void)('release');
+      await vi.advanceTimersByTimeAsync(500);
+      expect(pipelineMock.dispose).not.toHaveBeenCalled();
+      pipelineMock.captureBusy = false;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(pipelineMock.dispose).toHaveBeenCalledTimes(1);
+    } finally {
+      pipelineMock.captureBusy = false;
+      vi.useRealTimers();
+    }
+  });
+  test('teardown releases the mic', () => {
     const disposers: (() => void)[] = [];
     mk({onTeardown: (d) => disposers.push(d)});
     micMock.ready = Promise.resolve();
