@@ -229,8 +229,9 @@ for (const theme of THEMES) {
       await openRichChat(page);
       await captureAcrossWidths(page, 'menu', theme, async () => {
         // A resize (the setViewportSize before this ran) closes any prior overlay,
-        // so open fresh: the composer attach affordance is a menu (wide) or a
-        // sheet (narrow), and each width owns its own baseline.
+        // so open fresh. The oracle drives a mouse, so the composer attach
+        // affordance is the menu at every width (the sheet is for touch, chosen
+        // by input device, not width); each width still owns its own baseline.
         const openOverlay = '.cyc-menu[data-cyc-phase="open"], .cyc-sheet[data-cyc-phase="open"]';
         await expect(page.locator(openOverlay)).toHaveCount(0);
         await page.locator('#cyc-thread-pane .cyc-attach-btn').first().click();
