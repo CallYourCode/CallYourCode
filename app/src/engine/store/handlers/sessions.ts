@@ -111,6 +111,7 @@ function applySessionRow(
       if (es.readThrough !== undefined) applyBroadcastReadThrough(s, es.readThrough);
       else if (es.heardTs !== undefined) applyBroadcastReadThrough(s, {ts: es.heardTs});
       if (es.heardTs !== undefined) s.heardTs = es.heardTs;
+      if (es.spokenTs !== undefined) s.spokenTs = es.spokenTs;
       // The engine has now served this session's read state on the live pipe:
       // speech deferred at open (readStateFreshOnConn) may run, on this truth.
       noteReadStateFresh(s.id);

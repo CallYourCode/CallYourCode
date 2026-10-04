@@ -23,7 +23,17 @@ import type {ReadMarker} from './engine/store/readState';
  * that every agent row between them is in that set. Rows a jump skipped stay
  * unread, however the view got to the bottom. Only the agent's rows have to be
  * seen: his own rows and the activity records are not unread (unreadOf on the
- * engine counts claude rows alone), so they ride along. */
+ * engine counts claude rows alone), so they ride along.
+ *
+ * HEARD IS A SECOND, ENGINE-HELD FACT (release-1 re-gate B2). A clip played to
+ * the end counts as seen for the run above, but while unseen rows sit before it
+ * the marker cannot move, so hearing alone would leave nothing on the engine and
+ * the clip would be spoken again after a reload or on another device. So each
+ * heard-to-end also reports HOW FAR SPEECH HAS GOT (store.reportSpoken, the
+ * engine's spokenTs): the newest clip such that every clip after the read
+ * marker up to it was heard to the end, so the engine's timestamp high-water
+ * mark never covers a clip nobody heard. Speech skips everything at or before
+ * it, on every device. */
 
 type EngineFields = {msgId?: string; mid?: string; seq?: number};
 
@@ -31,6 +41,8 @@ export interface HeardStore {
   get(id: string): (CycSession & {messages: CycMessage[]}) | undefined;
   reportSighting(sessionId: string, row: {mid?: string; msgId?: string; ts: number}): void;
   effectiveMarkerOf(s: CycSession): ReadMarker | undefined;
+  reportSpoken(sessionId: string, row: {mid?: string; msgId?: string; ts: number}): void;
+  spokenTsOf(s: CycSession): number;
 }
 
 interface HeardProgressDeps {
@@ -151,22 +163,60 @@ export function createHeardProgress(deps: HeardProgressDeps) {
     sightOnScreen(id);
   }
 
+  /* Clips heard to the end on this page and not yet covered by the engine's
+   * spoken mark, per chat. */
+  const heard = new Map<string, Set<string>>();
+
+  /* HOW FAR SPEECH HAS GOT, advanced: from the further of the read marker and
+   * the engine's spoken mark, through every agent clip (a row with a msgId, the
+   * only rows speech plays) heard to the end, to the last one in that run. */
+  function advanceSpoken(id: string, s: CycSession & {messages: CycMessage[]}) {
+    const set = heard.get(id);
+    if (!set?.size) return;
+    const floor = Math.max(readMarkerOf(s)?.ts ?? 0, deps.store.spokenTsOf(s));
+    const rows = s.messages as (CycMessage & EngineFields)[];
+    let target: (CycMessage & EngineFields) | undefined;
+    for (const row of rows) {
+      if (row.ts <= floor || row.role !== 'claude' || !row.msgId) continue;
+      if (!set.has(row.id)) break;
+      target = row;
+    }
+    if (!target) return;
+    for (const row of rows) if (row.ts <= target.ts) set.delete(row.id);
+    deps.store.reportSpoken(id, {mid: target.mid, msgId: target.msgId, ts: target.ts});
+  }
+
   /* A clip HEARD TO THE END is seen, and goes through the same advance: speech
    * plays the unheard run in order, so each clip ending carries the marker one
-   * row on. A clip stopped part way is not heard. The divider follows. */
+   * row on while the rows above it were seen. A clip stopped part way is not
+   * heard. The divider follows. Whatever the marker does, how far speech has got
+   * is reported too, so no device speaks it again. */
   function markHeard(sessionId: string, msgId: string) {
     const s = deps.store.get(sessionId);
     const played = s?.messages.find((m) => (m as CycMessage & EngineFields).msgId === msgId);
-    if (!played) return;
+    if (!s || !played) return;
     seenOf(sessionId).add(played.id);
+    let set = heard.get(sessionId);
+    if (!set) heard.set(sessionId, (set = new Set()));
+    set.add(played.id);
     const moved = advance(sessionId);
     if (moved) deps.onHeardMarked(sessionId, moved.mid ? moved : {ts: moved.ts});
+    advanceSpoken(sessionId, s);
   }
 
-  /* Has this row been on screen or heard to the end, and is it still ahead of
-   * the marker? Speech asks this so a heard clip is never picked again. */
+  /* MUST SPEECH SKIP THIS ROW? Two facts, said exactly:
+   *   - spoken: at or before the engine's spoken mark (this device's queued
+   *     report included). Engine-held, so it holds on every device and after a
+   *     reload.
+   *   - seen: on screen, or heard to the end, during THIS PAGE's life (the
+   *     in-memory seen set). Page-local on purpose: a row he read here is read
+   *     on the engine as soon as the run above it is seen, and then it is
+   *     behind the marker anyway. */
   function heardOrSeen(sessionId: string, rowId: string): boolean {
-    return seenOf(sessionId).has(rowId);
+    if (seenOf(sessionId).has(rowId)) return true;
+    const s = deps.store.get(sessionId);
+    const row = s?.messages.find((m) => m.id === rowId);
+    return !!s && !!row && row.ts <= deps.store.spokenTsOf(s);
   }
 
   return {

@@ -26,6 +26,7 @@ export type ReadStateSession = {
   id: string;
   chat: ReadableChat[];
   heardTs: number;
+  spokenTs?: number;
   notified?: boolean;
   silentSince?: number;
   filedTs?: number;
@@ -129,6 +130,19 @@ export function markRead(s: ReadStateSession, ts: number): boolean {
   return true;
 }
 
+/* A CLIP HEARD TO THE END, and every clip before it (the app reports only
+ * through such a run): speech is done up to this instant, on every device and
+ * after a reload. FORWARD ONLY. It is NOT the read marker and never moves it:
+ * a clip he heard while the rows above it were never on screen leaves those
+ * rows unread (owner, 2026-10-03). A timestamp high-water mark is enough
+ * because the run is contiguous: nothing at or before it is left unspoken. */
+export function markSpoken(s: ReadStateSession, ts: number): boolean {
+  if (!Number.isFinite(ts) || ts <= (s.spokenTs ?? 0)) return false;
+  s.spokenTs = ts;
+  deps.scheduleHeardSave(s.id);
+  return true;
+}
+
 /* Everything currently in the log is read. What "opening the chat" means, and
  * what a device that played the last reply through has effectively done. */
 export function markAllRead(s: ReadStateSession): boolean {
@@ -165,6 +179,8 @@ export function markUnread(s: ReadStateSession): boolean {
   if (ts >= s.heardTs) return false;
   s.heardTs = ts;
   s.filedTs = s.chat[last].ts;
+  // he asked to come back to it: what he files is spoken again on the next open
+  if ((s.spokenTs ?? 0) > ts) s.spokenTs = ts;
   deps.scheduleHeardSave(s.id); // unread survives a restart, exactly as read does
   return true;
 }

@@ -35,7 +35,7 @@ import { turnSinceFor } from "../chat/turn.ts";
 import { ANNOUNCED_SOURCE, PREMINT_SOURCE, PARKED_SOURCE, agentLabel } from "../runtime/agents.ts";
 import { isHarnessSessionId } from "../runtime/ids.ts";
 import { adoptSession, absorb } from "./carry.ts";
-import { sessions, restoredChats, restoredLogs, restoredSeenOf, restoredNotifiedOf, restoredFiledOf,
+import { sessions, restoredChats, restoredLogs, restoredSeenOf, restoredNotifiedOf, restoredFiledOf, restoredSpokenOf,
   heardTsFor, agentMetas, metaFor, freshAgentId, sessionIndex,
   bindingOf, recordBinding, markBindingDead, savePaneBindings,
   purgeSessionState, scheduleAgentSave, type Session } from "./session-state.ts";
@@ -318,6 +318,7 @@ function deadRow(meta: AgentMeta, chat: Session["chat"], log: Session["log"], or
     doneSeq: restoredSeenOf(id)?.doneSeq ?? 0, seenDoneSeq: restoredSeenOf(id)?.seenDoneSeq ?? 0,
     heardTs: heardTsFor(undefined, id),
     notified: restoredNotifiedOf(id) ?? false, filedTs: restoredFiledOf(id) ?? 0,
+    spokenTs: restoredSpokenOf(id) ?? 0,
     order, chat, log, channels: [],
   };
 }
@@ -502,6 +503,7 @@ export function makeReconcile(d: ReconcileDeps): (agents: MuxAgentInfo[]) => voi
        * forgot it would push again for a notification already sitting on the
        * phone, and would never send the dismissal that takes it down. */
       notified: prev?.notified ?? restoredNotifiedOf(key) ?? false,
+      spokenTs: prev?.spokenTs ?? restoredSpokenOf(key) ?? 0,
       // ...and so is how far he had filed it: see restoredFiledTs
       filedTs: prev?.filedTs ?? restoredFiledOf(key) ?? 0,
       order: i, // agents arrive in herdr's "spaces" order
