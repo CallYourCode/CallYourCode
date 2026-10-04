@@ -120,10 +120,6 @@ class Speaker {
       const done = this.current;
       this.current = null;
       // played through to its end: the one moment a clip counts as heard
-<<<<<<< HEAD
-      if (done) for (const fn of [...this.endedListeners]) fn(done);
-      if (!this.playNext()) {
-=======
       // a throwing listener must not stall the queue behind it
       if (done) {
         for (const fn of [...this.endedListeners]) {
@@ -134,9 +130,7 @@ class Speaker {
           }
         }
       }
-      if (this.queue.length) this.playNext();
-      else {
->>>>>>> fix-push-recheck
+      if (!this.playNext()) {
         this.emit('finished', done || undefined);
 
         this.releaseMedia();
