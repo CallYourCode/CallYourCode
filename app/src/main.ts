@@ -18,6 +18,7 @@ import {sessionState, bootUrlNav, dataState} from './sessionState';
 import {installStaleTabReload} from './bundleReload';
 import {installErrorReporter} from './errorReporter';
 import {setLazyNotifier} from './shared/lazy';
+import {setSelfNavNotifier} from './shared/selfReload';
 import {installSpeechGate} from './speechGate';
 import {installComposerTestHooks, installTestHooks} from './testHooks';
 import {installIdleProbe} from './testing/idleProbe';
@@ -120,6 +121,7 @@ void showVault.stats().then((s) => {
 });
 
 setLazyNotifier((message) => toast(message, 4000));
+setSelfNavNotifier((message) => toast(message, 4000));
 installErrorReporter();
 installStaleTabReload();
 

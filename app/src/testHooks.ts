@@ -36,11 +36,15 @@ import {
 } from './features/composer/components/messageComposer';
 import {sessionState} from './sessionState';
 import {lazy} from './shared/lazy';
+import {clerkSignOut} from './engine/clerkSession';
 
 export function installTestHooks(): void {
   if (!new URLSearchParams(location.search).get('testhooks')) return;
 
   (window as never as {__cycClipVault: typeof clipVault}).__cycClipVault = clipVault;
+
+  // Sign-out as the account menu runs it (a self-navigation through the gate).
+  (window as never as {__cycSignOut: typeof clerkSignOut}).__cycSignOut = clerkSignOut;
 
   // A real dynamic import through lazy() (the missing-chunk reload path).
   (

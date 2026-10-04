@@ -23,12 +23,15 @@ const GONE = '/assets/gone-chunk-0000.js';
 
 const builds = (log: LogCapture) => log.of('boot').map((l) => l.field('build'));
 
+// The page may be mid-navigation (the app's own update reload): 'unknown'.
 const regState = (page: Page) =>
-  page.evaluate(async () => {
-    const r = await navigator.serviceWorker.getRegistration();
-    const s = (w: ServiceWorker | null | undefined) => w?.state ?? 'none';
-    return {installing: s(r?.installing), waiting: s(r?.waiting), active: s(r?.active)};
-  });
+  page
+    .evaluate(async () => {
+      const r = await navigator.serviceWorker.getRegistration();
+      const s = (w: ServiceWorker | null | undefined) => w?.state ?? 'none';
+      return {installing: s(r?.installing), waiting: s(r?.waiting), active: s(r?.active)};
+    })
+    .catch(() => ({installing: 'unknown', waiting: 'unknown', active: 'unknown'}));
 
 const cachedOwn = (page: Page, stamp: string) =>
   page.evaluate(async (s) => {
@@ -78,7 +81,7 @@ test('a missing chunk while the new worker is parked waits, asks it to take over
   browserName
 }) => {
   test.skip(browserName !== 'chromium', 'only Chromium parks a skip-waiting worker');
-  test.setTimeout(170_000);
+  test.setTimeout(480_000);
   const N = 12;
   const {dirs, stamps} = makeBuilds(N);
   const host = await startHost(dirs[0]);
@@ -150,7 +153,10 @@ test('a missing chunk while the new worker is parked waits, asks it to take over
     expect(await missingChunk(page)).toContain('failed');
     await expect
       .poll(() => builds(log).length, {
-        timeout: 20_000,
+        // An ask that is itself raced is lost; Chromium then activates once
+        // the old worker idles, or at its 300 s cap. The reload holds until
+        // then, on a usable page (rare: about 1 parked run in 30 here).
+        timeout: 330_000,
         message: `the missing-chunk reload never landed (hung?) on ${own} -> ${stamps[parked]}`
       })
       .toBe(before + 1);
@@ -179,6 +185,61 @@ test('a missing chunk while the new worker is parked waits, asks it to take over
       ['UPDATE TRAIL', ...log.lines.filter((l) => re.test(l.event)).map((l) => l.raw)].join('\n')
     );
     throw e;
+  } finally {
+    host.proc.kill();
+    await rig.close();
+  }
+});
+
+// A stalled radio: a new build's install runs for minutes (Chromium gives up
+// at 300 s, WebKit later). The gate used to hold every self-navigation for all
+// of it, and sign-out sat there showing nothing (verifier, 2026-10-04). An
+// installing worker is safe to navigate past (the active one answers), so a
+// sign-out goes at once.
+test('a sign-out while a new build is stuck installing goes at once', async ({page}) => {
+  test.setTimeout(90_000);
+  const {dirs, stamps} = makeBuilds(1);
+  const host = await startHost(dirs[0]);
+  const rig: ChatEngine = await startChatEngine({
+    sessions: [{id: PANE, name: NAME, messages: seedMessages(PANE, 4, 1_700_000_000_000)}]
+  });
+  const log = captureLog(page);
+  try {
+    await bootApp(page, host.origin, rig.port, stamps[0]);
+    await deploy(host.origin, dirs[1], false, true);
+    await page.evaluate(() =>
+      navigator.serviceWorker
+        .getRegistration()
+        .then((r) => void r?.update().catch(() => {}))
+        .catch(() => {})
+    );
+    await expect
+      .poll(async () => (await regState(page)).installing, {
+        timeout: 15_000,
+        message: 'the stalled install never started'
+      })
+      .toBe('installing');
+    await page.waitForTimeout(1000);
+    expect((await regState(page)).installing, 'the install was meant to stay stuck').toBe(
+      'installing'
+    );
+
+    const at = Date.now();
+    const bootsBefore = builds(log).length;
+    await page.evaluate(() => {
+      const w = window as unknown as {__cycSignOut: () => Promise<void>};
+      void w.__cycSignOut();
+    });
+    await expect
+      .poll(() => builds(log).length, {
+        timeout: 8_000,
+        message: 'sign-out was held behind a stalled install'
+      })
+      .toBe(bootsBefore + 1);
+    expect(Date.now() - at).toBeLessThan(8_000);
+    expect(log.since('nav.go', at)[0]?.field('why')).toBe('sign-out');
+    expect(log.since('nav.held', at)).toEqual([]);
+    expect(new URL(page.url()).pathname).toBe('/');
   } finally {
     host.proc.kill();
     await rig.close();

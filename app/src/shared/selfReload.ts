@@ -67,21 +67,27 @@ export function readReloadDeparture(): ReloadDeparture | null {
 // --- The self-navigation gate ----------------------------------------------
 // EVERY navigation the app does to itself (an update reload, a missing-chunk
 // reload, an engine switch, sign-out, clear-data) goes through navigateSelf.
-// It never navigates while a new service worker is installing or waiting: in
-// Chromium a navigation can be what triggers a parked activation (a request
-// restarted the old worker mid-swap), it is dispatched to the old worker as
-// that worker is stopped, and it never completes: the page hangs blank
-// (proven 2026-10-03, sw-activation-race / sw-chunk-reload specs). Installing
-// settles by itself in seconds; a waiting worker is asked to take over
-// ({t: 'skip-waiting'}, cyc-sw.js) and Chromium otherwise activates it once
-// the old worker idles. A caller may add its own hold (the update reload's
-// composer hold); the gate re-decides on every tick and at once when the app
-// goes to the background.
-
-export type PendingWorker = '' | 'installing' | 'waiting';
+// The one hazard it guards: a new service worker installed but WAITING. In
+// Chromium a request can restart the old worker while it is being stopped for
+// the new one's activation, which parks the new one; a navigation that then
+// triggers the activation is dispatched to the old worker as it is stopped and
+// never completes: the page hangs blank (proven 2026-10-03, sw-activation-race
+// / sw-chunk-reload specs). So it never navigates into a waiting worker: it
+// asks it to take over ({t: 'skip-waiting'}, cyc-sw.js; it activates about a
+// second later, or once the old worker idles, 300 s at worst) and holds.
+//  - The update and missing-chunk reloads hold until it has: the page stays
+//    usable on the build it runs meanwhile.
+//  - A user action (sign-out, engine switch, clear data) shows its notice and
+//    holds at most WAITING_MAX_MS, then navigates to its URL with ?cyc-net=1,
+//    which cyc-sw.js routes straight to the network: it boots from there
+//    without ever reaching the stuck old worker (Chromium proof 2026-10-04).
+// An INSTALLING worker never holds a navigation: on a stalled radio an install
+// runs for minutes (Chromium 300 s), and the active worker answers meanwhile.
+// A caller may add its own hold (the update reload's composer hold), re-decided
+// on every tick and at once when the app goes to the background.
 
 export type SelfNavDeps = {
-  pendingWorker: () => Promise<PendingWorker>;
+  workerWaiting: () => Promise<boolean>;
   askActivate: () => void;
   hidden: () => boolean;
   now: () => number;
@@ -90,35 +96,58 @@ export type SelfNavDeps = {
   // Subscribe to the app going to the background; returns the unsubscribe.
   onHidden: (fn: () => void) => () => void;
   log: (event: string, fields: Record<string, unknown>) => void;
+  // A brief notice ('Reloading…') while a waiting worker holds a user action.
+  notify: (message: string) => void;
 };
 
 export type SelfNav = {
   // What this navigation is, for app.log ('update', 'chunk-missing', ...).
   why: string;
-  // Navigate. Called exactly once, when nothing holds the navigation.
-  go: (at: {waited: number; hidden: boolean}) => void;
+  // Navigate, exactly once. viaNetwork: a new worker is still parked, so
+  // navigate to netNavUrl(...) (a user action past WAITING_MAX_MS).
+  go: (at: {waited: number; hidden: boolean; viaNetwork: boolean}) => void;
   // The caller's own hold ('' = none), re-asked on every tick.
   hold?: (waited: number, hidden: boolean) => string;
-  // Every tick the navigation stays held (the caller's or the worker's hold).
+  // Every tick the caller's hold keeps the navigation.
   onHeld?: (hold: string, waited: number, hidden: boolean) => void;
+  // Marks a user action: its notice, shown if a waiting worker holds it; held
+  // WAITING_MAX_MS at most.
+  userAction?: string;
   // Delay before the first decision (the update reload shows its toast first).
   firstTickMs?: number;
 };
 
-const WORKER_TICK_MS = 400; // an activation takes milliseconds, an install seconds
+export const WAITING_MAX_MS = 4000; // an asked worker activates in about a second
+const WORKER_TICK_MS = 300;
 const HOLD_TICK_MS = 1500; // a caller hold (a draft) ends on a user action
-const ASK_EVERY_MS = 2000;
-const LOG_EVERY_MS = 15_000;
+
+export const NET_NAV_PARAM = 'cyc-net';
+
+// The same page, routed straight to the network (cyc-sw.js CYC_ROUTE_TABLE).
+export function netNavUrl(href: string): string {
+  const url = new URL(href, location.href);
+  url.searchParams.set(NET_NAV_PARAM, '1');
+  return url.toString();
+}
+
+// Boot: drop the marker so the user's own reloads come from the cache again.
+export function dropNetNavParam(): void {
+  try {
+    const url = new URL(location.href);
+    if (!url.searchParams.has(NET_NAV_PARAM)) return;
+    url.searchParams.delete(NET_NAV_PARAM);
+    history.replaceState(history.state, '', url.toString());
+  } catch {}
+}
 
 export function createSelfNavGate(deps: SelfNavDeps): (nav: SelfNav) => void {
   let gone = false; // one self-navigation per page life wins; the rest stand down
   return (nav: SelfNav) => {
     const since = deps.now();
+    let waitingSince = -1; // when the worker hold began (-1: not holding)
     let timer: unknown = null;
     let ticking = false;
     let again = false;
-    let lastAsk = -Infinity;
-    let lastLog = -Infinity;
     const off = deps.onHidden(() => void tick());
     const tick = async (): Promise<void> => {
       if (gone) return off();
@@ -130,29 +159,34 @@ export function createSelfNavGate(deps: SelfNavDeps): (nav: SelfNav) => void {
       if (timer !== null) deps.cancel(timer);
       timer = null;
       try {
-        const pending = await deps.pendingWorker().catch((): PendingWorker => '');
-        if (gone) return off();
-        const waited = deps.now() - since;
+        const now = deps.now();
+        const waited = now - since;
         const hidden = deps.hidden();
-        if (pending === 'waiting' && waited - lastAsk >= ASK_EVERY_MS) {
-          lastAsk = waited;
-          deps.askActivate();
-        }
         const own = nav.hold?.(waited, hidden) ?? '';
-        const hold = own || (pending ? 'sw-' + pending : '');
-        if (hold) {
-          if (!own && waited - lastLog >= LOG_EVERY_MS) {
-            lastLog = waited;
-            deps.log('nav.held', {why: nav.why, hold, waited});
-          }
-          nav.onHeld?.(hold, waited, hidden);
-          timer = deps.schedule(() => void tick(), pending ? WORKER_TICK_MS : HOLD_TICK_MS);
+        if (own) {
+          waitingSince = -1;
+          nav.onHeld?.(own, waited, hidden);
+          timer = deps.schedule(() => void tick(), HOLD_TICK_MS);
+          return;
+        }
+        const waiting = await deps.workerWaiting().catch(() => false);
+        if (gone) return off();
+        if (!waiting) waitingSince = -1;
+        else if (waitingSince < 0) {
+          waitingSince = now;
+          deps.log('nav.held', {why: nav.why, hold: 'sw-waiting'});
+          if (nav.userAction) deps.notify(nav.userAction);
+        }
+        const heldFor = waitingSince < 0 ? 0 : now - waitingSince;
+        if (waiting && (!nav.userAction || heldFor < WAITING_MAX_MS)) {
+          deps.askActivate();
+          timer = deps.schedule(() => void tick(), WORKER_TICK_MS);
           return;
         }
         gone = true;
         off();
-        deps.log('nav.go', {why: nav.why, waited, hidden});
-        nav.go({waited, hidden});
+        deps.log('nav.go', {why: nav.why, waited, hidden, ...(waiting ? {viaNetwork: true} : {})});
+        nav.go({waited, hidden, viaNetwork: waiting});
       } finally {
         ticking = false;
         if (again && !gone) {
@@ -167,13 +201,12 @@ export function createSelfNavGate(deps: SelfNavDeps): (nav: SelfNav) => void {
 
 const swSupported = () => typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
 
-export async function pendingWorker(): Promise<PendingWorker> {
-  if (!swSupported()) return '';
+export async function workerWaiting(): Promise<boolean> {
+  if (!swSupported()) return false;
   try {
-    const r = await navigator.serviceWorker.getRegistration();
-    return r?.installing ? 'installing' : r?.waiting ? 'waiting' : '';
+    return !!(await navigator.serviceWorker.getRegistration())?.waiting;
   } catch {
-    return '';
+    return false;
   }
 }
 
@@ -185,8 +218,14 @@ export function askActivate(): void {
     .catch(() => {});
 }
 
+let notifier: (message: string) => void = () => {};
+// main registers the real toast once it is up (this module renders nothing).
+export function setSelfNavNotifier(fn: (message: string) => void): void {
+  notifier = fn;
+}
+
 const realDeps: SelfNavDeps = {
-  pendingWorker,
+  workerWaiting,
   askActivate,
   hidden: () => typeof document !== 'undefined' && document.hidden,
   now: () => Date.now(),
@@ -200,7 +239,8 @@ const realDeps: SelfNavDeps = {
     document.addEventListener('visibilitychange', h);
     return () => document.removeEventListener('visibilitychange', h);
   },
-  log: (event, fields) => cyclog(event, fields)
+  log: (event, fields) => cyclog(event, fields),
+  notify: (message) => notifier(message)
 };
 
 let gate = createSelfNavGate(realDeps);

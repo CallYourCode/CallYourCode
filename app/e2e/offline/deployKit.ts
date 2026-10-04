@@ -91,7 +91,8 @@ export async function startHost(dist: string): Promise<{origin: string; proc: Ch
   return {origin: `http://127.0.0.1:${port}`, proc};
 }
 
-export const deploy = async (origin: string, dist: string, fail: boolean) => {
-  const r = await fetch(`${origin}/__deploy?dist=${encodeURIComponent(dist)}&fail=${fail ? 1 : 0}`);
+export const deploy = async (origin: string, dist: string, fail: boolean, stall = false) => {
+  const q = `dist=${encodeURIComponent(dist)}&fail=${fail ? 1 : 0}&stall=${stall ? 1 : 0}`;
+  const r = await fetch(`${origin}/__deploy?${q}`);
   if (!r.ok) throw new Error('deploy failed');
 };

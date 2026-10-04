@@ -9,11 +9,10 @@ import {markSelfReload, navigateSelf} from './selfReload';
 // load fails again soon after (a genuinely broken deploy) the page does not
 // loop: it tells the user and rethrows.
 //
-// The reload goes through the self-navigation gate: it waits while a new
-// worker is installing or waiting (a missing chunk usually means a deploy is
-// landing right now, so that wait is what makes the reload land on the new
-// build; navigating into a parked activation would hang the page blank). It
-// does NOT take the update reload's composer hold: the page is broken (the
+// The reload goes through the self-navigation gate: it holds while a new
+// worker is parked waiting (a missing chunk usually means a deploy is landing
+// right now; navigating into a parked activation would hang the page blank,
+// and the asked worker takes over in about a second). It does NOT take the update reload's composer hold: the page is broken (the
 // feature that was asked for cannot load until it reloads), and the draft is
 // on disk, restored after the reload.
 

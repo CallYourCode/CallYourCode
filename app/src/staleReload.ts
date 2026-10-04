@@ -104,16 +104,6 @@ export type StaleReloadDeps = {
   shellCached: () => Promise<boolean>;
   // Whether a service worker currently controls this page.
   isControlled: () => boolean;
-  // A new worker that is installing or installed-but-waiting ('' when none).
-  // A reload must never navigate while one is: in Chromium the navigation can
-  // be what triggers the pending activation, it is dispatched to the old
-  // worker as that worker is stopped, and it never completes (the hung reload,
-  // proven 2026-10-03). Installing settles by itself in seconds.
-  pendingWorker: () => Promise<'' | 'installing' | 'waiting'>;
-  // Ask the waiting worker to take over (postMessage {t: 'skip-waiting'}).
-  // Chromium can park a skip-waiting worker when a request restarts the old
-  // worker mid-swap; a second skipWaiting() retries the activation.
-  askActivate: () => void;
   // registration.update(): force the worker update check without a navigation.
   nudgeWorker: () => void;
   // The once-per-target-stamp reload mark (sessionStorage in the real page).
@@ -140,27 +130,16 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
   let polling = false; // a readiness poll is in flight
   let controllerReloadUsed = false; // controllerchange reloads at most ONCE per page
 
-  let askedFor = ''; // the target a waiting worker was last asked to take over for
   const ready = async (target: string): Promise<boolean> => {
     try {
       if (!newestBucketDeliversTarget(await deps.cacheNames(), target)) return false;
       // The bucket NAME is newest, but a reload only lands non-blank once that
-      // bucket really holds the shell (and so, atomically, every chunk).
-      if (!(await deps.shellCached())) return false;
+      // bucket really holds the shell (and so, atomically, every chunk). A new
+      // worker still waiting is the self-navigation gate's business.
+      return await deps.shellCached();
     } catch {
-      // unreadable caches: fall through to the worker check
+      return true;
     }
-    // And only once the new worker has taken over: its activation, not the
-    // reload, is what swaps the worker (see pendingWorker).
-    const pending = await deps.pendingWorker().catch((): '' => '');
-    if (pending === 'waiting') {
-      if (askedFor !== target) {
-        askedFor = target;
-        deps.log?.('sw.waiting', {target, why: 'asked the new worker to take over'});
-      }
-      deps.askActivate();
-    }
-    return !pending;
   };
 
   // Verify-after-write on the once-per-stamp mark. writeMark may throw

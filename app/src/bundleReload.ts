@@ -11,11 +11,10 @@ import {
   type ReloadHolds
 } from './staleReload';
 import {
-  askActivate,
   markSelfReload,
   markReloadDeparture,
+  dropNetNavParam,
   navigateSelf,
-  pendingWorker,
   readReloadDeparture
 } from './shared/selfReload';
 
@@ -28,6 +27,7 @@ const RELOAD_MARK_KEY = 'cyc-stale-reload-for';
 export function installStaleTabReload(): void {
   const cycBuildStamp = typeof __CYC_BUILD__ !== 'undefined' ? __CYC_BUILD__ : '';
   cyclog('boot', {build: cycBuildStamp || 'dev'});
+  dropNetNavParam();
   bundleInfo.stamp = cycBuildStamp;
 
   // This boot is main actually starting: clear the index.html watchdog so it
@@ -94,10 +94,10 @@ export function installStaleTabReload(): void {
 
   const swSupported = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
 
-  // The update reload, through the one self-navigation gate (never into an
-  // installing or waiting worker), with its own hold on top: a recording, a
-  // vault write, an unsent send, a draft in the box (until it is emptied or the
-  // app goes to the background) or a playing clip (reloadHold).
+  // The update reload, through the one self-navigation gate (held while a new
+  // worker waits to take over), with its own hold on top: a
+  // recording, a vault write, an unsent send, a draft in the box (until it is
+  // emptied or the app goes to the background) or a playing clip (reloadHold).
   const reloadSoon = (target: string) => {
     if (reloading) return;
     reloading = true;
@@ -155,8 +155,6 @@ export function installStaleTabReload(): void {
       }
     },
     isControlled: () => swSupported && !!navigator.serviceWorker.controller,
-    pendingWorker,
-    askActivate,
     nudgeWorker: () => {
       if (!swSupported) return;
       try {

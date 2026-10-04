@@ -504,16 +504,38 @@ describe('service worker install fails an update it cannot precache', () => {
 // now declares its routes to the browser (Static Routing API) so only shell and
 // asset requests ever wake it, and a waiting worker takes over when asked.
 describe('service worker routes and the take-over ask', () => {
-  type Rule = {condition: {urlPattern: {pathname: string}}; source: string};
+  type Rule = {condition: {urlPattern: {pathname: string; search?: string}}; source: string};
   const routes = () => (sw as unknown as {CYC_ROUTES: Rule[]}).CYC_ROUTES;
-  // First matching rule, for the pathname-only patterns the worker uses.
-  const sourceFor = (path: string) =>
+  // What Chromium does with the declared rules: the first match wins; a request
+  // no rule matches gets the default, the fetch event. (Patterns here are a
+  // pathname exact or ending '/*', and a search '*x*'.)
+  const sourceFor = (path: string, search = '') =>
     routes().find((r) => {
-      const p = r.condition.urlPattern.pathname;
-      return p.endsWith('/*') ? path.startsWith(p.slice(0, -1)) : path === p;
-    })?.source;
+      const {pathname: p, search: q} = r.condition.urlPattern;
+      const pathHit = p.endsWith('/*') ? path.startsWith(p.slice(0, -1)) : path === p;
+      return pathHit && (!q || search.includes(q.slice(1, -1)));
+    })?.source ?? 'fetch-event';
 
-  test('the declared routes agree with the fetch handler for every path', () => {
+  // A user action that a parked worker held past its bound navigates to
+  // '/?cyc-net=1': it must boot from the network, never reaching the stuck old
+  // worker (Chromium), and the handler must agree (WebKit).
+  test('the escape hatch: /?cyc-net=1 goes to the network, / still reaches the worker', () => {
+    expect(sourceFor('/', '?cyc-net=1')).toBe('network');
+    expect(sourceFor('/', '?b=2&cyc-net=1')).toBe('network');
+    expect(sw.cycRouteRequest(req('/?b=2&cyc-net=1'))).toBe('network');
+    expect(sourceFor('/', '?testhooks=1')).toBe('fetch-event');
+    expect(sw.cycRouteRequest(req('/?testhooks=1'))).toBe('shell');
+  });
+
+  // fix-download-lane serves /__cyc_dl/<id>/... from the fetch handler. A route
+  // list ending in "everything else to the network" sent it to the server in
+  // Chromium (verifier, 2026-10-04): only named bypass paths may skip the worker.
+  test('a path the table does not name reaches the worker (streamed downloads)', () => {
+    for (const path of ['/__cyc_dl/abc123/report.pdf', '/plugins/git-page.html', '/some/new/path'])
+      expect(sourceFor(path), path).toBe('fetch-event');
+  });
+
+  test('the browser skips the worker only where the handler would go to the network anyway', () => {
     for (const path of [
       '/',
       '/index.html',
@@ -522,15 +544,30 @@ describe('service worker routes and the take-over ask', () => {
       '/assets/fonts/inter-latin.woff2',
       '/clientlog',
       '/build.txt',
+      '/config',
+      '/settings',
+      '/report',
       '/push/read',
+      '/engines/announce',
       '/cyc-precache.json',
-      '/cyc-sw.js',
-      '/plugins/git-page.html',
-      '/settings'
+      '/__cyc_dl/abc/x.bin'
     ]) {
       const handler = sw.cycRouteRequest(req(path));
-      expect(sourceFor(path), path).toBe(handler === 'network' ? 'network' : 'fetch-event');
+      if (sourceFor(path) === 'network') expect(handler, path).toBe('network');
+      if (handler !== 'network') expect(sourceFor(path), path).toBe('fetch-event');
     }
+    // The app's constant traffic never wakes the worker.
+    for (const path of ['/clientlog', '/build.txt', '/config', '/settings', '/push/read'])
+      expect(sourceFor(path), path).toBe('network');
+  });
+
+  test('one table drives both: every network row is a declared rule, nothing else is', () => {
+    const table = (sw as unknown as {CYC_ROUTE_TABLE: [string, string][]}).CYC_ROUTE_TABLE;
+    expect(routes().map((r) => r.condition.urlPattern.pathname)).toEqual(
+      table.filter(([, route]) => route === 'network').map(([path]) => path)
+    );
+    expect(routes()[0].condition.urlPattern.search).toBe('*cyc-net=*');
+    expect(routes().every((r) => r.source === 'network')).toBe(true);
   });
 
   test('install declares the routes when the browser has the API, and installs without it', async () => {
