@@ -304,7 +304,9 @@ export class WsEngineClient implements EngineClient {
   // store re-attaches again on the settled edge with the same frontier.
   // `verifyFrom` names the lowest page the open window shows; the attach-ok
   // then fingerprints the shown pages so the store can refetch any that differ.
-  public attach(sessionId: string, frontier = -1, verifyFrom?: number) {
+  // `axis` names the epoch the held rows were served under; an engine on
+  // another epoch answers cold whatever the frontier says.
+  public attach(sessionId: string, frontier = -1, verifyFrom?: number, axis?: string) {
     this.attachedId = sessionId;
     this.send({
       t: 'attach',
@@ -313,7 +315,8 @@ export class WsEngineClient implements EngineClient {
       ...(verifyFrom !== undefined && verifyFrom >= 0 ? {verifyFrom} : {}),
       // Opening a chat on a page he can see takes its queued banner back on the
       // engine, as a visible frame does; a page in the background never says so.
-      ...(document.hidden ? {} : {visible: true})
+      ...(document.hidden ? {} : {visible: true}),
+      ...(axis ? {axis} : {})
     });
 
     if (this.sealReady() && this.awaitingInboundBy === null) {

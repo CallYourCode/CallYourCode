@@ -78,7 +78,7 @@ import { refreshPiSubagentCache, piSubagentRunsCached } from "../readers/pi-suba
 import { sessions, sessionByHandle, resolveSession, loadSessionState, sessionStateReady,
   agentMetas, blobOwner, restoredChats, chatStore, indexMsgBlobs, agentIdFor,
   chatRefFor, persistPatch, metaFor, scheduleAgentSave, scheduleHeardSave,
-  nameOverrideOf, voiceFor, docDirFor, adoptAgentId,
+  nameOverrideOf, voiceFor, docDirFor, adoptAgentId, axisOf,
   resetForTest as resetSessionState, type Session } from "../sessions/session-state.ts";
 import { initChatlog, logSession, sweepRestoredQueued, resetForTest as resetChatlog } from "../chat/chatlog.ts";
 import { initTts, sweepGrowingClips, resetForTest as resetTts } from "../voice/tts.ts";
@@ -872,6 +872,7 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
         broadcastSessions: () => broadcastSessions(),
         scheduleHeardSave: (id) => scheduleHeardSave(id),
         log: (e, f) => log(e, f),
+        axisOf: (id) => axisOf(id),
       });
     }
 

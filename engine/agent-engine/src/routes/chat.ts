@@ -12,7 +12,7 @@ import { searchableText } from "../chat/chatmsg.ts";
 import { json, requireOwner } from "../transport/httpx.ts";
 import { normalizeQuery, scanChat } from "../chat/chat-search.ts";
 import { rowsBySeq } from "../chat/chatstore.ts";
-import { chatStore, metaFor, nameOverrideOf, restoredChats, restoredLogs, scheduleAgentSave, sessions } from "../sessions/session-state.ts";
+import { nameOverrideOf, restoredChats, restoredLogs, rewriteLog, axisOf, sessions } from "../sessions/session-state.ts";
 
 export async function chatRoutes(ctx: RoutesCtx, req: Request, url: URL, path: string,
   server: import("bun").Server): Promise<Response | null> {
@@ -35,7 +35,9 @@ export async function chatRoutes(ctx: RoutesCtx, req: Request, url: URL, path: s
       const s = sessions.get(id);
       if (!s) return json({ error: "no such session", known: false }, 404);
       const n = Math.max(0, Math.floor(Number(mPage[2])));
-      return json(wirePage(s, n));
+      // the axis epoch this page is cut from: a device stamped with another
+      // drops its rows instead of filing this page among them
+      return json({ ...wirePage(s, n), axis: axisOf(id) });
     }
   }
 
@@ -129,22 +131,15 @@ export async function chatRoutes(ctx: RoutesCtx, req: Request, url: URL, path: s
     const floor = s.chat.length ? s.chat[0].seq : (keep ? -1 : Infinity);
     s.log = s.log.filter((r) => r.seq >= floor);
     /* The new file starts its seq axis at 0: renumber the merged rows in
-     * storage order so the pages are dense again. */
+     * storage order so the pages are dense again. A new axis: a new file and a
+     * new epoch from this instant, and every write from now on goes to the new
+     * file (session-state.ts rewriteLog). Append-only rule: a trim never
+     * rewrites lines; the old file stays as history. */
     rowsBySeq(s.chat, s.log).forEach((r, i) => { r.seq = i; });
     bumpRowsGen(s); // both arrays were replaced and re-sequenced: drop the cache
     restoredChats.delete(id);
     restoredLogs.delete(id);
-    /* Append-only rule: a trim never rewrites lines. The kept tail becomes a
-     * NEW chat file and the meta pointer flips; the old file stays as history. */
-    try {
-      const meta = metaFor(id);
-      const cid = await chatStore.writeNew(meta.agentId, s.chat as unknown as Parameters<typeof chatStore.writeNew>[1], s.log);
-      meta.chat = cid;
-      meta.chats = [...(meta.chats ?? []), { id: cid, createdAt: Date.now() }];
-      scheduleAgentSave(id);
-    } catch (e) {
-      console.error("[chat] trim rewrite failed:", e);
-    }
+    await rewriteLog(id, s.chat, s.log);
     /* No broadcast. This is a TEST/admin path (the name must start with TEST- and
      * echo exactly), so nothing is watching a trimmed session live. The app has
      * no decode for a mid-session trim: a `log-trimmed` frame was sent and never

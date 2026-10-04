@@ -61,7 +61,7 @@ import { initShowHandler, deliverShow, type ShowSession } from "../chat/show-han
 import { sessions, sessionByHandle, resolveSession, loadSessionState, sessionStateReady, agentMetas,
   blobOwner, restoredChats, restoredLogs, chatStore, indexMsgBlobs, agentIdFor, chatRefFor, persistPatch, metaFor,
   scheduleAgentSave, scheduleHeardSave, nameOverrideOf, voiceOverrideOf, setVoiceOverride, adoptAgentId,
-  globalVoice, setDefaultVoice, voiceFor, docDirFor, type Session } from "../sessions/session-state.ts";
+  globalVoice, setDefaultVoice, voiceFor, docDirFor, axisOf, type Session } from "../sessions/session-state.ts";
 import { initPaneDeliver, onPaneKeyboard, deliverToPane } from "../chat/pane-deliver.ts";
 import { initDeliver, inOrder, injectUserMessage, deliverToAgent, redriveTaken, drainDeliveries,
   failUndeliveredNote,
@@ -836,6 +836,7 @@ initAttach({
   broadcastSessions: () => broadcastSessions(),
   scheduleHeardSave: (id) => scheduleHeardSave(id),
   log: (e, f) => LOG.line(e, f),
+  axisOf: (id) => axisOf(id),
 });
 
 /** Everything this engine will promise an app it can do. See the `can` frame.

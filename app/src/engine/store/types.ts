@@ -14,6 +14,11 @@ export type CycEngineSession = CycSession & {
 
   sessionAgentId?: string;
   claudeSessionId: string | null;
+  /* THE CHAT LOG'S AXIS EPOCH as the engine last stated it (roster, attach-ok),
+   * persisted with the roster so a cold open knows it before any network: the
+   * open compares it with the epoch its stored rows carry (rows/repl.ts) and
+   * drops a dead axis before painting it. Absent from an older engine. */
+  axis?: string;
   /** the session records held for this agent: rows of the same pages as
    *  `messages`, kept apart so the chat surface can merge them by ts */
   events: CycSessionEvent[];

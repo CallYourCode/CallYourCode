@@ -142,6 +142,7 @@ export function decodePage(p: any): EnginePage {
     version: Number(p?.version) || 0,
     sealed: p?.sealed === true,
     messages,
-    events
+    events,
+    ...(typeof p?.axis === 'string' && p.axis ? {axis: p.axis} : {})
   };
 }

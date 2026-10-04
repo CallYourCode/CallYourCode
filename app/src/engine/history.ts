@@ -107,6 +107,7 @@ export type StoredSession = Pick<
   | 'turnSince'
   | 'replyLevel'
   | 'claudeSessionId'
+  | 'axis'
   | 'settings'
   | 'muted'
   | 'ask'
