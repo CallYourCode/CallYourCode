@@ -6,6 +6,8 @@ import type {HeardPayload, Intent, ProgressPayload, SessionSettingsPayload} from
 import {reportSighting, forgetSighting} from './store/readState';
 export {
   reportSighting,
+  reportSpoken,
+  spokenTsOf,
   forgetSighting,
   effectiveMarkerOf,
   applyBroadcastReadThrough,

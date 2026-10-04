@@ -284,8 +284,14 @@ export class WsEngineClient implements EngineClient {
   }
 
   // True when the frame was written to a sealed pipe (the drain's 'done').
-  public heard(sessionId: string, row: {mid?: string; msgId?: string; ts?: number}): boolean {
+  public heard(
+    sessionId: string,
+    row: {mid?: string; msgId?: string; ts?: number},
+    spoken = false
+  ): boolean {
     const m: Record<string, unknown> = {t: 'heard', id: sessionId};
+    // a clip played to the end: moves how far speech has got, never the marker
+    if (spoken) m.spoken = true;
     if (row.mid) m.mid = row.mid;
     if (row.msgId) m.msgId = row.msgId;
     if (typeof row.ts === 'number' && Number.isFinite(row.ts)) m.ts = row.ts;
@@ -1423,8 +1429,11 @@ export class WsEngineClient implements EngineClient {
            * the accept below re-derives the channel and the post-accept
            * writes pin the NEW identity. Without this, a rebuilt engine sat
            * on "Pairing..." until a reload. */
-          cyclog('e2e.identity-repair', {engine: this.url, uh,
-            why: 'pin mismatch during an explicit pairing; pairing key is the fresh trust'});
+          cyclog('e2e.identity-repair', {
+            engine: this.url,
+            uh,
+            why: 'pin mismatch during an explicit pairing; pairing key is the fresh trust'
+          });
           chan = await SecureChannel.accept(offer, secFrame, null);
         } else {
           const err = new Error('sec: engine identity changed') as Error & {userHost?: string};

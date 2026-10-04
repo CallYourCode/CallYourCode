@@ -128,6 +128,11 @@ export type EngineSession = {
    * read yet; absent from an engine older than this field, where `heardTs`
    * above is the only marker. */
   readThrough?: EngineReadThrough | null;
+  /* HOW FAR SPEECH HAS GOT: the instant of the newest agent row whose clip,
+   * and every clip before it, a device played to the end. Not read state (the
+   * count and divider ignore it); speech on every device skips clips at or
+   * before it. Absent from an older engine: nothing known spoken. */
+  spokenTs?: number;
   order?: number;
 
   ask?: EngineAsk | null;

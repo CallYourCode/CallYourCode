@@ -302,6 +302,7 @@ export function onProgress(m: any) {
 export function setHeardBack(s: AttachSession, ts: number): boolean {
   if (ts >= s.heardTs) return false;
   s.heardTs = ts;
+  if ((s.spokenTs ?? 0) > ts) s.spokenTs = ts; // moved back on purpose: speak it again
   let lastClaude = 0;
   for (let i = s.chat.length - 1; i >= 0; i--) {
     if (s.chat[i].role === "claude") { lastClaude = s.chat[i].ts; break; }

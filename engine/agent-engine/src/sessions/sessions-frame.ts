@@ -190,6 +190,11 @@ export function sessionList(ordered: readonly Session[] = orderedSessions()) {
        * this is the authority the current app reads. Null when nothing is
        * read yet. */
       readThrough: readThroughOf(s) ?? null,
+      /* HOW FAR SPEECH HAS GOT (readstate.markSpoken): a device skips every
+       * clip at or before it, so a clip heard to the end on one device, or
+       * before a reload, is never spoken again. Not read state: the count and
+       * the divider ignore it. */
+      spokenTs: s.spokenTs ?? 0,
       /* The title, ready to render (title.ts).
        *
        * `workspace` and `tab` deliberately do NOT go on the wire any more.

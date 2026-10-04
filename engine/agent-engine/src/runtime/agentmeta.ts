@@ -33,6 +33,8 @@ export type AgentRead = {
   seenDoneSeq: number;
   notified?: boolean;
   filedTs?: number;
+  /* how far speech has got (readstate.markSpoken); absent = nothing spoken */
+  spokenTs?: number;
 };
 
 export type AgentMeta = {

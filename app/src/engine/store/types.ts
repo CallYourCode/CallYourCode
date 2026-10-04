@@ -19,6 +19,8 @@ export type CycEngineSession = CycSession & {
   events: CycSessionEvent[];
   agentRuns: EngineAgentRun[];
   heardTs?: number;
+  /* How far speech has got, as last broadcast (contract EngineSession.spokenTs). */
+  spokenTs?: number;
   /* THE ENGINE'S READ-THROUGH ROW IDENTITY as last broadcast (fix-unread):
    * the durable key and instant of the newest row read, session-global across
    * every device. The one authority the divider, landing and speech anchor on,

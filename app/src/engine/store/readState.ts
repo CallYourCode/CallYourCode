@@ -24,8 +24,12 @@ export type ReadMarker = {mid?: string; ts: number};
  * is at most one (heard intents coalesce per session, keeping the furthest ts),
  * so the overlay is read straight off the intent rather than mirrored in a
  * second store that could drift from it. */
+const isSpoken = (i: Intent) => (i.payload as HeardPayload).spoken === true;
+
 function pendingOf(sessionId: string): ReadMarker | undefined {
-  const i = intents.all().find((x) => x.kind === 'heard' && x.sessionId === sessionId);
+  const i = intents
+    .all()
+    .find((x) => x.kind === 'heard' && x.sessionId === sessionId && !isSpoken(x));
   if (!i) return undefined;
   const p = i.payload as HeardPayload;
   if (!Number.isFinite(p.ts)) return undefined;
@@ -193,8 +197,46 @@ export function __resetReadStateFreshForTest(): void {
  * cannot immediately re-mark the chat read while the engine moves its marker
  * back. The engine stays the authority; this only clears the local overlay. */
 export function forgetSighting(sessionId: string): void {
-  const i = intents.all().find((x) => x.kind === 'heard' && x.sessionId === sessionId);
-  if (i) intents.remove(i.id);
+  // the engine moves speech back with the marker, so a queued spoken mark goes too
+  for (const i of intents.all()) {
+    if (i.kind === 'heard' && i.sessionId === sessionId) intents.remove(i.id);
+  }
+}
+
+/* HOW FAR SPEECH HAS GOT for a session: the engine's broadcast, or this
+ * device's own queued report if that is further (it survives a reload with the
+ * intent). 0 when nothing is known spoken. */
+export function spokenTsOf(s: CycEngineSession): number {
+  const i = intents.all().find((x) => x.kind === 'heard' && x.sessionId === s.id && isSpoken(x));
+  const queued = i ? (i.payload as HeardPayload).ts : 0;
+  return Math.max(s.spokenTs ?? 0, Number.isFinite(queued) ? queued : 0);
+}
+
+/* REPORT HOW FAR SPEECH HAS GOT: a clip played to the end, with every clip
+ * before it (heardProgress decides the run). The same durable heard intent as a
+ * sighting, under its own coalesce key and flagged `spoken`, so the engine
+ * records it on its second fact and never on the read marker. Forward only. */
+export function reportSpoken(
+  sessionId: string,
+  row: {mid?: string; msgId?: string; ts: number}
+): void {
+  const s = sessions.get(sessionId);
+  if (!s || !Number.isFinite(row.ts) || row.ts <= spokenTsOf(s)) return;
+  intents.put({
+    id: 'spoken:' + sessionId + ':' + (crypto.randomUUID?.() ?? Date.now().toString(36)),
+    engineKey: s.engineKey,
+    sessionId,
+    kind: 'heard',
+    coalesceKey: 'spoken:' + sessionId,
+    payload: {
+      paneId: s.paneId,
+      mid: row.mid,
+      msgId: row.msgId,
+      ts: row.ts,
+      spoken: true
+    } satisfies HeardPayload
+  });
+  drain.kick(s.engineKey);
 }
 
 export function reportSighting(
@@ -227,7 +269,7 @@ drain.registerExecutor('heard', (intent: Intent): DrainOutcome => {
   const p = intent.payload as HeardPayload;
   const owner = connOf(intent.engineKey);
   if (!owner) return 'transient';
-  return owner.client.heard(p.paneId, {mid: p.mid, msgId: p.msgId, ts: p.ts})
+  return owner.client.heard(p.paneId, {mid: p.mid, msgId: p.msgId, ts: p.ts}, p.spoken === true)
     ? 'done'
     : 'transient';
 });

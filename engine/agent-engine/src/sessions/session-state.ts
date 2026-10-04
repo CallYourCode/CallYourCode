@@ -80,6 +80,11 @@ export type Session = {
   seenDoneSeq: number; // the doneSeq that was current when the chat was opened
   /* THE READ MARKER, exactly one per session: a timestamp. */
   heardTs: number;
+  /* HOW FAR SPEECH HAS GOT: the newest agent row whose clip, and every clip
+   * before it, a device played to the end. A SECOND fact beside the marker,
+   * never the marker: hearing a clip must not read the unseen rows above it
+   * (owner, 2026-10-03), but no device may speak it again. readstate.ts. */
+  spokenTs?: number;
   /* THE NOTIFICATION FLAG: a SECOND fact, never the marker. */
   notified: boolean;
   /* The ceiling's clock: how long the engine has chosen to stay quiet. */
@@ -151,7 +156,7 @@ export type SeenRec = { doneSeq: number; seenDoneSeq: number };
  *  a not-yet-seen pane restores from. Keyed by agentId, like everything. */
 export type SessionState = {
   display: { name?: string; voice?: string; photo?: PhotoRec; settings?: SessionSettings };
-  read: { heardTs?: number; seen?: SeenRec; notified?: boolean; filedTs?: number };
+  read: { heardTs?: number; seen?: SeenRec; notified?: boolean; filedTs?: number; spokenTs?: number };
 };
 
 const stateByAgent = new Map<string, SessionState>();
@@ -278,6 +283,9 @@ export function restoredNotifiedOf(id: string): boolean | undefined {
 }
 export function restoredFiledOf(id: string): number | undefined {
   return peek(id)?.read.filedTs;
+}
+export function restoredSpokenOf(id: string): number | undefined {
+  return peek(id)?.read.spokenTs;
 }
 
 /* This session's marker, and it is scheduled to disk before this returns: a
@@ -487,6 +495,7 @@ export async function loadSessionState(d: SessionStateDeps): Promise<void> {
       if (Number.isFinite(r.heardTs)) read.heardTs = Number(r.heardTs);
       if (r.notified === true) read.notified = true;
       if (Number.isFinite(r.filedTs) && Number(r.filedTs) > 0) read.filedTs = Number(r.filedTs);
+      if (Number.isFinite(r.spokenTs) && Number(r.spokenTs) > 0) read.spokenTs = Number(r.spokenTs);
       if (Number.isFinite(r.doneSeq) || Number.isFinite(r.seenDoneSeq)) {
         read.seen = { doneSeq: Number(r.doneSeq) || 0, seenDoneSeq: Number(r.seenDoneSeq) || 0 };
       }
@@ -643,14 +652,16 @@ export function buildAgentMeta(meta: AgentMeta): void {
     if (!meta.cwd && s.cwd) meta.cwd = s.cwd;
     put("read", { heardTs: s.heardTs, doneSeq: s.doneSeq, seenDoneSeq: s.seenDoneSeq,
       ...(s.notified ? { notified: true } : {}),
-      ...(s.filedTs ? { filedTs: s.filedTs } : {}) });
+      ...(s.filedTs ? { filedTs: s.filedTs } : {}),
+      ...(s.spokenTs ? { spokenTs: s.spokenTs } : {}) });
   } else {
     const read = st?.read;
     if (read && (read.heardTs !== undefined || read.seen || read.notified || read.filedTs)) {
       put("read", { heardTs: read.heardTs ?? 0, doneSeq: read.seen?.doneSeq ?? 0,
         seenDoneSeq: read.seen?.seenDoneSeq ?? 0,
         ...(read.notified ? { notified: true } : {}),
-        ...(read.filedTs ? { filedTs: read.filedTs } : {}) });
+        ...(read.filedTs ? { filedTs: read.filedTs } : {}),
+        ...(read.spokenTs ? { spokenTs: read.spokenTs } : {}) });
     } else {
       put("read", undefined);
     }
