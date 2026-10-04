@@ -369,6 +369,68 @@ export function createComposer({
   container.append(composerRowsOuter);
   el.append(container);
 
+  const focusAtEnd = () => {
+    input.focus({preventScroll: true});
+
+    const selection = window.getSelection();
+    if (selection) {
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+  };
+
+  // The composer's own surface is the input box: a press on the pill itself, the
+  // blocks row or the text line that does not land on a control focuses the
+  // input (the band under the reply card, the strips around the text, a quote
+  // card). Panels docked into the pill with their own interaction (the ask
+  // panel, plugin dials) are siblings of the blocks row and the line, so they
+  // are outside the surface.
+  //
+  // The decision is read off pointerdown, the true hit. A touch tap's mouse
+  // events and click are retargeted by the browser to a nearby control (WebKit
+  // snaps a tap just under the reply card onto it), so they only act on what
+  // pointerdown saw.
+  const CONTROL =
+    'button, a[href], input, textarea, select, label, [role="button"], [role="slider"], ' +
+    '[tabindex], cyc-voice-card, .cyc-attach-chip, .cyc-rec-panel, ' +
+    '.cyc-block-reply .cyc-reply.cyc-callout-surface';
+  const onSurface = (t: Element) =>
+    t === composerRows || blocksRow.contains(t) || composerLine.contains(t);
+  const controlOf = (t: Element) => {
+    const c = t.closest(CONTROL);
+    return c && composerRows.contains(c) ? c : null;
+  };
+  let surfacePress = false;
+  composerRows.addEventListener('pointerdown', (e) => {
+    surfacePress = false;
+    const t = e.target as Element;
+    if (!e.isPrimary || e.button !== 0 || disabled || input.contains(t) || !onSurface(t)) return;
+    // A press on a scrollbar (outside the target's client box) is the scroller's.
+    // Inline targets have no client box (clientWidth 0) and no scrollbar.
+    if (t.clientWidth && (e.offsetX >= t.clientWidth || e.offsetY >= t.clientHeight)) return;
+    surfacePress = !controlOf(t);
+  });
+  composerRows.addEventListener('mousedown', (e) => {
+    if (!surfacePress) return;
+    // Keep the press from blurring the input, then put the caret in it.
+    e.preventDefault();
+    if (document.activeElement !== input) focusAtEnd();
+  });
+  composerRows.addEventListener(
+    'click',
+    (e) => {
+      // detail 0 is a keyboard click: it follows no press of ours.
+      if (!surfacePress || e.detail === 0) return;
+      surfacePress = false;
+      // A surface press whose click the browser retargeted onto a control.
+      if (controlOf(e.target as Element)) e.stopPropagation();
+    },
+    {capture: true}
+  );
+
   input.addEventListener('paste', (e) => {
     const data = (e as ClipboardEvent).clipboardData;
     const file = pasteImageFile(data);
@@ -449,18 +511,7 @@ export function createComposer({
     setLive,
     setLivePartial,
     setTranscribing,
-    focus() {
-      input.focus({preventScroll: true});
-
-      const selection = window.getSelection();
-      if (selection) {
-        const range = document.createRange();
-        range.selectNodeContents(input);
-        range.collapse(false);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      }
-    },
+    focus: focusAtEnd,
     clear: field.clear,
     getDraft: field.getDraftText,
     setDraft: field.setDraft,
