@@ -63,13 +63,13 @@ export function audioMessage(
   }
   docWrapper.append(transcript);
 
-  // A failed send whose recording is still on this device (clipKey kept, not
-  // clipLost) can be resent from the original bytes, and a note the engine
-  // gave up on (undelivered) from the clip the engine keeps: say so, rather
-  // than the "recording was not saved" copy that only fits a note whose clip
-  // is gone. A refusal with a reason (the engine's size cap) names the reason.
-  const failed = m.status === 'failed' || !!m.undelivered;
-  const keptForRetry = (failed && !!m.clipKey && !m.clipLost) || !!m.undelivered;
+  // A failed send whose recording is still on this device (clipKey kept), or
+  // on the engine (msgId, not clipLost), can be resent: say so, rather than the
+  // "recording was not saved" copy that only fits a note whose clip is gone.
+  // A refusal with a reason (the engine's size cap) names the reason instead.
+  const failed = m.status === 'failed';
+  const onEngine = !!(m as CycMessage & {msgId?: string}).msgId;
+  const keptForRetry = failed && !m.clipLost && (!!m.clipKey || onEngine);
   const failedCopy = m.failReason
     ? `not sent: ${m.failReason}`
     : 'not sent, and the recording was not saved';
@@ -92,8 +92,8 @@ export function audioMessage(
     note.append(
       makeIcon('deliveryFailed'),
       keptForRetry
-        ? m.undelivered
-          ? `Not sent: ${m.undelivered} Tap to try again`
+        ? m.failReason
+          ? `Not sent: ${m.failReason} Tap to try again`
           : 'Not sent: tap to try again'
         : failed
           ? failedCopy

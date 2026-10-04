@@ -76,7 +76,8 @@ export function findLocalFor(
     const ex = x as CycEngineMessage;
     if (x.role !== 'user' || ex.dedupeKey) return false;
     if (m.cid && ex.cid === m.cid) return true;
-    if (m.msgId && ex.msgId === m.msgId) return true;
+    // two cids that differ are two sends, even of one clip (a retry, `<cid>-r`)
+    if (m.msgId && ex.msgId === m.msgId) return !(m.cid && ex.cid);
     if (m.cid) return false;
     if (x.status !== 'sending' && x.status !== 'sent') return false;
     return x.text === displayText || ex.wireText === displayText;
@@ -147,7 +148,12 @@ export function adoptEngineRow(
   if (m.queued) local.queued = true;
 
   if (m.transcriptPending) local.transcriptPending = true;
+  // the engine's mark, set or (its retry delivered) cleared
   if (m.undelivered) local.undelivered = m.undelivered;
+  else if (local.undelivered) {
+    delete local.undelivered;
+    delete local.failReason;
+  }
 
   if (m.seq !== undefined) local.seq = m.seq;
   // THE OWN ROW IS DELIVERED: report a SIGHTING of it by its durable identity

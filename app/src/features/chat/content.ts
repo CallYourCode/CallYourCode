@@ -18,7 +18,6 @@ export function awaitingWords(m: CycMessage): boolean {
     m.role === 'user' &&
     m.kind === 'voice' &&
     m.status !== 'failed' &&
-    !m.undelivered &&
     (m.draftCommitted !== undefined || !m.text.trim())
   );
 }
@@ -28,10 +27,9 @@ export function reachOf(
     dedupeKey?: string;
   }
 ): CycReach {
-  if (m.undelivered) return 'failed';
+  if (m.status === 'failed') return 'failed';
   if (m.dedupeKey || m.status === 'delivered') return 'session';
   if (m.queued) return 'app';
-  if (m.status === 'failed') return 'failed';
   if (m.status === 'sending') return 'app';
   return 'engine';
 }

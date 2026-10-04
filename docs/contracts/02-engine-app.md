@@ -123,11 +123,16 @@ readable as a box, someone else's text in it, a long paste the harness
 collapsed, a harness this engine cannot parse such as pi or codex) is not
 guessed at: nothing is pressed, the box is left alone, and the send fails
 visibly with a retry. A pending voice note whose completion is refused this
-way stops being pending and its row carries `undelivered: <reason>`, which
-every device reads to show it failed (after any reload or restart). Its retry
-is a new send, cid `<cid>-r`, naming the same clip with an empty body; the
-engine puts the words into the quote and caption kept on the failed row
-(`wordsInto`), and the failed row stays. On SIGTERM or
+way stops being pending and its row carries `undelivered: <reason>`; the app
+takes such a row in as a failed send with that reason (one rule, where rows
+enter its store), so every device shows it failed, open or not, after any
+reload or restart. Its retry is a new send, cid `<cid>-r`, naming the same clip
+with an empty body; the engine puts the words into the quote and caption kept
+on the failed row (`wordsInto`) and reads the box by the same rule as a resumed
+drive (type only into a box positively empty, Enter only on exactly this body,
+anything else refused again with the same reason). When the retry is delivered
+the failed row's mark is removed (its rev moves), so every device shows it sent
+and stops offering the retry. On SIGTERM or
 SIGINT the engine drains: no new frame is taken (not acked, so the app sends it
 to the next process), nothing new starts typing (it stays on disk), and the
 deliveries already typing finish, rows on disk, within 10 s; a second signal
@@ -136,7 +141,15 @@ exits at once. A delivery waits only on its own chat file's writes.
 What remains: a kill -9 (or the 10 s bound running out) between the `entering`
 mark and the Enter, with the box then emptied by hand before the restart, is
 taken as delivered; a body a refused drive leaves in the box is submitted with
-the next message typed onto it (crash only).
+the next message typed onto it (crash only), and if that body was a note the
+engine gave up on, its retry afterwards finds the box empty and sends the note
+a second time (the engine cannot tell the glued submission carried it). As on main: when herdr refuses an
+Enter, the body stays in the box with no stage (a stage lives only while an
+attempt runs), so if the engine restarts (SIGTERM included) before the user's
+retry of that cid, the retry types the body again onto it and the agent gets it
+twice in one message; inside one process the in-memory note makes that retry
+Enter only. herdr refusing a keystroke has not been seen in production since
+2026-08-24.
 
 Failures the sender is told: every refusal of a frame driven after a restart
 (no socket to answer on), a frame driven by three boots without finishing, and

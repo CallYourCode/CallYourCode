@@ -22,7 +22,7 @@ import { attachmentsOf, attachmentFields, uploadIds, type ChatMsg, type UploadRe
 import { persistPatch, type Session } from "../sessions/session-state.ts";
 import { transcribeStored, showPendingVoiceNote, readWords, fillWords, fillNoteWords,
   raceInlineRescue, WORDS_TOKEN_RE, NOTE_UNREAD, wordsToken, type SettledPartial } from "../voice/transcribe.ts";
-import { admitPartial, wordsOf, keptPrefix, release } from "../voice/transcript-record.ts";
+import { admitPartial, wordsOf, keptPrefix, release, reopen } from "../voice/transcript-record.ts";
 import type { ReplyDelivery } from "./reply-trace.ts";
 import type { OutgoingInput } from "../plugins/platform/core.ts";
 import { broadcast, send } from "../transport/wire.ts";
@@ -314,7 +314,9 @@ export async function redriveTaken(s: CidSession & { id: string }): Promise<numb
 /* A PENDING NOTE GIVEN UP ON (transcribe.ts, a completion driven after a
  * restart that the pane refused): the row stops being pending and says why, on
  * disk, so every device shows it failed after any reload or restart. Its retry
- * is a new send naming the same clip (onUtterance, gaveUp). */
+ * is a new send, cid `<cid>-r` (gaveUpFor), that continues this note: its body
+ * is this row's, the box is read as for a resumed drive, and its delivery
+ * clears the mark (commitDelivery). */
 export function failUndeliveredNote(s: Session, ts: number, tell: string): void {
   const row = s.chat.find((r) => r.role === "user" && r.ts === ts);
   if (!row) return;
@@ -322,6 +324,11 @@ export function failUndeliveredNote(s: Session, ts: number, tell: string): void 
   row.undelivered = failReason(tell);
   persistPatch(s.id, ts, { undelivered: row.undelivered }, ["transcriptPending"]);
   broadcast({ t: "chat", ...row });
+}
+
+/** The failed row a `<cid>-r` retry continues, while it is still marked. */
+function gaveUpFor(s: Pick<Session, "chat">, cid: string): ChatMsg | undefined {
+  return s.chat.find((r) => r.role === "user" && r.undelivered && `${r.cid}-r` === cid);
 }
 
 /* A take that will not be delivered: the sender is told (send-failed, and on
@@ -562,9 +569,8 @@ export async function handleUtterance(ws: Sock | null, m: any, takenAt: number) 
   /* THE RETRY OF A NOTE THIS ENGINE GAVE UP ON (failUndeliveredNote): a new cid
    * naming that note's clip, with no body of its own. It goes as the note would
    * have, its words put into the quote and caption kept on the failed row. */
-  const gaveUp = m.kind === "voice" && !text && typeof voice.msgId === "string"
-    ? s.chat.find((r) => r.undelivered && r.msgId === voice.msgId && r.wordsInto && r.cid) : undefined;
-  if (gaveUp) text = gaveUp.wordsInto!.split(wordsToken(gaveUp.cid!)).join(wordsToken(cid));
+  const gaveUp = m.kind === "voice" && !text ? gaveUpFor(s, cid)?.wordsInto : undefined;
+  if (gaveUp) text = gaveUp.split(wordsToken(cid.slice(0, -2))).join(wordsToken(cid));
   const inBody = new Set([...text.matchAll(WORDS_TOKEN_RE)].map((x) => x[1]));
   const asked: string[] = Array.isArray(m.words)
     ? m.words.filter((x: unknown): x is string => typeof x === "string" && !!x) : [];
@@ -609,6 +615,7 @@ export async function handleUtterance(ws: Sock | null, m: any, takenAt: number) 
     }
     /* The streamed words the device settled are the floor for each recording:
      * admit them into the record, then let readWords feed the decode in. */
+    for (const id of want) reopen(id); // a new read of each (a retry reads again)
     for (const [id, p] of partials) admitPartial(id, p);
     const got = want.length ? await readWords(ups, want, cid, partials) : new Map<string, string>();
     /* THE STREAMED WORDS ARE A FLOOR, NOT A DRAFT (#550).
@@ -870,6 +877,13 @@ export const OFFLINE: Injected = { ok: false, retriable: true,
  * cannot land on any other message. */
 export function commitDelivery(s: Session, inj: Injection, ts: number, willQueue: boolean): ChatMsg {
   const { cid, text } = inj;
+  // the note this retry continues is delivered now: its failed mark goes, everywhere
+  const failed = gaveUpFor(s, cid);
+  if (failed) {
+    delete failed.undelivered;
+    persistPatch(s.id, failed.ts, undefined, ["undelivered"]);
+    broadcast({ t: "chat", ...failed });
+  }
   if (inj.completesTs != null) {
     const row = s.chat.find((r) => r.role === "user" && r.ts === inj.completesTs);
     if (row) {
@@ -937,7 +951,9 @@ export async function injectUserMessage(
  * noteCheck), and a retry in this process keeps the in-memory rules. */
 async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
   const { cid, text } = inj;
-  const stage = await stageFor(s.id, cid);
+  /* The retry of a note a boot drive refused continues that drive: what it
+   * left in the box is read by the same rule as a resumed attempt's. */
+  const stage = (await stageFor(s.id, cid)) ?? (gaveUpFor(s, cid) ? "typing" : null);
   /* The agent gets a real path per attachment, in the order they were
    * composed, and the caption (if any) rides along after them. ONE message:
    * several attachments make the line longer, they never

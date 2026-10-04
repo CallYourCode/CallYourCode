@@ -121,7 +121,7 @@ export function installMessageMenu(deps: MessageMenuDeps) {
               }
             ]
           : []),
-        ...(m.role === 'user' && (m.status === 'failed' || m.undelivered)
+        ...(m.role === 'user' && m.status === 'failed'
           ? [
               {
                 icon: 'refresh' as const,
@@ -234,7 +234,7 @@ export function installMessageMenu(deps: MessageMenuDeps) {
     const s = active();
     if (!messageNode?.dataset.mid || !s) return;
     const m = messageOfNode(s, messageNode);
-    if (!m || (m.status !== 'failed' && !m.undelivered)) return;
+    if (!m || m.status !== 'failed') return;
     deps.retrySend(s.id, m.id);
   };
   messageListInner.addEventListener('click', onRetryTap);

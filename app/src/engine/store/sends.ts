@@ -100,7 +100,8 @@ export function __resetForTest(): void {
 }
 
 export function isLocalOnly(m: CycMessage): boolean {
-  return m.status === 'sending' || m.status === 'failed';
+  // a note the engine gave up on is its row, failed, not a local send
+  return (m.status === 'sending' || m.status === 'failed') && !m.undelivered;
 }
 
 // Place a painted bubble in ts order (a resurrected old send sits behind every

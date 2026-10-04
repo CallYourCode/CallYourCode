@@ -14,10 +14,14 @@
  *     growing until the completion row lands (settleTranscript).
  */
 import {describe, expect, test} from 'vitest';
-import {adoptEngineRow} from '../engine/store/admit';
+import {adoptEngineRow, findLocalFor} from '../engine/store/admit';
 import {audioMessage} from '../features/chat/messages/audioMessages';
 import {reachOf} from '../features/chat/content';
-import type {CycMessage} from '../types';
+import {renderMessages, clearMessages} from '../features/chat/surface/messageList';
+import * as rowStore from '../engine/store/rows/rowStore';
+import {messageRow} from '../engine/store/rows/core';
+import {memTx} from './rowStoreFake';
+import type {CycMessage, CycSession} from '../types';
 import type {CycEngineMessage, CycEngineSession} from '../engine/store/types';
 import type {EngineChatMessage} from '../engine/contract';
 
@@ -147,21 +151,28 @@ describe('adoptEngineRow on a streaming voice display', () => {
 });
 
 describe('a note the engine gave up on (undelivered)', () => {
-  // the row exactly as a page or a live frame paints it on any device
-  const row = {
-    id: 'r2',
-    role: 'user',
-    kind: 'voice',
-    text: 'my caption',
-    ts: 1,
-    cid: 'c-old',
-    msgId: 'clip-1',
-    durationS: 30,
-    undelivered: 'the engine restarted while delivering this and cannot tell whether it arrived.'
-  } as unknown as CycMessage;
+  // the row as a page or a live frame brings it, on any device
+  const row = (): CycEngineMessage =>
+    ({
+      id: '',
+      role: 'user',
+      kind: 'voice',
+      text: 'my caption',
+      ts: 1,
+      cid: 'c-old',
+      msgId: 'clip-1',
+      mid: 'mr-9',
+      seq: 5,
+      durationS: 30,
+      status: 'delivered',
+      undelivered: 'the engine restarted while delivering this and cannot tell whether it arrived.'
+    }) as unknown as CycEngineMessage;
 
-  test('is painted failed on any device, says why, and offers the retry', () => {
-    const node = audioMessage(row, true, true, () => {});
+  test('comes into the store failed with the reason, and paints so with the retry', () => {
+    const m = messageRow('e|p1', row()).msg!;
+    expect(m).toMatchObject({status: 'failed', failReason: row().undelivered});
+    expect(reachOf(m)).toBe('failed');
+    const node = audioMessage(m, true, true, () => {});
     expect(node.classList.contains('cyc-msg-failed')).toBe(true);
     const note = node.querySelector('button.cyc-voice-failed');
     expect(note, 'no retry offered').not.toBeNull();
@@ -170,12 +181,79 @@ describe('a note the engine gave up on (undelivered)', () => {
     expect(node.textContent).not.toContain('recording was not saved');
   });
 
+  test('an open chat repaints its pending bubble to failed when the mark arrives', () => {
+    (globalThis as unknown as {IntersectionObserver: unknown}).IntersectionObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    };
+    const inner = document.createElement('div');
+    const scroll = document.createElement('div');
+    scroll.className = 'cyc-message-list-scroll';
+    scroll.append(inner);
+    document.body.append(scroll);
+    const pending = {...row(), text: '> the agent asked\n\nmy caption', transcriptPending: true};
+    delete (pending as Partial<CycEngineMessage>).undelivered;
+    const s = {id: 'e|p1', messages: [messageRow('e|p1', pending).msg!]} as unknown as CycSession;
+    renderMessages(inner, s, () => {});
+    expect(inner.querySelectorAll('.cyc-send-failed').length).toBe(0);
+    const marked = {...pending, undelivered: 'it did not arrive'} as CycEngineMessage;
+    delete marked.transcriptPending;
+    s.messages = [messageRow('e|p1', marked).msg!];
+    renderMessages(inner, s, () => {});
+    expect(
+      inner.querySelectorAll('.cyc-send-failed').length,
+      'the open chat kept the pending node'
+    ).toBe(1);
+    clearMessages(inner);
+    scroll.remove();
+  });
+
+  test('once its retry lands the re-served row, without the mark, is no longer failed', async () => {
+    rowStore.__setBackingForTest(memTx().tx);
+    rowStore.setOpen('e|p1');
+    await rowStore.openWindow('e|p1', 100);
+    await rowStore.upsert('e|p1', [messageRow('e|p1', row())]);
+    expect(rowStore.projection('e|p1').messages[0].status).toBe('failed');
+    const cleared = {...row(), rev: 2} as Partial<CycEngineMessage>;
+    delete cleared.undelivered;
+    delete cleared.status; // a page row carries no status
+    await rowStore.upsert('e|p1', [messageRow('e|p1', cleared as CycEngineMessage)]);
+    const m = rowStore.projection('e|p1').messages[0] as CycEngineMessage;
+    expect(m.status, 'the failed mark was carried over').not.toBe('failed');
+    expect(m.failReason).toBeUndefined();
+    rowStore.__setBackingForTest(null);
+  });
+
+  test('a held failed row (from a page) takes the cleared mark from the live frame', () => {
+    const held = messageRow('e|p1', row()).msg!;
+    const cleared = {...row()} as Partial<CycEngineMessage>;
+    delete cleared.undelivered;
+    adoptEngineRow(mkSession(held), held, engineRow(cleared), 'my caption', 'k8');
+    expect(messageRow('e|p1', held).msg).toMatchObject({status: 'delivered'});
+    expect(held.failReason).toBeUndefined();
+  });
+
+  test("the failed row's cleared frame is never folded into its retry's bubble (same clip)", () => {
+    const retry = mkLocal({cid: 'c-old-r', msgId: 'clip-1', status: 'sending'});
+    const s = mkSession(retry);
+    expect(findLocalFor(s, engineRow({cid: 'c-old', msgId: 'clip-1'}), 'my caption')).toBeUndefined();
+    expect(findLocalFor(s, engineRow({cid: 'c-old-r', msgId: 'clip-1'}), '')).toBe(retry);
+  });
+
   test("the sender's own bubble takes the failure from the row", () => {
     const local = mkLocal({text: 'my words', status: 'sent'});
-    adoptEngineRow(mkSession(local), local,
-      engineRow({text: 'my caption', undelivered: 'it did not arrive'}), 'my caption', 'k9');
-    expect(local.undelivered).toBe('it did not arrive');
-    expect(reachOf(local)).toBe('failed');
+    adoptEngineRow(
+      mkSession(local),
+      local,
+      engineRow({text: 'my caption', undelivered: 'it did not arrive'}),
+      'my caption',
+      'k9'
+    );
+    expect(messageRow('e|p1', local).msg).toMatchObject({
+      status: 'failed',
+      failReason: 'it did not arrive'
+    });
   });
 });
 

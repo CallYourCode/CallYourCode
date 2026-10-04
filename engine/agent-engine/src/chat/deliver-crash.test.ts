@@ -17,7 +17,8 @@
  *   R2 / V5-A..C    a pending note's completion refused after a restart marks
  *                   its row undelivered (every device reads it) and is never
  *                   driven again; its retry is a new cid, delivered once
- *   V5-D            a same-process retry of a voice note reads its words again
+ *   V5-D / V6-attach a same-process retry of a voice note, or of a message
+ *                   with a recording attached, reads its words again
  *   D1 SIGTERM      the drain finishes what is typing and holds the rest
  *   E1-E5           verifier round 3: a stale stage, a refusal with no socket,
  *                   another chat's stuck write, an unreadable box, a draft
@@ -35,6 +36,8 @@ import { takenFor, noteTaken, noteStage, stageFor, type Stage } from "./intake.t
 import { RESCUE_INLINE_MS, wordsToken } from "../voice/transcribe.ts";
 import { QUEUE_STUCK_MS } from "./chatlog.ts";
 import { dispatchClientFrame } from "../transport/frames.ts";
+import { mediaRoutes } from "../routes/media.ts";
+import { serveRoutes, type ServedRoutes } from "../test-utils/serve-routes.ts";
 import { cacheAudio } from "./clips.ts";
 import { chatStore, flushAgentSave, resolveSession } from "../sessions/session-state.ts";
 import { PANE, defaultSessionIdOf } from "../test-utils/fake-herdr.ts";
@@ -47,6 +50,7 @@ const PANE_SID = defaultSessionIdOf(PANE);
 let core: WireCore | null = null;
 let voice: FakeVoice | null = null;
 let gate: Promise<void> = Promise.resolve();
+let http: ServedRoutes | null = null;
 const never = new Promise<void>(() => {});
 
 let failEnter = false;
@@ -66,6 +70,8 @@ afterEach(async () => {
   // whatever is still settling (a row's flush, a take's file) finishes in this wiring
   await until(async () => (await takenFor()).every((t) => t.attempt === "dead"), { timeoutMs: 3000 })
     .catch(() => {});
+  http?.stop();
+  http = null;
   await core?.stop();
   voice?.stop();
   core = null;
@@ -190,23 +196,23 @@ test("D1 completion: a pending note whose completion stopped after its Enter is 
 
 /** A quoted note shown pending, its completion stopped mid-way (`entering`),
  *  and a draft in the box at the next boot: the completion is refused (R2). */
-async function refusedNote(c: WireCore) {
+async function refusedNote(c: WireCore, o: { plain?: boolean; box?: string; keep?: boolean } = {}) {
   const cid = crypto.randomUUID();
   const msgId = crypto.randomUUID();
   await cacheAudio(msgId, new Uint8Array(4096).fill(0x42), "audio/webm");
   gate = never;
   const client = c.client({ attach: wireId(PANE) });
   void onUtterance(client.sock, { t: "utterance", id: wireId(PANE), kind: "voice", msgId, durationS: 900,
-    cid, text: `> the agent asked\n\n${wordsToken(cid)}\n\nmy caption`, words: [cid] });
+    cid, ...(o.plain ? { text: "" } : { text: `> the agent asked\n\n${wordsToken(cid)}\n\nmy caption`, words: [cid] }) });
   await until(() => has(c, cid, "rescue.start"), { what: "the decode to start" });
   await c.clock.advance(RESCUE_INLINE_MS);
   await until(() => has(c, cid, "utterance.shown-pending"), { what: "the note shown pending" });
   await noteStage(sid(), cid, "entering");
-  c.hooks.setInput!(PANE, "my own half typed draft");
+  c.hooks.setInput!(PANE, o.box ?? "my own half typed draft");
   gate = Promise.resolve();
   await restart(c);
   await until(() => has(c, cid, "rescue.complete-failed"), { what: "the refused completion" });
-  c.hooks.setInput!(PANE, "");
+  if (!o.keep) c.hooks.setInput!(PANE, "");
   return { cid, msgId };
 }
 const WHOLE = (words: string) => `VOICE: > the agent asked\n\n${words}\n\nmy caption`;
@@ -246,7 +252,44 @@ test("R2 retry: a new cid naming the clip delivers the note once, quote and capt
     { what: "the retry delivered", timeoutMs: 4000 });
   await new Promise((r) => setTimeout(r, 100));
   expect(c.submitted.map((x) => x.text)).toEqual([WHOLE(voice!.transcript)]);
-  expect(rowsFor(cid)[0].undelivered, "the failed row was changed").toContain("restarted");
+  // the failed row learns it: the mark goes, its rev moves, every device is told
+  expect(rowsFor(cid)[0].undelivered, "the failed row still says it was not sent").toBeUndefined();
+  expect(rowsFor(cid)[0].rev).toBe(2);
+  expect(app.of("chat").some((f) => f.cid === cid && !f.undelivered)).toBe(true);
+});
+
+test("V6-paste: the -r retry finds the refused drive's collapsed paste in the box: nothing typed onto it, refused again", async () => {
+  const c = await boot();
+  const { cid, msgId } = await refusedNote(c, { box: "[Pasted text #1 +5 lines]", keep: true });
+  const app = c.client({ attach: wireId(PANE) });
+  await onUtterance(app.sock, retryFrame(cid, msgId));
+  await until(() => app.of("send-failed").some((f) => f.cid === `${cid}-r`), { what: "the refusal", timeoutMs: 4000 });
+  expect(c.submitted, "the retry was submitted onto what the box held").toEqual([]);
+  expect(c.herdr.rpcs.filter((r) => r.method === "pane.send_text").length, "typed onto the leftover").toBe(0);
+  expect(rowsFor(cid)[0].undelivered).toContain("restarted");
+});
+
+test("R2-chain: the refused note is still in the box (a screen it cannot read plainly): the -r retry is refused again, not typed onto it", async () => {
+  const c = await boot();
+  const note = WHOLE(voice!.transcript);
+  const { cid, msgId } = await refusedNote(c, { box: note, keep: true });
+  const app = c.client({ attach: wireId(PANE) });
+  await onUtterance(app.sock, retryFrame(cid, msgId));
+  await until(() => app.of("send-failed").some((f) => f.cid === `${cid}-r`), { what: "the refusal", timeoutMs: 4000 });
+  expect(c.submitted, "the note was submitted twice in one turn").toEqual([]);
+  expect(c.herdr.rpcs.filter((r) => r.method === "pane.send_text").length).toBe(0);
+});
+
+test("the -r retry finds exactly its own body in the box: Enter only, the note once", async () => {
+  const c = await boot();
+  const { cid, msgId } = await refusedNote(c, { plain: true });
+  const body = `VOICE: ${voice!.transcript}`;
+  c.hooks.setInput!(PANE, body);
+  const app = c.client({ attach: wireId(PANE) });
+  await onUtterance(app.sock, retryFrame(cid, msgId));
+  await until(() => rowsFor(`${cid}-r`).length === 1, { what: "the retry delivered", timeoutMs: 4000 });
+  expect(c.submitted.map((x) => x.text)).toEqual([body]);
+  expect(c.herdr.rpcs.filter((r) => r.method === "pane.send_text").length, "typed again").toBe(0);
 });
 
 test("V5-A: a retry acked and then stopped mid-read by a restart is delivered after it, once", async () => {
@@ -532,4 +575,25 @@ test("E5 (V-draft): `entering`, someone else's draft in the box: the draft is no
   expect(c.submitted.map((x) => x.text), "Enter was pressed on someone else's draft").toEqual([delivered]);
   expect(c.herdr.keys.length, "a key was pressed at the draft").toBe(0);
   expect(app.of("send-failed").some((f) => f.cid === cid)).toBe(true);
+});
+
+test("V6-attach: a same-process retry of a message with a recording attached reads its words again", async () => {
+  const c = await boot({ with: ["delivery", "plugins"] });
+  http = serveRoutes({ groups: [mediaRoutes], ctx: { uploads: c.uploads! } });
+  const bytes = new Uint8Array(4096).map((_, i) => (i * 17 + 3) & 0xff);
+  const up = await (await http.fetch("/upload", { method: "POST", headers: { "content-type": "audio/webm",
+    "x-filename": "v.webm", "x-duration-s": "7" }, body: bytes as unknown as BodyInit })).json();
+  const cid = crypto.randomUUID();
+  const frame = { t: "utterance", id: wireId(PANE), cid, uploads: [up], words: [up.uploadId],
+    text: `look\n\n${wordsToken(up.uploadId)}` };
+  const app = c.client({ attach: wireId(PANE) });
+  failEnter = true;
+  await onUtterance(app.sock, frame);
+  await until(() => has(c, cid, "utterance.delivery-failed"), { what: "the failure" });
+  failEnter = false;
+  c.hooks.setInput!(PANE, ""); // the box emptied: the retry types fresh
+  await onUtterance(app.sock, frame);
+  await until(() => c.submitted.length === 1, { what: "the retry" });
+  expect(c.submitted[0].text).toContain(voice!.transcript);
+  expect(rowsFor(cid)[0].wordsFailed).toBeUndefined();
 });
