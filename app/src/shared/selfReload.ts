@@ -83,17 +83,21 @@ export function readReloadDeparture(): ReloadDeparture | null {
 // reload's composer hold), re-decided every tick and at once when the app
 // goes to the background.
 // The gate holds ONE pending self-navigation; callers keep no flags of their
-// own. Merge rule: a new request replaces the pending one unless it would wait
-// longer, i.e. unless it brings a hold of its own. So a missing chunk or a user
-// action (no hold) replaces an update reload held by a draft and goes now; an
-// update reload (draft hold) never replaces a hold-free pending one, which
-// keeps its own `before` (the missing-chunk loop guard). A hatch navigation is
-// not tried when the server does not answer (asked, not read from
-// navigator.onLine: Playwright's WebKit always says false, and true is no
-// promise of a network); it stays pending: the next foreground, online edge or
-// request decides again. A user action says "You're offline" once per offline
-// spell (never on a hide edge); automatic reloads stay silent. A page still alive ALIVE_MS after its navigation (it failed)
-// lets that pending navigation be decided again the same way.
+// own. A new request never makes the pending one wait longer, and never
+// restarts its clocks (the 4 s worker wait counts from the first request):
+//  - a request with a hold of its own (an update reload) leaves it as it is;
+//  - a user action (it has a notice) takes over, with its destination;
+//  - an automatic request with no hold (a missing chunk) relaxes the pending
+//    one: a pending user action keeps its destination; a pending update
+//    reload loses its draft hold and goes now, running both `before`s (the
+//    update's departure record and the chunk's loop guard).
+// A hatch navigation is not tried when the server does not answer (asked, not
+// read from navigator.onLine: Playwright's WebKit always says false, and true
+// is no promise of a network); it stays pending: the next foreground, online
+// edge or request decides again. A user action says "You're offline" once per
+// offline spell (never on a hide edge); automatic reloads stay silent. A page
+// still alive ALIVE_MS after its navigation (it failed) lets that pending
+// navigation be decided again the same way.
 
 export type SelfNavDeps = {
   workerWaiting: () => Promise<boolean>;
@@ -240,9 +244,26 @@ export function createSelfNavGate(deps: SelfNavDeps): (nav: SelfNav) => void {
       subscribed = true;
       deps.onEdge(() => void tick());
     }
-    if (pending && nav.hold) return void tick();
-    pending = {nav, since: deps.now(), waitingSince: -1};
-    later(nav.firstTickMs ?? 0);
+    if (!pending) {
+      pending = {nav, since: deps.now(), waitingSince: -1};
+      return later(nav.firstTickMs ?? 0);
+    }
+    const old = pending.nav;
+    if (nav.notice) {
+      pending.nav = nav;
+      if (pending.waitingSince >= 0) deps.notify(nav.notice);
+    } else if (!nav.hold && !old.notice) {
+      pending.nav = {
+        ...old,
+        why: nav.why,
+        hold: undefined,
+        before: (at) => {
+          old.before?.(at);
+          nav.before?.(at);
+        }
+      };
+    }
+    void tick();
   };
 }
 

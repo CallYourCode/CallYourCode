@@ -267,6 +267,10 @@ test('a missing chunk during a draft-held update reload reloads at once', async 
       })
       .toEqual([stampA, stampB]);
     expect(log.since('nav.go', at)[0]?.field('why')).toBe('chunk-missing');
+    // The update's departure record was written too: this boot names A -> B.
+    expect(log.of('reload.landed').map((l) => [l.field('from'), l.field('to')])).toEqual([
+      [stampA, stampB]
+    ]);
     await page.waitForSelector('.cyc-message-list-scroll', {timeout: 15_000});
     await expect(page.locator(INPUT)).toHaveText(DRAFT, {timeout: 10_000});
   } catch (e) {

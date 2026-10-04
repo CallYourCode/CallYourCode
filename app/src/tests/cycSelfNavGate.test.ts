@@ -34,6 +34,7 @@ function rig(init: {waiting?: boolean; online?: boolean} = {}) {
     async step(ms = 300) {
       const until = st.now + ms;
       for (;;) {
+        await new Promise((x) => setTimeout(x, 0)); // let a running tick reschedule
         const due = timers.filter((t) => t.at <= until).sort((a, b) => a.at - b.at)[0];
         if (!due) break;
         timers = timers.filter((t) => t !== due);
@@ -191,7 +192,7 @@ describe('self-navigation gate', () => {
 
   // A missing chunk while the update reload is held by a draft was held by
   // that draft (it re-used the pending navigation and its hold).
-  test('a missing chunk replaces a draft-held update reload and goes now, with its own guard', async () => {
+  test('a missing chunk relaxes a draft-held update reload: it goes now, both befores run', async () => {
     const r = rig();
     const gate = createSelfNavGate(r.deps);
     const ran: string[] = [];
@@ -205,8 +206,67 @@ describe('self-navigation gate', () => {
     expect(r.went).toEqual([]);
     gate({why: 'chunk-missing', before: () => void ran.push('chunk')});
     await r.step();
-    expect(r.went).toEqual([null]);
-    expect(ran).toEqual(['chunk']);
+    expect(r.went).toEqual(['/?b=1']);
+    expect(ran, "the update's departure record and the chunk's loop guard").toEqual([
+      'update',
+      'chunk'
+    ]);
+  });
+
+  // LOW-1 (verifier round 5): a missing chunk replaced a pending user action,
+  // so a sign-out landed on the current URL and an engine switch was undone.
+  test('a missing chunk never replaces a pending user action: it keeps its destination', async () => {
+    for (const online of [true, false]) {
+      const r = rig({waiting: true, online});
+      const gate = createSelfNavGate(r.deps);
+      const ran: string[] = [];
+      gate({
+        why: 'engine-switch',
+        notice: 'Reloading…',
+        to: () => '/?x=1',
+        before: () => void ran.push('pin')
+      });
+      await r.step(1000);
+      gate({why: 'chunk-missing', before: () => void ran.push('chunk')});
+      await r.step(WAITING_MAX_MS);
+      if (!online) {
+        r.st.online = true;
+        r.edge();
+        await r.step(0);
+      }
+      expect(r.went, `online=${online}`).toEqual(['https://app.example/?x=1&cyc-net=1']);
+      expect(ran).toEqual(['pin']);
+      expect(r.logs.find(([e]) => e === 'nav.go')?.[1].why).toBe('engine-switch');
+    }
+  });
+
+  // LOW-2 (verifier round 5): every request restarted the 4 s worker-wait
+  // clock, so missing chunks 2 s apart postponed the hatch without bound.
+  test('repeated requests never restart the worker-wait clock', async () => {
+    const r = rig({waiting: true});
+    const gate = createSelfNavGate(r.deps);
+    for (let i = 0; i < 6; i++) {
+      gate({why: 'chunk-missing'});
+      await r.step(i < 2 ? 2000 : 0);
+      if (r.went.length) break;
+    }
+    await r.step(500);
+    expect(r.went).toHaveLength(1);
+    expect(r.st.now, 'the hatch went long after the first request').toBeLessThanOrEqual(
+      WAITING_MAX_MS + 600
+    );
+  });
+
+  test('a user action taking over while the worker waits says so at once, on the same clock', async () => {
+    const r = rig({waiting: true});
+    const gate = createSelfNavGate(r.deps);
+    gate({why: 'chunk-missing'});
+    await r.step(3000);
+    gate({why: 'sign-out', notice: 'Signing out…', to: () => '/'});
+    await r.step(0);
+    expect(r.said).toEqual(['Signing out…']);
+    await r.step(1600);
+    expect(r.went).toEqual(['https://app.example/?cyc-net=1']);
   });
 
   test('an update reload never replaces a hold-free pending navigation', async () => {

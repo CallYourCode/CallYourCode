@@ -119,9 +119,10 @@ test('offline, a sign-out held by a waiting worker says so once, and a later one
     // Two taps and a few hide/show edges in one offline spell: told once.
     for (let i = 1; i <= 2; i++) {
       await signOut();
+      // one hold: the second tap takes over the pending one on the same clock
       await expect
         .poll(() => log.of('nav.held').length, {timeout: 10_000, message: `sign-out ${i} not held`})
-        .toBe(i);
+        .toBe(1);
       await page.waitForTimeout(5000);
       for (const hidden of [true, false]) {
         await page.evaluate((h) => {
@@ -205,3 +206,64 @@ for (const why of ['update', 'chunk-missing'] as const) {
     }
   });
 }
+
+const missingChunk = (page: Page) =>
+  page.evaluate(
+    () =>
+      void (
+        window as unknown as {__cycLazyImport: (p: string, w: string) => Promise<string>}
+      ).__cycLazyImport('/assets/gone-chunk-0000.js?t=' + Date.now(), 'the probe chunk')
+  );
+
+// LOW-1 (verifier round 5): a missing chunk replaced a pending sign-out, which
+// then landed on the current URL instead of '/'. A user action keeps its
+// destination; the chunk's request only relaxes it.
+test('a missing chunk during a held sign-out still signs out to /', async ({page}) => {
+  test.setTimeout(120_000);
+  const {dirs, stamps, host, rig, log} = await setUp(page);
+  try {
+    await parkB(page, host.origin, dirs[1]);
+    await page.evaluate(
+      () => void (window as unknown as {__cycSignOut: () => Promise<void>}).__cycSignOut()
+    );
+    await expect.poll(() => log.of('nav.held').length, {timeout: 10_000}).toBe(1);
+    await missingChunk(page);
+    await expect
+      .poll(() => builds(log), {timeout: 15_000, message: 'the sign-out never went'})
+      .toEqual([stamps[0], stamps[1]]);
+    expect(log.of('nav.go').map((l) => l.field('why'))).toEqual(['sign-out']);
+    expect(new URL(page.url()).pathname).toBe('/');
+  } finally {
+    host.proc.kill();
+    await rig.close();
+  }
+});
+
+// LOW-2 (verifier round 5): every request restarted the 4 s worker-wait
+// clock, so missing chunks 2 s apart postponed the hatch past the last one.
+test('repeated missing chunks never postpone the hatch past 4 s after the first', async ({
+  page
+}) => {
+  test.setTimeout(120_000);
+  const {dirs, stamps, host, rig, log} = await setUp(page);
+  try {
+    await parkB(page, host.origin, dirs[1]);
+    // A missing chunk every 2 s (6 at most) until B lands; measured from the
+    // first one, not from the gate's own clock.
+    const at = Date.now();
+    let landedAt = 0;
+    for (let i = 0; i < 6 && !landedAt; i++) {
+      await missingChunk(page).catch(() => {}); // the page may be navigating
+      for (let t = 0; t < 10 && !landedAt; t++) {
+        await page.waitForTimeout(200);
+        if (builds(log).length >= 2) landedAt = Date.now();
+      }
+    }
+    expect(builds(log)).toEqual([stamps[0], stamps[1]]);
+    expect(landedAt - at, 'the hatch was postponed by the later chunks').toBeLessThan(6_500);
+    expect(log.since('nav.go', at)[0]?.field('viaNetwork')).toBe('true');
+  } finally {
+    host.proc.kill();
+    await rig.close();
+  }
+});
