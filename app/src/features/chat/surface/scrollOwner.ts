@@ -85,6 +85,8 @@ export interface ScrollOwnerDeps {
   modelTop(): number;
   nearBottomPx(): number;
   isPinned(): boolean;
+  // Re-derive the pin from where the view stands (a travel landed).
+  notePin(): void;
   // How far the view sits above the true end, in px.
   distToEnd(): number;
   isLanding(): boolean;
@@ -179,6 +181,15 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
   // Depth of active jump() calls. A deliberate move can nest (an unread landing
   // that falls back to a bottom scroll), so count rather than toggle.
   let jumpDepth = 0;
+
+  // The go-to-bottom or travel to a message in flight. One at a time: a newer
+  // one supersedes it, and its routine then reads `readerTook` as true and
+  // stops writing (both writing in turn was the jitter). While a travel flies
+  // the pin stays dropped: nothing follows or snaps to the end under it, and
+  // the pin is re-derived where it lands.
+  let inFlight: {kind: string} | null = null;
+  const travelling = () => inFlight?.kind === 'to-message';
+  const pinned = () => !travelling() && deps.isPinned();
 
   // Whether the last scroll event was the reader's: not the offset of a machine
   // write, not inside a deliberate move (the go-to-bottom walk scrolls
@@ -282,7 +293,7 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     }
     followOwed = false;
     clearTimeout(owedTimer);
-    if (deps.listBanked() || (deps.isPinned() && deps.distToEnd() > 0.5)) deps.rewindow();
+    if (deps.listBanked() || (pinned() && deps.distToEnd() > 0.5)) deps.rewindow();
   };
   // The finger owns the offset until the LAST touch lifts (a multi-touch
   // release leaves one finger still down). A lift on a still-attached target
@@ -342,7 +353,7 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     if (driving()) return 'reader-driving';
     if (jumpDepth > 0) return 'jumping';
     if (deps.isLanding()) return 'landing';
-    if (deps.isPinned()) return 'pinned-bottom';
+    if (pinned()) return 'pinned-bottom';
     return 'reading-held';
   };
 
@@ -383,7 +394,7 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
       // waits (their async, coalesced scroll may be about to leave the end),
       // owed to the settle, and is NAMED so a recurrence is not a ghost.
       const skipPin = () => {
-        if (deps.isPinned() && deps.distToEnd() > 0) {
+        if (pinned() && deps.distToEnd() > 0) {
           logBottomPin('toBottom', 'resize.reader-active', scroll.scrollTop, scroll.scrollHeight);
           owe();
         }
@@ -395,8 +406,8 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
         if (!holding()) skipPin();
         return;
       }
-      if (deps.isDividerHeld() && !deps.isPinned() && deps.reseatDivider()) return;
-      if (deps.isPinned()) {
+      if (deps.isDividerHeld() && !pinned() && deps.reseatDivider()) return;
+      if (pinned()) {
         if (readerInputFresh()) skipPin();
         else if (deps.distToEnd() > 0) deps.scrollToBottom('resize.pin');
       } else if (padDelta) {
@@ -421,6 +432,7 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     // enough that their own scroll may not have landed yet. Then the follow is
     // owed to the settle, which pays it if the reader ends at the end.
     followArrival(): void {
+      if (travelling()) return;
       if (driving() || readerInputFresh()) {
         owe();
         return;
@@ -432,17 +444,25 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     // routine that returns a promise (the go-to-bottom walk) stays a jump until
     // it settles, so its untagged scrolls never read as a reader driving. The
     // routine is handed `readerTook`: the moment a finger or pointer lands, the
-    // reader owns the offset and the move stops writing. Returns its result.
-    jump<T>(_kind: string, run: (readerTook: () => boolean) => T): T {
+    // reader owns the offset and the move stops writing. A go-to-bottom or a
+    // travel also stops once a newer go-to-bottom or travel starts.
+    // Returns its result.
+    jump<T>(kind: string, run: (readerTook: () => boolean) => T): T {
       jumpDepth++;
+      const own = kind === 'to-bottom' || kind === 'to-message' ? {kind} : null;
+      if (own) inFlight = own;
       const end = () => {
         jumpDepth--;
         lastScrollByReader = false;
         awaitingScrollend = false;
+        if (own && inFlight === own) {
+          inFlight = null;
+          if (own.kind === 'to-message') deps.notePin();
+        }
       };
       let result: T;
       try {
-        result = run(holding);
+        result = run(own ? () => holding() || inFlight !== own : holding);
       } catch (e) {
         end();
         throw e;
@@ -458,7 +478,8 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     // The message re-window's single write (anchoredRewindow W5/W6). Never
     // called while driving: the re-window banks instead.
     rewindowWrite: (v: number, tag: string) => deps.rewindowWrite(v, tag),
-    pinned: () => deps.isPinned(),
+    pinned,
+    travelling,
     // Wraps the existing silentScrollTo so later steps can route every write
     // through the owner; identical to calling silentScrollTo today.
     write(v: number, tag?: string, reason?: string): void {

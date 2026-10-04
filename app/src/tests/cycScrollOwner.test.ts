@@ -43,6 +43,7 @@ function mount(
     modelTop: () => top + (over.bank?.() ?? 0),
     nearBottomPx: () => 100,
     isPinned: over.isPinned ?? (() => false),
+    notePin: vi.fn(),
     distToEnd: over.distToEnd ?? (() => 0),
     isLanding: () => false,
     isDividerHeld: () => false,

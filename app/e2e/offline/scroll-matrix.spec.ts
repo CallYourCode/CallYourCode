@@ -200,6 +200,117 @@ async function readTapCounts(page: Page) {
   });
 }
 
+// ---- commanded navigation (Hunter, iPhone, 2026-10-03) ----------------------
+const CHIP = '#cyc-thread-pane .cyc-clip-jump';
+
+// Start a spoken clip that sits ABOVE the viewport (mounted, off screen), the
+// way the owner had one playing while reading at the end: a DOM click on its
+// play toggle (the row is off screen, so an actionable click would scroll it
+// in first). Returns the clip's msgId and the speaker state it reached.
+async function playClipAbove(page: Page): Promise<{msgId: string; state: string}> {
+  const msgId = await page.evaluate((sel) => {
+    const b = document.querySelector(sel) as HTMLElement;
+    const top = b.getBoundingClientRect().top;
+    const above = Array.from(b.querySelectorAll<HTMLElement>('.cyc-clip.cyc-voice[data-msg-id]')).filter(
+      (c) => c.getBoundingClientRect().bottom <= top
+    );
+    const clip = above[above.length - 1];
+    clip?.querySelector<HTMLElement>('.cyc-clip-toggle')?.click();
+    return clip?.dataset.msgId ?? '';
+  }, SCROLL);
+  let state = '';
+  for (let i = 0; i < 30 && msgId; i++) {
+    state = await page.evaluate(
+      () => (window as unknown as {__cycSpeakerState: () => {state: string}}).__cycSpeakerState().state
+    );
+    if (state === 'speaking') break;
+    await page.waitForTimeout(100);
+  }
+  return {msgId, state};
+}
+
+// A tap on a corner button, as a DOM click: the go-to-bottom button is
+// visibility:hidden until the list leaves the end and the audio chip until a
+// clip plays off screen, and an actionable click would wait on that; the
+// handler is the same.
+const tap = (page: Page, sel: string) =>
+  page.evaluate((s) => (document.querySelector(s) as HTMLElement).click(), sel);
+
+// What the reader sees, sampled in a task right after each rendering update
+// (the travel and the go-to-bottom walk write inside animation-frame
+// callbacks, so a sample taken in one could miss the offset that was painted):
+// the offset, the distance to the end, and the clip row's top against the box
+// (null while it is not mounted).
+async function sampleClip(page: Page, ms: number, msgId: string) {
+  return page.evaluate(
+    ({sel, ms, msgId}) =>
+      new Promise<{t: number; top: number; dist: number; clip: number | null}[]>((done) => {
+        const box = document.querySelector(sel) as HTMLElement;
+        const frames: {t: number; top: number; dist: number; clip: number | null}[] = [];
+        const t0 = performance.now();
+        const take = () => {
+          const bt = box.getBoundingClientRect().top;
+          const c = msgId
+            ? box.querySelector<HTMLElement>(`.cyc-clip.cyc-voice[data-msg-id="${CSS.escape(msgId)}"]`)
+            : null;
+          frames.push({
+            t: Math.round(performance.now() - t0),
+            top: Math.round(box.scrollTop),
+            dist: Math.round(box.scrollHeight - box.scrollTop - box.clientHeight),
+            clip: c ? Math.round(c.getBoundingClientRect().top - bt) : null
+          });
+        };
+        const tick = () => {
+          setTimeout(take, 0);
+          if (performance.now() - t0 < ms) requestAnimationFrame(tick);
+          else setTimeout(() => done(frames), 20);
+        };
+        requestAnimationFrame(tick);
+      }),
+    {sel: SCROLL, ms, msgId}
+  );
+}
+
+// Direction changes of the painted offset across frames (the fight's
+// signature: two writers taking turns flip it every frame).
+function reversalsOf(frames: {top: number}[]): number {
+  let reversals = 0;
+  let dir = 0;
+  for (let i = 1; i < frames.length; i++) {
+    const d = Math.sign(frames[i].top - frames[i - 1].top);
+    if (d === 0) continue;
+    if (dir !== 0 && d !== dir) reversals++;
+    dir = d;
+  }
+  return reversals;
+}
+
+// Every programmatic write to the scroller so far (scrollTop set, scrollTo):
+// the app's log collapses a per-frame storm to one line, so it is counted at
+// the box itself.
+const writesSoFar = (page: Page) =>
+  page.evaluate((sel) => {
+    const b = document.querySelector(sel) as HTMLElement & {__writes?: number};
+    if (b.__writes === undefined) {
+      b.__writes = 0;
+      const d = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')!;
+      Object.defineProperty(b, 'scrollTop', {
+        configurable: true,
+        get: () => d.get!.call(b),
+        set: (v: number) => {
+          b.__writes!++;
+          d.set!.call(b, v);
+        }
+      });
+      const to = b.scrollTo.bind(b);
+      b.scrollTo = ((...a: never[]) => {
+        b.__writes!++;
+        (to as (...x: never[]) => void)(...a);
+      }) as typeof b.scrollTo;
+    }
+    return b.__writes;
+  }, SCROLL);
+
 function jitterOf(frames: {top: number}[]): {jitterFrames: number; bandPx: number} {
   let jitterFrames = 0;
   for (let i = 1; i < frames.length; i++)
@@ -684,6 +795,124 @@ for (const v of VIEWPORTS) {
         expect(thrownUp, 'the view was thrown up while the reader scrolled down').toBe(0);
         expect(tap.counts['history.older'] ?? 0, 'scrolling down loaded older history').toBe(0);
         expect(distAfter, 'scrolling down never reached the end').toBeLessThanOrEqual(T.landPx);
+      } finally {
+        await eng.close();
+      }
+    });
+
+    // CASE go-to-audio while a clip plays (Hunter, iPhone, 2026-10-03: "when I
+    // clicked go to audio message, it jittered like crazy"). The reader sits at
+    // the end with a clip playing above; the audio chip travels to it. The
+    // travel must land the clip on screen and keep it there: no other program
+    // writes while it flies. Field rig (Hunter data, main, Chromium phone): the
+    // travel's re-centre and the re-window's pinned-end follow wrote in turn,
+    // 59 against 61 writes in one second, and the view ended back at the end.
+    test('go-to-audio-playing: the audio chip lands the playing clip on screen and holds it', async ({
+      page
+    }) => {
+      test.setTimeout(90_000);
+      const eng = await startScrollEngine({count: 200, voiceEvery: 1, lines: LONG});
+      try {
+        await openPrimary(page, eng, v);
+        const {msgId, state} = await playClipAbove(page);
+        await page.waitForTimeout(300);
+        const atStart = await distToEnd(page);
+        const h = await page.evaluate((sel) => (document.querySelector(sel) as HTMLElement).clientHeight, SCROLL);
+        const writes0 = await writesSoFar(page);
+        const sampling = sampleClip(page, 2500, msgId);
+        await tap(page, CHIP);
+        const frames = await sampling;
+        const writes = (await writesSoFar(page)) - writes0;
+        // Landed: the first frame from which the clip stays on screen to the end
+        // of the sample. After it, the clip must not move (a re-window
+        // returning its bank moves the offset and the spacer together, so the
+        // row holds still).
+        const onScreen = (f: {clip: number | null}) => f.clip !== null && f.clip >= 0 && f.clip < h;
+        let landedAt = -1;
+        for (let i = frames.length - 1; i >= 0 && onScreen(frames[i]); i--) landedAt = i;
+        let driftAfterLand = 0;
+        if (landedAt >= 0) {
+          // the smooth leg may still be finishing: count moves once it has stopped
+          let still = landedAt;
+          while (still + 1 < frames.length && frames[still + 1].clip !== frames[still].clip) still++;
+          for (let i = still + 1; i < frames.length; i++)
+            if (Math.abs((frames[i].clip ?? 0) - (frames[i - 1].clip ?? 0)) > T.readerHoldPx) driftAfterLand++;
+        }
+        // Back at the end after having left it: the pinned end pulled the travel back.
+        let leftEnd = false;
+        let yankedToEnd = 0;
+        for (const f of frames) {
+          if (f.dist > T.landPx) leftEnd = true;
+          else if (leftEnd) yankedToEnd++;
+        }
+        const last = frames[frames.length - 1];
+        await annotate('go-to-audio-playing', {
+          state,
+          atStart,
+          landedAtMs: landedAt >= 0 ? frames[landedAt].t : -1,
+          finalClipTop: last?.clip ?? null,
+          finalDist: last?.dist,
+          driftAfterLand,
+          yankedToEnd,
+          writes,
+          reversals: reversalsOf(frames)
+        });
+        expect(msgId, 'no spoken clip was mounted above the viewport').not.toBe('');
+        expect(atStart, 'the reader was not at the end when the chip was tapped').toBeLessThanOrEqual(T.landPx);
+        expect(landedAt, 'the travel did not leave the playing clip on screen').toBeGreaterThanOrEqual(0);
+        expect(yankedToEnd, 'the view was pulled back to the end after the travel left it').toBe(0);
+        expect(driftAfterLand, 'the clip kept moving after the travel landed').toBe(0);
+      } finally {
+        await eng.close();
+      }
+    });
+
+    // CASE go-to-bottom while a clip plays and the go-to-audio travel is still
+    // in flight (Hunter, 2026-10-03: "when I hit the go to bottom button, it
+    // jittered like crazy"). The newer command supersedes the travel: the view
+    // goes down to the end and stays, never pulled back up toward the clip.
+    // Field rig (main, WebKit phone): the travel's re-centre and the walk took
+    // turns for 3.4 s, the view held at the clip against the reader's tap.
+    test('go-to-bottom-playing: go-to-bottom during a go-to-audio travel lands at the end', async ({
+      page
+    }) => {
+      test.setTimeout(90_000);
+      const eng = await startScrollEngine({count: 200, voiceEvery: 1, lines: LONG});
+      try {
+        await openPrimary(page, eng, v);
+        const {msgId, state} = await playClipAbove(page);
+        await page.waitForTimeout(300);
+        await tap(page, CHIP);
+        await page.waitForTimeout(60);
+        const writes0 = await writesSoFar(page);
+        const sampling = sampleClip(page, 3000, msgId);
+        await tap(page, BUTTON);
+        const frames = await sampling;
+        const writes = (await writesSoFar(page)) - writes0;
+        let upAfter = 0;
+        for (let i = 1; i < frames.length; i++) if (frames[i].dist >= frames[i - 1].dist + T.jitterPx) upAfter++;
+        let reachedAt = -1;
+        let leftEnd = 0;
+        for (let i = 0; i < frames.length; i++) {
+          if (frames[i].dist <= T.landPx) {
+            if (reachedAt < 0) reachedAt = i;
+          } else if (reachedAt >= 0) leftEnd++;
+        }
+        const last = frames[frames.length - 1];
+        await annotate('go-to-bottom-playing', {
+          state,
+          upAfter,
+          reachedAtMs: reachedAt >= 0 ? frames[reachedAt].t : -1,
+          leftEnd,
+          finalDist: last?.dist,
+          writes,
+          reversals: reversalsOf(frames)
+        });
+        expect(msgId, 'no spoken clip was mounted above the viewport').not.toBe('');
+        expect(upAfter, 'the view moved up after go-to-bottom (the travel pulled it back)').toBe(0);
+        expect(reachedAt, 'go-to-bottom never reached the end').toBeGreaterThanOrEqual(0);
+        expect(leftEnd, 'the view left the end again after reaching it').toBe(0);
+        expect(last?.dist ?? 99, 'the view is not at the end').toBeLessThanOrEqual(T.landPx);
       } finally {
         await eng.close();
       }
