@@ -262,6 +262,27 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
   // (drag, wheel, momentum) still live. No programmatic scrollTop while true.
   const driving = (): boolean => holding() || readerScrolling();
 
+  // A go-to-bottom or travel tapped while the reader's fling still coasts: the
+  // browser keeps flinging under every programmatic write (Chromium measured;
+  // the iPhone's log showed the same), so the fling and the move wrote in turn,
+  // the jitter (CYC Builder, iPhone, 2026-10-04). A box the hand cannot scroll for
+  // a moment ends the fling (Chromium: two frames were not enough, the fling
+  // resumed; three and more ended it); machine writes still land on it. Only
+  // where the scrollbar takes no room (overlay bars), so the width never changes.
+  const FLING_END_MS = 100;
+  let flingTimer: ReturnType<typeof setTimeout> | undefined;
+  const flingEnded = () => {
+    clearTimeout(flingTimer);
+    scroll.style.overflowY = '';
+  };
+  const endFling = () => {
+    if (!readerScrolling() || scroll.offsetWidth !== scroll.clientWidth) return;
+    clearTimeout(flingTimer);
+    scroll.style.overflowY = 'hidden';
+    flingTimer = setTimeout(flingEnded, FLING_END_MS);
+  };
+  deps.onTeardown(flingEnded);
+
   // The reader let go. If the list is already still, release the banked
   // correction (or re-pin a pinned end that content grew past) in one re-window
   // now; mid-momentum the virtualizer's scroll-end tick does it instead.
@@ -450,7 +471,10 @@ export function createScrollOwner(deps: ScrollOwnerDeps) {
     jump<T>(kind: string, run: (readerTook: () => boolean) => T): T {
       jumpDepth++;
       const own = kind === 'to-bottom' || kind === 'to-message' ? {kind} : null;
-      if (own) inFlight = own;
+      if (own) {
+        endFling();
+        inFlight = own;
+      }
       const end = () => {
         jumpDepth--;
         lastScrollByReader = false;
