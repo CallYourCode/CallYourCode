@@ -107,6 +107,9 @@ export type SendPayload = {
   attachMeta?: Record<string, AttachMeta>;
 
   partials?: {id: string; text: string; upToS: number}[];
+  // An empty-body voice note's quote/caption, which the engine puts around
+  // the words it fills in.
+  around?: {before: string; after: string};
 };
 
 // The row shows `title.text` when the engine sends a title (it always does:

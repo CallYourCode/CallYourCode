@@ -86,8 +86,19 @@ export const STT_BUSY_BACKOFF_MAX_MS = Number(process.env.STT_BUSY_BACKOFF_MAX_M
  * read the whole clip. */
 export type SettledPartial = { text: string; upToS: number };
 
+/** The quote and caption an empty-body voice note carries beside it (the
+ *  frame's `around`), for the words this engine reads to go between. */
+export type Around = { before: string; after: string };
+
+/** The note's text: the quote, the words, the caption, one blank line apart,
+ *  the same text the app composes when it bakes the words in. */
+export function aroundWords(words: string, around?: Around): string {
+  return around ? [around.before, words, around.after].filter(Boolean).join("\n\n") : words;
+}
+
 /** What a pending note needs, to be shown now and completed later. */
-export type PendingNote = { cid: string; how: string; extra: Partial<ChatMsg>; msgId: string; takenAt: number };
+export type PendingNote = { cid: string; how: string; extra: Partial<ChatMsg>; msgId: string; takenAt: number;
+  around?: Around };
 
 export type TranscribeDeps = {
   voiceUrl(): Promise<string>;
@@ -388,7 +399,7 @@ export async function completePendingVoiceNote(s: NoteSession, ts: number, d: Pe
   const dd = D();
   let words = "";
   try { words = await rescue; } catch { words = ""; }
-  const text = words || "(voice note: transcription failed)";
+  const text = aroundWords(words || "(voice note: transcription failed)", d.around);
   if (!words) {
     dd.log("rescue.failed-late", { cid: d.cid, session: s.id, msgId: d.msgId, ts,
       why: "the pending note's decode returned nothing; completing it with the placeholder" });

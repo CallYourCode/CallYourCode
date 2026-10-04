@@ -827,8 +827,10 @@ initAttach({
 /** Everything this engine will promise an app it can do. See the `can` frame.
  *  "plugins" (#479) says this engine speaks the plugin protocol: it may send a
  *  `{t:"plugins"}` frame and answer /plugin/<id>/* routes. Additive, per the
- *  CONTRACT.md back-compat rule -- an old app ignores an unknown capability. */
-const ENGINE_CAN = ["words", "plugins"];
+ *  CONTRACT.md back-compat rule -- an old app ignores an unknown capability.
+ *  "words-around" says an empty-body voice note may carry its reply quote and
+ *  caption as `around`, and the words this engine reads go between them. */
+const ENGINE_CAN = ["words", "plugins", "words-around"];
 
 /* THE PLUGINS THIS ENGINE LOADED, and their wire declarations, computed once at
  * start-up from the same list in the same statement (the sessionsFrame rule:
