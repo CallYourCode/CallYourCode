@@ -9,11 +9,12 @@ import {markSelfReload, navigateSelf} from './selfReload';
 // load fails again soon after (a genuinely broken deploy) the page does not
 // loop: it tells the user and rethrows.
 //
-// The reload goes through the self-navigation gate (a missing chunk usually
-// means a deploy is landing right now, so a new worker may be waiting; the
-// gate never navigates into one). It does NOT take the update reload's composer hold: the page is broken (the
-// feature that was asked for cannot load until it reloads), and the draft is
-// on disk, restored after the reload.
+// The reload goes through the self-navigation gate, which owns the one pending
+// navigation (a missing chunk usually means a deploy is landing right now, so
+// a new worker may be waiting; the gate never navigates into one). The mark is
+// set only when the reload really goes. It does NOT take the update reload's
+// composer hold: the page is broken (the feature that was asked for cannot
+// load until it reloads), and the draft is on disk, restored after the reload.
 
 const RELOADED_KEY = 'cyc:chunk-reloaded';
 // A reload takes seconds; a mark older than this is from an earlier rebuild
@@ -23,7 +24,6 @@ const RELOAD_MARK_FRESH_MS = 5 * 60_000;
 type Notify = (message: string) => void;
 
 let notify: Notify = () => {};
-let reloadRequested = false;
 
 // The boot entry (src/boot.ts) also lazy-loads main, before any UI exists, so
 // this module deliberately imports nothing that renders. main registers the
@@ -50,20 +50,18 @@ function markReloaded(): void {
 export function lazy<T>(load: () => Promise<T>, what: string): Promise<T> {
   return load().catch((err: unknown) => {
     cyclog('chunk.missing', {what, err: String(err)});
-    if (reloadRequested) throw err;
     if (reloadedRecently()) {
       notify(`Could not load ${what}; reload the app`);
       throw err;
     }
-    reloadRequested = true;
-    markReloaded();
     notify('The app was updated; reloading');
-    navigateSelf({why: 'chunk-missing', before: markSelfReload});
+    navigateSelf({
+      why: 'chunk-missing',
+      before: () => {
+        markReloaded();
+        markSelfReload();
+      }
+    });
     throw err;
   });
-}
-
-// Test seam: forget the in-page one-shot so a fresh page can be simulated.
-export function resetLazyForTests(): void {
-  reloadRequested = false;
 }

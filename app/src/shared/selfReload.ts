@@ -82,12 +82,15 @@ export function readReloadDeparture(): ReloadDeparture | null {
 // worker answers meanwhile). A caller may add its own hold (the update
 // reload's composer hold), re-decided every tick and at once when the app
 // goes to the background.
-// One self-navigation per page life goes; but a page still alive ALIVE_MS
-// after its navigation (it failed: offline, a dead link) releases the gate, so
-// the user can try again. A network navigation is not even tried when the
-// server does not answer (offline): the user is told instead. (Asked, not
-// read from navigator.onLine: Playwright's WebKit always says false, and true
-// is no promise of a network anyway.)
+// The gate holds ONE pending self-navigation; callers keep no flags of their
+// own. A later request re-uses it (a reload is a reload), except a user action
+// (it has a notice), which replaces it: a sign-out must not wait on an update
+// reload's draft hold. A hatch navigation is not tried when the server does
+// not answer (asked, not read from navigator.onLine: Playwright's WebKit always
+// says false, and true is no promise of a network); the user is told "You're
+// offline" and it stays pending: the next foreground, online edge or request
+// decides again. A page still alive ALIVE_MS after its navigation (it failed)
+// lets that pending navigation be decided again the same way.
 
 export type SelfNavDeps = {
   workerWaiting: () => Promise<boolean>;
@@ -101,8 +104,8 @@ export type SelfNavDeps = {
   now: () => number;
   schedule: (fn: () => void, ms: number) => unknown;
   cancel: (handle: unknown) => void;
-  // Subscribe to the app going to the background; returns the unsubscribe.
-  onHidden: (fn: () => void) => () => void;
+  // Subscribe to visibility changes and the online edge.
+  onEdge: (fn: () => void) => void;
   log: (event: string, fields: Record<string, unknown>) => void;
   notify: (message: string) => void;
 };
@@ -118,8 +121,8 @@ export type SelfNav = {
   hold?: (waited: number, hidden: boolean) => string;
   // Every tick the caller's hold keeps the navigation.
   onHeld?: (hold: string, waited: number, hidden: boolean) => void;
-  // Shown once if a waiting worker holds the navigation ('Signing out…'), so
-  // a user action never looks like it did nothing.
+  // Marks a user action; shown once if a waiting worker holds it ('Signing
+  // out…'), so it never looks like it did nothing.
   notice?: string;
   // Delay before the first decision (the update reload shows its toast first).
   firstTickMs?: number;
@@ -151,85 +154,85 @@ export function dropNetNavParam(): void {
 }
 
 export function createSelfNavGate(deps: SelfNavDeps): (nav: SelfNav) => void {
-  let gone = false; // a self-navigation is under way; the rest stand down
-  return (nav: SelfNav) => {
-    const since = deps.now();
-    let waitingSince = -1; // when the worker hold began (-1: not holding)
-    let timer: unknown = null;
-    let ticking = false;
-    let again = false;
-    let done = false;
-    const off = deps.onHidden(() => void tick());
-    const end = () => {
-      done = true;
-      off();
-    };
-    const tick = async (): Promise<void> => {
-      if (done) return;
-      if (gone) return end();
-      if (ticking) {
-        again = true; // an edge arrived mid-tick: decide again right after
-        return;
-      }
-      ticking = true;
-      if (timer !== null) deps.cancel(timer);
+  type Pending = {nav: SelfNav; since: number; waitingSince: number};
+  let pending: Pending | null = null;
+  let going = false; // navigating; until ALIVE_MS shows the page is still here
+  let timer: unknown = null;
+  let ticking = false;
+  let again = false;
+  let subscribed = false;
+  const later = (ms: number) => {
+    if (timer !== null) deps.cancel(timer);
+    timer = deps.schedule(() => {
       timer = null;
-      try {
-        const now = deps.now();
-        const waited = now - since;
-        const hidden = deps.hidden();
-        const own = nav.hold?.(waited, hidden) ?? '';
-        if (own) {
-          waitingSince = -1;
-          nav.onHeld?.(own, waited, hidden);
-          timer = deps.schedule(() => void tick(), HOLD_TICK_MS);
-          return;
-        }
-        const waiting = await deps.workerWaiting().catch(() => false);
-        if (gone) return end();
-        if (!waiting) waitingSince = -1;
-        else if (waitingSince < 0) {
-          waitingSince = now;
-          deps.log('nav.held', {why: nav.why, hold: 'sw-waiting'});
-          if (nav.notice) deps.notify(nav.notice);
-        }
-        if (waiting && now - waitingSince < WAITING_MAX_MS) {
-          deps.askActivate();
-          timer = deps.schedule(() => void tick(), WORKER_TICK_MS);
-          return;
-        }
-        end();
-        gone = true;
-        const viaNetwork = waiting;
-        if (viaNetwork && !(await deps.reachable().catch(() => false))) {
-          gone = false;
-          deps.log('nav.offline', {why: nav.why, waited});
-          deps.notify(OFFLINE_NOTICE);
-          return;
-        }
-        deps.log('nav.go', {why: nav.why, waited, hidden, ...(viaNetwork ? {viaNetwork} : {})});
-        nav.before?.({waited, hidden, viaNetwork});
-        const to = nav.to?.();
-        deps.navigate(viaNetwork ? netNavUrl(to ?? deps.href(), deps.href()) : (to ?? null));
-        deps.schedule(() => {
-          gone = false;
-          void deps
-            .reachable()
-            .catch(() => false)
-            .then((up) => {
-              deps.log('nav.failed', {why: nav.why, reachable: up});
-              if (!up) deps.notify(OFFLINE_NOTICE);
-            });
-        }, ALIVE_MS);
-      } finally {
-        ticking = false;
-        if (again && !done) {
-          again = false;
-          void tick();
-        }
+      void tick();
+    }, ms);
+  };
+  const tick = async (): Promise<void> => {
+    if (!pending || going) return;
+    if (ticking) {
+      again = true; // an edge or a request arrived mid-tick: decide again after
+      return;
+    }
+    ticking = true;
+    if (timer !== null) deps.cancel(timer);
+    timer = null;
+    try {
+      const p = pending;
+      const {nav} = p;
+      const now = deps.now();
+      const waited = now - p.since;
+      const hidden = deps.hidden();
+      const own = nav.hold?.(waited, hidden) ?? '';
+      if (own) {
+        p.waitingSince = -1;
+        nav.onHeld?.(own, waited, hidden);
+        return later(HOLD_TICK_MS);
       }
-    };
-    timer = deps.schedule(() => void tick(), nav.firstTickMs ?? 0);
+      const waiting = await deps.workerWaiting().catch(() => false);
+      if (pending !== p) return;
+      if (!waiting) p.waitingSince = -1;
+      else if (p.waitingSince < 0) {
+        p.waitingSince = now;
+        deps.log('nav.held', {why: nav.why, hold: 'sw-waiting'});
+        if (nav.notice) deps.notify(nav.notice);
+      }
+      if (waiting && now - p.waitingSince < WAITING_MAX_MS) {
+        deps.askActivate();
+        return later(WORKER_TICK_MS);
+      }
+      const viaNetwork = waiting;
+      if (viaNetwork && !(await deps.reachable().catch(() => false))) {
+        deps.log('nav.offline', {why: nav.why, waited});
+        deps.notify(OFFLINE_NOTICE);
+        return; // still pending: the next edge or request decides again
+      }
+      if (pending !== p) return;
+      going = true;
+      deps.log('nav.go', {why: nav.why, waited, hidden, ...(viaNetwork ? {viaNetwork} : {})});
+      nav.before?.({waited, hidden, viaNetwork});
+      const to = nav.to?.();
+      deps.navigate(viaNetwork ? netNavUrl(to ?? deps.href(), deps.href()) : (to ?? null));
+      deps.schedule(() => {
+        going = false;
+        deps.log('nav.failed', {why: nav.why});
+      }, ALIVE_MS);
+    } finally {
+      ticking = false;
+      if (again) {
+        again = false;
+        void tick();
+      }
+    }
+  };
+  return (nav: SelfNav) => {
+    if (!subscribed) {
+      subscribed = true;
+      deps.onEdge(() => void tick());
+    }
+    if (pending && !nav.notice) return void tick();
+    pending = {nav, since: deps.now(), waitingSince: -1};
+    later(nav.firstTickMs ?? 0);
   };
 }
 
@@ -272,13 +275,10 @@ const realDeps: SelfNavDeps = {
   now: () => Date.now(),
   schedule: (fn, ms) => setTimeout(fn, ms),
   cancel: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
-  onHidden: (fn) => {
-    if (typeof document === 'undefined') return () => {};
-    const h = () => {
-      if (document.hidden) fn();
-    };
-    document.addEventListener('visibilitychange', h);
-    return () => document.removeEventListener('visibilitychange', h);
+  onEdge: (fn) => {
+    if (typeof document === 'undefined') return;
+    document.addEventListener('visibilitychange', fn);
+    window.addEventListener('online', fn);
   },
   log: (event, fields) => cyclog(event, fields),
   notify: (message) => notifier(message)
@@ -291,7 +291,7 @@ export function navigateSelf(nav: SelfNav): void {
   gate(nav);
 }
 
-// Test seam: a fresh page (the gate lets one self-navigation per page life go).
+// Test seam: a fresh page.
 export function resetSelfNavForTests(): void {
   gate = createSelfNavGate(realDeps);
 }

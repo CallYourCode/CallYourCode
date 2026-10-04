@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
-import {lazy, resetLazyForTests, setLazyNotifier} from '../shared/lazy';
+import {lazy, setLazyNotifier} from '../shared/lazy';
 import {cyclog} from '../shared/logging';
 import {resetSelfNavForTests} from '../shared/selfReload';
 
@@ -13,7 +13,6 @@ const reload = vi.fn();
 const notified: string[] = [];
 
 beforeEach(() => {
-  resetLazyForTests();
   resetSelfNavForTests();
   sessionStorage.clear();
   reload.mockClear();
@@ -59,14 +58,14 @@ describe('lazy chunk loading', () => {
     expect(logged('nav.go')[0]?.[1]).toMatchObject({why: 'chunk-missing'});
   });
 
-  test('a second failure in the same page does not reload again', async () => {
+  test('a second failure in the same page re-uses the pending reload', async () => {
     await expect(lazy(missing, 'the terminal')).rejects.toThrow();
     await expect(lazy(missing, 'the QR scanner')).rejects.toThrow();
     await reloaded(1);
     await settle();
     expect(reload).toHaveBeenCalledTimes(1);
     expect(logged('chunk.missing')).toHaveLength(2);
-    expect(notified).toEqual(['The app was updated; reloading']);
+    expect(notified).not.toContain('Could not load the QR scanner; reload the app');
   });
 
   test('after the reload, a failure again tells the user instead of looping', async () => {
@@ -74,7 +73,6 @@ describe('lazy chunk loading', () => {
     await reloaded(1);
 
     // The reload happened: a fresh page, but the sessionStorage mark survives.
-    resetLazyForTests();
     resetSelfNavForTests();
     reload.mockClear();
     notified.length = 0;

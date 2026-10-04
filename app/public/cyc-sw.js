@@ -56,15 +56,14 @@ async function cycReadManifest() {
 // The fetched shell must be THIS build's too: a deploy landing between the
 // manifest fetch and the shell fetch hands back the next build's index.html,
 // which names chunks this bucket does not hold, and the next offline launch is
-// blank (verifier, 2026-10-04). Its cyc-build stamp must be the manifest's and
-// every asset it names must be in the manifest; otherwise the install fails and
-// the next update check retries (fetching the newer worker anyway).
-function cycShellMismatch(html, version, assets) {
-  const stamp = /<meta name="cyc-build" content="([^"]*)"/.exec(html);
-  if (!stamp || stamp[1] !== version) return 'stamp ' + (stamp ? stamp[1] : 'none');
+// blank (verifier, 2026-10-04). Every asset the shell names must be in this
+// manifest (the entry chunk's name changes every build, so a shell of another
+// build always names one that is not); otherwise the install fails and the
+// next update check retries (fetching the newer worker anyway).
+function cycShellForeignAsset(html, assets) {
   const own = new Set(assets.map((a) => new URL(a, self.location.origin).pathname.slice(1)));
   for (const m of html.matchAll(/(?:src|href)="\.?\/?((?:assets\/[^"]+)|boot-watchdog\.js)"/g))
-    if (!own.has(m[1])) return 'names ' + m[1];
+    if (!own.has(m[1])) return m[1];
   return '';
 }
 
@@ -90,8 +89,9 @@ async function cycPrecacheInstall() {
   if (/^\d+$/.test(CYC_BUILD))
     for (const {req, res} of got) {
       if (!isShell(req)) continue;
-      const why = cycShellMismatch(await res.clone().text(), version, assets);
-      if (why) throw new Error('cyc-precache: the fetched shell is another build (' + why + ')');
+      const foreign = cycShellForeignAsset(await res.clone().text(), assets);
+      if (foreign)
+        throw new Error('cyc-precache: the fetched shell is another build (' + foreign + ')');
     }
   const name = CYC_CACHE_PREFIX + version;
   const cache = await caches.open(name);
@@ -851,7 +851,7 @@ self.CYC_BUILD = CYC_BUILD;
 self.cycRouteRequest = cycRouteRequest;
 self.cycReadManifest = cycReadManifest;
 self.cycPrecacheInstall = cycPrecacheInstall;
-self.cycShellMismatch = cycShellMismatch;
+self.cycShellForeignAsset = cycShellForeignAsset;
 self.cycPrecacheActivate = cycPrecacheActivate;
 self.cycServeShell = cycServeShell;
 self.cycServeAsset = cycServeAsset;

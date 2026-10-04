@@ -114,12 +114,13 @@ test('offline, a sign-out held by a waiting worker says so, and a second one sti
       await expect(page.getByText("You're offline").first()).toBeVisible();
       expect(builds(log), 'the page navigated offline').toEqual([stamps[0]]);
     }
-    // Back online, the gate is not spent: the sign-out goes (via the network if
-    // B still waits; going offline may have ended the held request, and then
-    // B took over and it goes the normal way).
+    // Back online, the sign-out still pending goes, on the online edge or the
+    // next tap, whichever is first (via the network if B still waits; going
+    // offline may have ended the held request, and then B took over and it
+    // goes the normal way).
     await context.setOffline(false);
     const at = Date.now();
-    await signOut();
+    await signOut().catch(() => {}); // the online edge may already have navigated
     await expect
       .poll(() => builds(log).length, {timeout: 15_000, message: 'the online sign-out never went'})
       .toBe(2);
@@ -131,3 +132,56 @@ test('offline, a sign-out held by a waiting worker says so, and a second one sti
     await rig.close();
   }
 });
+
+// The update and missing-chunk reloads kept their own one-time flags, so once
+// the gate stood down offline ("You're offline") they never came back in that
+// page's life: stuck on the old build until a relaunch (verifier round 3). The
+// gate now owns the pending navigation and decides again on the next edge.
+for (const why of ['update', 'chunk-missing'] as const) {
+  test(`a ${why} reload stopped offline lands once the network is back`, async ({
+    page,
+    context
+  }) => {
+    test.setTimeout(120_000);
+    const {dirs, stamps, host, rig, log} = await setUp(page);
+    // (the online edge may already have navigated: then this finds no page)
+    const foreground = () =>
+      page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))).catch(() => {});
+    try {
+      await parkB(page, host.origin, dirs[1]);
+      if (why === 'update') await foreground();
+      else
+        await page.evaluate(
+          () =>
+            void (
+              window as unknown as {__cycLazyImport: (p: string, w: string) => Promise<string>}
+            ).__cycLazyImport('/assets/gone-chunk-0000.js?t=' + Date.now(), 'the probe chunk')
+        );
+      await expect
+        .poll(() => log.of('nav.held').length, {timeout: 10_000, message: 'never held'})
+        .toBeGreaterThan(0);
+      // The radio drops before the hatch: the gate stops and says so.
+      await context.setOffline(true);
+      await expect
+        .poll(() => log.of('nav.offline').length, {timeout: 15_000, message: 'no offline stop'})
+        .toBeGreaterThan(0);
+      expect(log.of('nav.offline')[0].field('why')).toBe(why);
+      expect(builds(log)).toEqual([stamps[0]]);
+      // Back online, the online edge or the next foreground lands B.
+      await context.setOffline(false);
+      await foreground();
+      await expect
+        .poll(() => builds(log), {
+          timeout: 20_000,
+          message: `the ${why} reload never came back after the offline stop`
+        })
+        .toEqual([stamps[0], stamps[1]]);
+      expect(log.of('nav.go').map((l) => l.field('why'))).toEqual([why]);
+      await page.waitForSelector('.cyc-session-entry', {timeout: 15_000});
+    } finally {
+      await context.setOffline(false);
+      host.proc.kill();
+      await rig.close();
+    }
+  });
+}

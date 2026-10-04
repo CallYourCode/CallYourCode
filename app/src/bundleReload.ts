@@ -53,7 +53,6 @@ export function installStaleTabReload(): void {
     });
 
   let bootStamp = '';
-  let reloading = false;
   const fetchStamp = () =>
     fetch('./build.txt', {cache: 'no-store'})
       .then((r) => (r.ok ? r.text() : ''))
@@ -99,8 +98,6 @@ export function installStaleTabReload(): void {
   // (until it is emptied or the app goes to the background) or a playing clip
   // (reloadHold).
   const reloadSoon = (target: string) => {
-    if (reloading) return;
-    reloading = true;
     // Announce only a reload that is about to happen; one held by a draft
     // comes later, when the box is empty or the app is in the background.
     if (!draftInBox()) toast('New version, reloading…', 2500);

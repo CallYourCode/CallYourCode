@@ -363,8 +363,8 @@ describe('service worker install fails an update it cannot precache', () => {
   const STAMP = '1791000000';
   const ASSETS = ['/index.html', '/assets/index-AAAA.js'].map((p) => ORIGIN + p);
 
-  const shellOf = (stamp: string, entry: string) =>
-    `<meta name="cyc-build" content="${stamp}" /><script type="module" src="./assets/${entry}"></script>`;
+  const shellOf = (entry: string) =>
+    `<link rel="icon" href="./pwa/icons/favicon.svg" /><script type="module" src="./assets/${entry}"></script>`;
 
   const boot = (o: {
     active: boolean;
@@ -384,7 +384,7 @@ describe('service worker install fails an update it cannot precache', () => {
       if (p === o.failAsset) throw new TypeError('Load failed');
       if (p === o.badAsset) return {ok: false, status: 503};
       const res = {ok: true, precached: p};
-      const html = o.shell ?? shellOf(STAMP, 'index-AAAA.js');
+      const html = o.shell ?? shellOf('index-AAAA.js');
       // non-enumerable, so the stored marker still compares equal
       Object.defineProperty(res, 'clone', {value: () => ({text: async () => html})});
       return res;
@@ -427,11 +427,9 @@ describe('service worker install fails an update it cannot precache', () => {
   // names a chunk this bucket never holds; installed, the next offline launch
   // was blank.
   test('a shell of another build fails the install and leaves no bucket', async () => {
-    for (const shell of [shellOf('1791000999', 'index-AAAA.js'), shellOf(STAMP, 'index-CCCC.js')]) {
-      const w = boot({active: true, shell});
-      await expect(w.install()).rejects.toThrow(/another build/);
-      expect(await w.caches.keys()).toEqual([]);
-    }
+    const w = boot({active: true, shell: shellOf('index-CCCC.js')});
+    await expect(w.install()).rejects.toThrow(/another build/);
+    expect(await w.caches.keys()).toEqual([]);
   });
 
   test('a 503 on any file fails the install before a bucket is even opened', async () => {

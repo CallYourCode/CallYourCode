@@ -46,15 +46,6 @@ fi
 sed -i "s/__CYC_BUILD__/$CYC_BUILD_STAMP/" "$NEXT/cyc-sw.js"
 echo "build: baked stamp $CYC_BUILD_STAMP into cyc-sw.js"
 
-# The same stamp in the shell (<meta name="cyc-build">): the worker's install
-# refuses a shell of another build (a deploy landing mid-precache), so the
-# shell must say which build it is.
-if ! grep -q 'name="cyc-build" content="__CYC_BUILD__"' "$NEXT/index.html"; then
-  echo "build: index.html is missing the cyc-build stamp placeholder" >&2
-  exit 1
-fi
-sed -i "s/name=\"cyc-build\" content=\"__CYC_BUILD__\"/name=\"cyc-build\" content=\"$CYC_BUILD_STAMP\"/" "$NEXT/index.html"
-
 # Record what this build produced under assets/, so the next build knows which
 # files are this generation's own (to carry) and which were themselves carried.
 (cd "$NEXT/assets" && find . -type f | sed 's#^\./##' | LC_ALL=C sort) > "$NEXT/$BUILT_ASSETS"

@@ -36,7 +36,7 @@ function distFor(b: Build): Record<string, File> {
     'index.html': {
       type: 'text/html; charset=utf-8',
       body:
-        `<!doctype html><html><head><meta charset="utf-8"><meta name="cyc-build" content="${b.stamp}"><title>cyc</title></head>` +
+        '<!doctype html><html><head><meta charset="utf-8"><title>cyc</title></head>' +
         `<body><div id="cyc-build">BUILD-${b.stamp}</div>` +
         `<script src="/${asset}"></script></body></html>`
     },

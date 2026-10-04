@@ -13,16 +13,17 @@ import {
 // stopped and never completes (the hung reload, 2026-10-03). ONE rule: a
 // WAITING worker is asked to take over and holds the navigation; still waiting
 // WAITING_MAX_MS later, the navigation goes to the same URL with ?cyc-net=1
-// (network, never the parked worker). An INSTALLING worker never holds. A
-// navigation that leaves the page alive (failed) releases the gate; offline, a
-// network navigation is not tried, the user is told.
+// (network, never the parked worker). An INSTALLING worker never holds. The
+// gate owns the one pending navigation: offline it is not tried (the user is
+// told) and stays pending until the next edge or request; a navigation that
+// leaves the page alive (failed) is decided again the same way.
 
 const HERE = 'https://app.example/?chat=x#app';
 
 function rig(init: {waiting?: boolean; online?: boolean} = {}) {
   const st = {waiting: init.waiting ?? false, hidden: false, online: init.online ?? true, now: 0};
   let timers: {at: number; fn: () => void}[] = [];
-  const hiddenSubs = new Set<() => void>();
+  const edgeSubs = new Set<() => void>();
   const r = {
     st,
     asks: 0,
@@ -41,12 +42,17 @@ function rig(init: {waiting?: boolean; online?: boolean} = {}) {
         await new Promise((x) => setTimeout(x, 0));
       }
       st.now = until;
+      await new Promise((x) => setTimeout(x, 0)); // let an edge's tick settle
     },
     background() {
       st.hidden = true;
-      hiddenSubs.forEach((f) => f());
+      edgeSubs.forEach((f) => f());
     },
-    subs: hiddenSubs,
+    // the app comes back to the front, or the network comes back
+    edge() {
+      st.hidden = false;
+      edgeSubs.forEach((f) => f());
+    },
     events: () => r.logs.map(([e]) => e),
     deps: {
       workerWaiting: async () => st.waiting,
@@ -62,10 +68,7 @@ function rig(init: {waiting?: boolean; online?: boolean} = {}) {
         return t;
       },
       cancel: (h) => void (timers = timers.filter((t) => t !== h)),
-      onHidden: (fn) => {
-        hiddenSubs.add(fn);
-        return () => void hiddenSubs.delete(fn);
-      },
+      onEdge: (fn) => void edgeSubs.add(fn),
       log: (e, f) => void r.logs.push([e, f]),
       notify: (m) => void r.said.push(m)
     } satisfies SelfNavDeps
@@ -83,7 +86,6 @@ describe('self-navigation gate', () => {
     expect(r.went).toEqual([null]);
     expect(before).toBe(1);
     expect(r.logs[0]).toEqual(['nav.go', {why: 'chunk-missing', waited: 0, hidden: false}]);
-    expect(r.subs.size, 'the background listener was not removed').toBe(0);
     expect(r.said).toEqual([]);
   });
 
@@ -130,39 +132,67 @@ describe('self-navigation gate', () => {
     expect(r.asks).toBe(0);
   });
 
-  // Offline + a worker waiting (WebKit silently failed the network navigation
-  // and the gate stayed spent: a second sign-out did nothing).
-  test('offline: the hatch is not tried, the user is told, and a second attempt still works', async () => {
-    const r = rig({waiting: true, online: false});
-    const gate = createSelfNavGate(r.deps);
-    gate({why: 'sign-out', notice: 'Signing out…', to: () => '/'});
-    await r.step(WAITING_MAX_MS + 600);
-    expect(r.went).toEqual([]);
-    expect(r.said).toEqual(['Signing out…', OFFLINE_NOTICE]);
-    expect(r.events()).toContain('nav.offline');
-    expect(r.subs.size).toBe(0);
-    r.st.online = true;
-    gate({why: 'sign-out', to: () => '/'});
-    await r.step(WAITING_MAX_MS + 600);
-    expect(r.went).toEqual(['https://app.example/?cyc-net=1']);
+  // Offline + a worker waiting. The update and missing-chunk reloads kept
+  // their own one-time flags, so after "You're offline" they never came back
+  // (verifier round 3). The gate keeps the navigation pending instead.
+  test('offline: not tried, the user is told; it stays pending and the next edge lands it', async () => {
+    for (const why of ['update', 'chunk-missing', 'sign-out']) {
+      const r = rig({waiting: true, online: false});
+      const gate = createSelfNavGate(r.deps);
+      gate({why, to: why === 'sign-out' ? () => '/' : undefined});
+      await r.step(WAITING_MAX_MS + 600);
+      expect(r.went, why).toEqual([]);
+      expect(r.said, why).toEqual([OFFLINE_NOTICE]);
+      expect(r.events(), why).toContain('nav.offline');
+      await r.step(60_000);
+      expect(r.went, 'retried with no edge').toEqual([]);
+      r.st.online = true;
+      r.edge();
+      await r.step(0);
+      expect(r.went, why).toHaveLength(1);
+      expect(r.went[0], why).toContain('cyc-net=1');
+    }
   });
 
-  test('a navigation that leaves the page alive releases the gate', async () => {
+  test('offline: the next request re-uses the pending navigation and decides again', async () => {
+    const r = rig({waiting: true, online: false});
+    const gate = createSelfNavGate(r.deps);
+    let before = 0;
+    gate({why: 'update', before: () => void before++});
+    await r.step(WAITING_MAX_MS + 600);
+    r.st.online = true;
+    gate({why: 'update', before: () => void (before += 100)});
+    await r.step(0);
+    expect(r.went).toEqual(['https://app.example/?chat=x&cyc-net=1#app']);
+    expect(before, 'the first, pending navigation went').toBe(1);
+  });
+
+  test('a user action replaces a pending reload (a sign-out never waits on a draft)', async () => {
+    const r = rig();
+    const gate = createSelfNavGate(r.deps);
+    gate({why: 'update', hold: () => 'draft'});
+    await r.step(5000);
+    gate({why: 'sign-out', notice: 'Signing out…', to: () => '/'});
+    await r.step();
+    expect(r.went).toEqual(['/']);
+  });
+
+  test('a navigation that leaves the page alive is decided again on the next edge', async () => {
     const r = rig();
     const gate = createSelfNavGate(r.deps);
     gate({why: 'sign-out', to: () => '/'});
     await r.step();
     expect(r.went).toEqual(['/']);
-    // still here: a second request stands down until the attempt is known failed
+    // still navigating: an edge or a new request does not start a second one
+    r.edge();
     gate({why: 'sign-out', to: () => '/'});
     await r.step();
     expect(r.went).toEqual(['/']);
-    r.st.online = false;
     await r.step(ALIVE_MS);
     expect(r.events()).toContain('nav.failed');
-    expect(r.said).toEqual([OFFLINE_NOTICE]);
-    gate({why: 'sign-out', to: () => '/'});
-    await r.step();
+    expect(r.said, 'no second notice on a slow navigation').toEqual([]);
+    r.edge();
+    await r.step(0);
     expect(r.went).toEqual(['/', '/']);
   });
 
@@ -199,13 +229,13 @@ describe('self-navigation gate', () => {
     expect(r.went).toEqual([null]);
   });
 
-  test('one self-navigation at a time: a second request stands down', async () => {
+  test('one pending navigation: a second automatic request re-uses it', async () => {
     const r = rig();
     const gate = createSelfNavGate(r.deps);
     gate({why: 'chunk-missing'});
     gate({why: 'update', to: () => '/x'});
     await r.step();
     await r.step();
-    expect(r.went.length).toBe(1);
+    expect(r.went).toEqual([null]);
   });
 });
