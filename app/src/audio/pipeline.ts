@@ -203,6 +203,12 @@ class Pipeline {
     return !!this.stream;
   }
 
+  // A take is still recording, or a released take is still capturing its tail
+  // (the recorder's linger and the live stream's tail): the mic is in use.
+  get micInUse(): boolean {
+    return !!this.active || !!this.tailFor || this.ring.draining > 0;
+  }
+
   get captureBusy(): boolean {
     return this.pttDown || this.inFlight.size > 0 || this.ring.draining > 0;
   }
