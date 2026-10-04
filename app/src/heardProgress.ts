@@ -163,5 +163,19 @@ export function createHeardProgress(deps: HeardProgressDeps) {
     if (moved) deps.onHeardMarked(sessionId, moved.mid ? moved : {ts: moved.ts});
   }
 
-  return {heardTsOf, readMarkerOf, markSeen, reportViewedThrough, markHeard, noteOnScreen};
+  /* Has this row been on screen or heard to the end, and is it still ahead of
+   * the marker? Speech asks this so a heard clip is never picked again. */
+  function heardOrSeen(sessionId: string, rowId: string): boolean {
+    return seenOf(sessionId).has(rowId);
+  }
+
+  return {
+    heardTsOf,
+    readMarkerOf,
+    markSeen,
+    reportViewedThrough,
+    markHeard,
+    noteOnScreen,
+    heardOrSeen
+  };
 }

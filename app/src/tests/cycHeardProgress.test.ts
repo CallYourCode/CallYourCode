@@ -258,6 +258,24 @@ describe('B2: the marker only moves through a contiguous run of rows that were o
   });
 });
 
+describe('heardOrSeen: what speech must not pick again (release-1 B1)', () => {
+  test('a clip heard to the end after an unseen row is heard, though the marker stays', () => {
+    const {hp, sightings} = makeWorld({
+      messages: [
+        msg({id: 1, ts: 100, mid: 'mr-1'}),
+        msg({id: 2, ts: 200, mid: 'mr-2', msgId: 'b'}),
+        msg({id: 3, ts: 300, mid: 'mr-3', msgId: 'c'})
+      ],
+      broadcast: {mid: 'mr-1', ts: 100},
+      onScreen: []
+    });
+    hp.markHeard('s1', 'c');
+    expect(sightings).toEqual([]); // mr-2 unseen: the marker does not move
+    expect(hp.heardOrSeen('s1', '3')).toBe(true);
+    expect(hp.heardOrSeen('s1', '2')).toBe(false);
+  });
+});
+
 describe('markHeard', () => {
   test('sights the played row and pins it in the open chat', () => {
     const {hp, sightings, heardMarked} = makeWorld({

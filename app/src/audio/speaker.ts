@@ -70,7 +70,16 @@ class Speaker {
       const done = this.current;
       this.current = null;
       // played through to its end: the one moment a clip counts as heard
-      if (done) for (const fn of [...this.endedListeners]) fn(done);
+      // a throwing listener must not stall the queue behind it
+      if (done) {
+        for (const fn of [...this.endedListeners]) {
+          try {
+            fn(done);
+          } catch (e) {
+            console.warn('[speaker] ended listener threw', e);
+          }
+        }
+      }
       if (this.queue.length) this.playNext();
       else {
         this.emit('finished', done || undefined);
