@@ -7,6 +7,13 @@ import {compile} from 'tailwindcss';
 import {chromium, type Browser} from 'playwright';
 
 import {makeIconButton, BTN_ICON_BASE} from '../components/iconGlyphs';
+import {createComposer} from '../features/composer/components/messageComposer';
+
+(globalThis as {ResizeObserver?: unknown}).ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SHELL = resolve(HERE, '..', 'shell');
@@ -138,6 +145,29 @@ describe('cyc-icon-btn skin: the layered literals reproduce the computed cascade
       expect(o.backgroundColor).toBe('rgb(0, 0, 0)');
       expect(o.fontSize).toBe('24px');
       expect(o.paddingLeft).toBe('8px');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('rec lock chip: its surface background beats the reset\'s button transparent', () => {
+  test('the lock chip above the mic computes an opaque --cyc-surface background', async () => {
+    const lock = createComposer({} as never).el.querySelector<HTMLElement>('.cyc-rec-lock')!;
+    lock.id = 'lock';
+    const utilities = await compileTailwind(tokenize(lock.className));
+    const shell =
+      readFileSync(resolve(SHELL, 'reset.css'), 'utf8') +
+      '\n' +
+      readFileSync(resolve(SHELL, 'utilities.css'), 'utf8');
+    const html =
+      `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${utilities}\n${shell}\n` +
+      `:root{--cyc-surface:rgb(1, 2, 3)}</style></head><body>${lock.outerHTML}</body></html>`;
+    const page = await (await getBrowser()).newPage();
+    try {
+      await page.setContent(html, {waitUntil: 'load'});
+      const bg = await page.$eval('#lock', (el) => getComputedStyle(el).backgroundColor);
+      expect(bg).toBe('rgb(1, 2, 3)');
     } finally {
       await page.close();
     }

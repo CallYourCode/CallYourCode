@@ -278,7 +278,7 @@ export function createComposer({
     'cyc-icon-btn cyc-ctl-round cyc-rec-lock absolute left-1/2 -translate-x-1/2 [bottom:calc(100%+0.625rem)] ' +
       'flex-none items-center justify-center text-[1.5rem]! text-(--cyc-text-muted) p-0! w-10! h-10! ' +
       'leading-[var(--cyc-circle-size)] ' +
-      'bg-[var(--cyc-surface)] [box-shadow:0_1px_4px_rgba(0,0,0,0.35)] z-[3] hidden! ' +
+      'bg-[var(--cyc-surface)]! [box-shadow:0_1px_4px_rgba(0,0,0,0.35)] z-[3] hidden! ' +
       `${COMPOSER_ICON_TRANSITION} [.cyc-composer[data-cyc-recording]:not(.cyc-rec-locked)_&]:flex! ${BTN_HOVER_UTILS}`
   );
   paintActionControlSize(lockChip);
