@@ -24,6 +24,7 @@ export function decodeChat(frame: any): EngineChatMessage | null {
   if (frame.wordsFailed === true) m.wordsFailed = true;
 
   if (frame.transcriptPending === true) m.transcriptPending = true;
+  if (typeof frame.undelivered === 'string' && frame.undelivered) m.undelivered = frame.undelivered;
 
   if (typeof frame.scheduled === 'string' && frame.scheduled) m.scheduled = frame.scheduled;
   if (Number.isFinite(frame.durationS)) m.durationS = Number(frame.durationS);

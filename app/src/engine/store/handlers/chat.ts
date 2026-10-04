@@ -186,6 +186,7 @@ export function wireChat(conn: Conn, ctx: HandlerCtx): void {
     if (m.wordsFailed) msg.wordsFailed = true;
 
     if (m.transcriptPending) msg.transcriptPending = true;
+    if (m.undelivered) msg.undelivered = m.undelivered;
 
     if (m.scheduled) msg.scheduled = m.scheduled;
     if (m.role === 'user') {

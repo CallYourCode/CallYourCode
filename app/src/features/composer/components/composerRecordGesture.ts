@@ -229,7 +229,16 @@ export function createComposerRecordGesture(deps: ComposerRecordGestureDeps) {
       setTimeout(again, 100);
       return;
     }
-    if (awaitingClip || awaitingCommit) return;
+    if (awaitingClip || awaitingCommit) {
+      cyclog('send.press-held', {
+        awaitingClip,
+        awaitingCommit,
+        why:
+          'a send from this box is already under way (its recording or its words are ' +
+          'still coming, and the card says so); this press is that message, not a second one'
+      });
+      return;
+    }
 
     const typed = getText();
     const {parts, answering} = sendPlan(blocks, typed);

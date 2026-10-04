@@ -114,6 +114,13 @@ export function messageRow(sessionId: string, m: CycEngineMessage): StoreRow {
   // whose fields gained a cid or mid since it was built (a settled echo) is
   // re-stamped here so msg.id can never lag the key it is stored under.
   m.id = id;
+  // A note the engine gave up delivering is a failed send, with the engine's
+  // reason, on every device: the one place that is decided (every row, a page
+  // or a live frame, comes in through here).
+  if (m.undelivered) {
+    m.status = 'failed';
+    m.failReason = m.undelivered;
+  }
   return {id, sessionId, seq: m.seq ?? -1, kind: 'msg', ts: m.ts, msg: m};
 }
 
@@ -500,7 +507,8 @@ function carryClientFields(inc: CycEngineMessage, next: CycEngineMessage): void 
   if (!next.msgId && inc.msgId) next.msgId = inc.msgId;
   if (!next.upload && inc.upload) next.upload = inc.upload;
   if (!next.uploads && inc.uploads) next.uploads = inc.uploads;
-  if (!next.status && inc.status) next.status = inc.status;
+  // (a failed mark that came from `undelivered` is the engine's, not carried)
+  if (!next.status && inc.status && !inc.undelivered) next.status = inc.status;
 }
 
 // The one place the twin dies: for each arriving mid row not already held under

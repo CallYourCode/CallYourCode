@@ -328,18 +328,21 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       // until the words land. So a plain note ships AT ONCE with no body and no
       // wait; the composer clears synchronously.
       //
-      // The engine only fills a voice note whose body is empty (a non-empty
-      // body is the device's own words and is left alone), so when the user
-      // typed a caption or is answering with a reply excerpt -- text that MUST
-      // ride the wire -- the engine will NOT server-fill this note. In that
-      // case, and on an engine without server words at all, the on-device
-      // decoder is the only transcript source, so we bound-wait
-      // (`settleHeldWords`, up to 10s) for it to settle before reading the
-      // body, restoring the full device transcript alongside the caption
-      // rather than shipping whatever partial the card happened to hold.
-      // `words` markers do not apply here: they fill uploads listed on a text
-      // message, not a voice note's own clip.
+      // A caption or a reply excerpt is text that MUST ride the wire beside the
+      // words. An engine that can 'note-words' takes that note at once too:
+      // the body is the caption with a marker naming this send's cid where the
+      // words belong, the wire puts the reply quote on top, and the engine
+      // reads the clip into the marker (deliver.ts noteWords). The agent gets
+      // quote, words and caption as one message, the same text a send that
+      // waited for the words produced.
+      //
+      // An engine with server words but without 'note-words' only fills an
+      // empty body and would hand the marker to the agent as text; there, and
+      // on an engine without server words at all, the on-device decoder is the
+      // only transcript source, so the send bound-waits (`settleHeldWords`, up
+      // to 10s) for it, and the card says the message is waiting for its words.
       const canWords = engine.engineCan(s.id, 'words');
+      const canNoteWords = canWords && engine.engineCan(s.id, 'note-words');
       const hasReplyExcerpt = !!replyTo?.text?.trim();
       // The caption/quote typed alongside the recording, with the recording's
       // own (still-settling) words suppressed.
@@ -347,7 +350,11 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       const needsBody = !!alongsideText || hasReplyExcerpt;
       const shipVoice = (
         body: string,
-        extra?: {partial?: {text: string; upToS: number}; streaming?: boolean}
+        extra?: {
+          partial?: {text: string; upToS: number};
+          streaming?: boolean;
+          into?: {cid: string; body: string};
+        }
       ): Promise<SendSettled> => {
         const capId = loneCap!;
         cap.heldClips.delete(capId);
@@ -356,6 +363,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           durationS: st.durationS,
           text: body,
           ...(extra?.partial ? {partial: extra.partial} : {}),
+          ...(extra?.into ? {cid: extra.into.cid, into: extra.into.body} : {}),
           // An empty-body ship paints the device's own transcript-so-far on
           // the sent bubble, and (draftCommitted set, even at zero chars)
           // keeps the row OPEN so the capture's later partials grow it live.
@@ -382,32 +390,60 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           delivered: settling
         });
       };
-      if (canWords && !needsBody) {
-        // Instant, no wait (the owner's common record-then-Enter case), and
-        // the words this device already settled go WITH the send: the point
-        // of streaming transcription is that the engine never re-reads audio
-        // the device already turned into text.
+      if (canWords && (!needsBody || canNoteWords)) {
+        // Instant, no wait (the owner's common record-then-Enter case, and a
+        // note answering a quote or carrying a caption), and the words this
+        // device already settled go WITH the send: the point of streaming
+        // transcription is that the engine never re-reads audio the device
+        // already turned into text.
         const p = settledPartialOf(cap.partialByCapture.get(loneCap), st.durationS);
         if (p?.whole) {
           // The streaming decoder finalized the whole clip: the settled text
-          // IS the transcript. It ships as the body; the engine decodes
-          // nothing and the bubble is final at once.
-          return shipVoice(p.text);
+          // IS the transcript. It ships as the body (beside any caption); the
+          // engine decodes nothing and the bubble is final at once.
+          return shipVoice(compose((sg) => (sg === st ? p.text : undefined)).text.trim());
         }
         // Empty body plus the settled prefix: the engine decodes only the
         // tail past upToS and prepends this text. No prefix settled yet: the
         // engine reads the whole clip, exactly as before.
-        return shipVoice('', {
-          ...(p ? {partial: {text: p.text, upToS: p.upToS}} : {}),
-          streaming: true
+        const partial = p ? {partial: {text: p.text, upToS: p.upToS}} : {};
+        if (!needsBody) return shipVoice('', {...partial, streaming: true});
+        const cid = crypto.randomUUID();
+        const body = compose((sg) => (sg === st ? engine.wordsMarker(cid) : undefined)).text;
+        cyclog('send.note-words', {
+          session: s.id,
+          cid,
+          reply: hasReplyExcerpt,
+          chars: alongsideText.length,
+          partial: p ? `${p.upToS.toFixed(1)}s:${p.text.length}c` : undefined,
+          why:
+            'the note goes now with its quote and caption around a marker; the engine ' +
+            'reads the recording into the marker, so the send does not wait for the words'
         });
+        return shipVoice('', {...partial, streaming: true, into: {cid, body: body.trim()}});
       }
-      // A body must ride the wire (caption/reply) or the engine cannot fill
-      // it (`!canWords`): the device is the only transcript source, so wait
-      // for it to settle, then bake the full transcript in.
+      // A body must ride the wire and this engine cannot fill the words into
+      // it: the device is the only transcript source, so wait for it to
+      // settle, then bake the full transcript in. The card says so meanwhile.
+      const card = cap.heldClips.get(loneCap);
+      cyclog('send.words-wait', {
+        session: s.id,
+        reply: hasReplyExcerpt,
+        chars: alongsideText.length,
+        engineCan: canWords ? 'words' : 'none',
+        why:
+          'this engine cannot fill this note\'s words itself (no server words, or none ' +
+          'beside a quote or caption), so the send waits for this device\'s decoder; the ' +
+          'card shows it is waiting for its words'
+      });
+      card?.update({wordsWait: true});
       return (async () => {
-        await settleHeldWords();
-        return shipVoice(compose().text.trim());
+        try {
+          await settleHeldWords();
+          return await shipVoice(compose().text.trim());
+        } finally {
+          card?.update({wordsWait: false});
+        }
       })();
     }
 

@@ -39,6 +39,7 @@ type IoOpts = {
   session?: DeliverSession;
   note?: { deliveryId: string; at: number };
   sendKeysThrows?: number; // fail the first N sendKeys calls, then succeed
+  resumed?: "typing" | "entering"; // the on-disk stage deliver.ts hands on
 };
 
 type Rig = {
@@ -72,6 +73,7 @@ function rig(opts: IoOpts): Rig {
       unsubmitted,
       sessionFor: () => opts.session,
       canParseScreen: () => opts.canParse ?? true,
+      ...(opts.resumed ? { resumed: opts.resumed } : {}),
       async readScreen() {
         r.reads++;
         const s = screens.shift();
@@ -314,6 +316,9 @@ test("slider-move dedupe: a reply-slider change between attempts keeps the enter
     screens: [input(true), input(false)],           // box still holds the stranded body, then clears
     canParse: true,
     note: { deliveryId: DID, at: Date.now() },       // attempt 1's stranded note
+    /* attempt 1's failure also left the on-disk stage; inside the same process
+     * the believable note decides, as on main (reply-words verify4 R1a) */
+    resumed: "typing",
   });
   const out = await runDeliveryMachine(r.io, PANE, BODY_B, DID, Date.now());
   expect(out.kind).toBe("delivered");

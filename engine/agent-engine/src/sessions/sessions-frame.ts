@@ -24,6 +24,7 @@ import { sessions, getManualOrder, nameOverrideOf, settingsOf, photoOf,
 import { clients, send } from "../transport/wire.ts";
 import type { Sock } from "../transport/sock.ts";
 import type { PluginDecl } from "../plugins/platform/spec.ts";
+import { failedFrames } from "../chat/intake.ts";
 
 /* PER-CAPABILITY VOICE READINESS, carried on the same {t:"voice"} frame as the
  * unit health. `healthy` is the all-or-none unit (mic + call mode); `ready` is
@@ -433,4 +434,7 @@ export function sendHelloBurst(ws: Sock) {
   }
   send(ws, { t: "host", user: C().engineUser, host: C().engineHost });
   sendFullSessions(ws);
+  // sends this process gave up on, so the sender's bubble fails even if it
+  // was not connected when it happened (chat/deliver.ts failTake)
+  for (const f of failedFrames()) send(ws, f);
 }

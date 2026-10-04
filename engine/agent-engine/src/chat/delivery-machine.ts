@@ -18,7 +18,7 @@
 // no mux and no herdr. The five delivery timings are DEFINED in mux-adapter.ts
 // and imported here, so there is one definition of each and no new literal.
 
-import { refusesDelivery, flat, tailVisible, TAIL_MAX, type PaneBox } from "../terminal/blocked.ts";
+import { refusesDelivery, flat, tailVisible, inputBoxText, TAIL_MAX, type PaneBox } from "../terminal/blocked.ts";
 import type { DeliverDeps } from "../adapters/mux-adapter.ts";
 import {
   settleMs,
@@ -165,8 +165,34 @@ export async function runDeliveryMachine(
    * can tell us. */
   const note = io.unsubmitted.get(paneId);
   const believable = !!note && note.deliveryId === deliveryId && Date.now() - note.at < strandedTtlMs();
-  const stillThere = believable && (
+  let stillThere = believable && (
     canParse ? box.kind === "input" && box.hasContent : tailVisible(pre, text));
+  if (io.resumed && !believable) {
+    /* A STOPPED PROCESS GOT THIS FAR (a believable note means this process
+     * made the attempt, and main's rule above stands), so only positive evidence acts: the box
+     * holding exactly this body gets Enter only; a box positively empty after
+     * `entering` means the Enter took it (nothing typed again), after `typing`
+     * that nothing landed (typed fresh). Anything else -- a screen this engine
+     * cannot read as a box, someone else's draft, a collapsed paste -- is not
+     * guessed at: nothing is pressed and the send fails visibly. */
+    const inBox = canParse && box.kind === "input" ? inputBoxText(pre) : null;
+    const empty = box.kind === "input" && inBox !== null && !box.hasContent;
+    stillThere = box.kind === "input" && inBox !== null && box.hasContent && flat(inBox) === flat(text);
+    if (empty && io.resumed === "entering") {
+      console.log(`[deliver] ${paneId}: the body a stopped process was entering is gone from the ` +
+        `input; it was submitted, so nothing is typed again`);
+      return { kind: "delivered" };
+    }
+    if (!empty && !stillThere) {
+      return {
+        kind: "refusedUnreadable",
+        why: "the engine stopped while delivering this and the pane does not show plainly " +
+          "whether it arrived (the box holds other text, or cannot be read); nothing was pressed",
+        tell: "(not sent: the engine restarted while delivering this and cannot tell whether it " +
+          "arrived. Check the session, then send it again.)",
+      };
+    }
+  }
   let typedThisAttempt = false;
   if (stillThere) {
     // STATE skipType (row 6, skip branch): the body is there, enter-only retry.
@@ -180,6 +206,7 @@ export async function runDeliveryMachine(
     // STATE gateDeadline2 (row 6): the second deadline gate, just before typing.
     if (outOfTime()) return gaveUp("the pane was still not answering when its turn came");
     // STATE type (row 6): type the body and set the note.
+    await io.progress?.("typing");
     await io.mux.sendText(paneId, text);
     io.unsubmitted.set(paneId, { deliveryId, at: Date.now() });
     typedThisAttempt = true;
@@ -236,6 +263,7 @@ export async function runDeliveryMachine(
   }
 
   // STATE enter (row 9): press enter, one retry on throw with a settle between.
+  await io.progress?.("entering");
   try {
     await io.mux.sendKeys(paneId, "enter");
   } catch {

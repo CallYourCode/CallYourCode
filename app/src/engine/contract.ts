@@ -241,6 +241,8 @@ export type EngineChatMessage = {
   wordsFailed?: boolean;
 
   transcriptPending?: boolean;
+  /** the engine gave up delivering this note: the reason */
+  undelivered?: string;
   file?: EngineFileRef;
 
   scheduled?: string;

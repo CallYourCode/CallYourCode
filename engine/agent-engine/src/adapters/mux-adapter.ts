@@ -582,6 +582,13 @@ export type DeliverDeps = {
    *  the reader's parseScreen presence, folded from the old dialogs/composer
    *  profile fields. */
   canParseScreen: (handle: string) => boolean;
+  /** Called (and awaited) before the body is typed ("typing") and before the
+   *  Enter ("entering"). The caller keeps it on disk for a restart (intake.ts
+   *  Stage). */
+  progress?: (stage: "typing" | "entering") => Promise<void>;
+  /** How far a stopped process got with THIS delivery (delivery-machine
+   *  noteCheck acts on it only with positive evidence from the box). */
+  resumed?: "typing" | "entering";
 };
 
 /* `takenAt` is WHEN THE ENGINE TOOK THIS MESSAGE, and it is a parameter rather
@@ -1279,6 +1286,8 @@ export class MuxAdapter implements MultiplexerAdapter {
       sessionFor: deps?.sessionFor ?? ((h) => this.sessionFor(h)),
       readScreen: deps?.readScreen ?? ((h) => this.parseScreen(h)),
       canParseScreen: deps?.canParseScreen ?? ((h) => this.canParseScreen(h)),
+      progress: deps?.progress,
+      resumed: deps?.resumed,
     }, handle, text, deliveryId, takenAt);
   }
 

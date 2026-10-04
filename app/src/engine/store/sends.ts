@@ -6,7 +6,7 @@ import * as sync from '../sync';
 import {cyclog} from '@/shared/logging';
 import type {CycMessage, CycReplyTo} from '../../types';
 import type {CycUpload} from '../contract';
-import type {CycEngineMessage} from './types';
+import type {CycEngineMessage, CycEngineSession} from './types';
 import {connOf, findLocal, notifyNow, sessions} from './registry';
 import {stampRowId} from './rows/core';
 import {retryVoiceClip} from './voiceUpload';
@@ -99,7 +99,8 @@ export function __resetForTest(): void {
 }
 
 export function isLocalOnly(m: CycMessage): boolean {
-  return m.status === 'sending' || m.status === 'failed';
+  // a note the engine gave up on is its row, failed, not a local send
+  return (m.status === 'sending' || m.status === 'failed') && !m.undelivered;
 }
 
 // Place a painted bubble in ts order (a resurrected old send sits behind every
@@ -372,8 +373,39 @@ export function paintPendingSends(sessionId: string) {
   }
 }
 
+// A note the engine gave up delivering (its row's `undelivered`). The clip is
+// on the engine and the failed row keeps its quote and caption, so the retry
+// is a NEW send naming the clip with no body; the engine puts the words into
+// that quote and caption. Its cid is derived from the failed one, so a second
+// tap, or a tap on another device, is the same send and is delivered once. The
+// failed row stays as it is. clipKey: a failed retry of it is the wire again.
+function retryUndelivered(s: CycEngineSession, m: CycEngineMessage): void {
+  const cid = `${m.cid}-r`;
+  if (findByCid(s.id, cid)) return; // retried already
+  cyclog('voiceclip.retry.undelivered', {cid, of: m.cid, session: s.id, msgId: m.msgId});
+  const ts = Date.now();
+  const payload = {
+    cid,
+    sessionId: s.id,
+    ts,
+    text: '',
+    kind: 'voice' as const,
+    wire: '',
+    msgId: m.msgId,
+    durationS: m.durationS,
+    replyTo: m.replyTo,
+    clipKey: cid
+  };
+  paintSend(
+    intents.put({id: cid, engineKey: s.engineKey, sessionId: s.id, kind: 'send-text', payload})
+  );
+  drain.kick(s.engineKey);
+}
+
 export function retrySend(sessionId: string, localId: string) {
   const m = findLocal(sessionId, localId);
+  const s = sessions.get(sessionId);
+  if (m?.undelivered && m.cid && m.msgId && s) return retryUndelivered(s, m);
   // A voice note carries its payload as a recording kept in the clipVault, not as
   // a replayable wire body: re-send it from those bytes over the transfer
   // contract rather than replaying an empty wire.
