@@ -23,7 +23,7 @@
 // re-activates (drops old caches + clients.claim). In app/public it stays the
 // literal placeholder. cyc-precache.json's version drives the cache name, and
 // install checks that it is this build's (cycPrecacheInstall).
-const CYC_BUILD = '1791081884';
+const CYC_BUILD = '1791086168';
 
 const CYC_CACHE_PREFIX = 'cyc-precache-';
 const CYC_MANIFEST_URL = '/cyc-precache.json';
