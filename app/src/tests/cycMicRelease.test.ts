@@ -5,7 +5,9 @@ import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 // app was backgrounded). The release path asked to dispose the mic, but the
 // gate treated a released take that was only waiting on its transcript as a
 // reason to keep the mic, so the dispose only happened on the verdict's idle
-// edge. These drive the real pipeline, the real composer wiring and the real
+// edge. The mic's job ends when the take's clip is finished: the recorder's
+// 600 ms tail is captured, then the mic goes, while the transcript is still
+// pending. These drive the real pipeline, the real composer wiring and the real
 // ensureMic over a fake getUserMedia/AudioContext/MediaRecorder, so the only
 // thing faked is the browser and the decoder.
 
@@ -77,15 +79,17 @@ import {ensureMic, mic} from '../speechGate';
 import {createComposerWiring} from '../features/composer/wiring';
 import {dataState, sessionState} from '../sessionState';
 
-type FakeTrack = {readyState: 'live' | 'ended'; muted: boolean; stop(): void};
+type FakeTrack = {readyState: 'live' | 'ended'; muted: boolean; endedAt: number; stop(): void};
 let streams: {tracks: FakeTrack[]}[] = [];
 
 function fakeStream() {
   const track: FakeTrack = {
     readyState: 'live',
     muted: false,
+    endedAt: Infinity,
     stop() {
       this.readyState = 'ended';
+      this.endedAt = Date.now();
     }
   };
   const tracks = [track];
@@ -112,19 +116,25 @@ class FakeAudioContext {
   }
 }
 
+// One byte per millisecond the recorder heard a live track, so a clip's size
+// says how much audio it holds, tail included.
 class FakeMediaRecorder {
   static isTypeSupported = () => false;
   state = 'inactive';
+  startedAt = 0;
   ondataavailable: ((e: {data: Blob}) => void) | null = null;
   onstop: (() => void) | null = null;
+  constructor(private stream: {getTracks(): FakeTrack[]}) {}
   start() {
     this.state = 'recording';
+    this.startedAt = Date.now();
   }
   stop() {
     if (this.state === 'inactive') return;
     this.state = 'inactive';
+    const heard = Math.min(Date.now(), this.stream.getTracks()[0].endedAt) - this.startedAt;
     setTimeout(() => {
-      this.ondataavailable?.({data: new Blob([new Uint8Array(4000)])});
+      this.ondataavailable?.({data: new Blob([new Uint8Array(heard)])});
       this.onstop?.();
     }, 0);
   }
@@ -156,8 +166,9 @@ beforeEach(() => {
   vi.mocked(engine.transcribe).mockImplementation(
     () => new Promise<string>((r) => decodes.push(r))
   );
+  offs = [];
   api = createComposerWiring({
-    onTeardown: () => {},
+    onTeardown: (d) => offs.push(d),
     clearUnreadAnchor: vi.fn(),
     scrollToBottom: vi.fn(),
     render: vi.fn(),
@@ -165,11 +176,11 @@ beforeEach(() => {
   });
   // The app's own idle edge (pipelineUiBindings via main.ts) also asks for a
   // release; keep it so the old verdict-time dispose is reproduced faithfully.
-  offs = [
+  offs.push(
     pipeline.on('recording', (s) => {
       if (s === 'idle') api.releaseMicIfIdle();
     })
-  ];
+  );
 });
 
 afterEach(async () => {
@@ -193,48 +204,49 @@ async function recordFor(ms: number) {
   await vi.advanceTimersByTimeAsync(ms);
 }
 
-describe('the mic is released when the take is, not when its transcript lands', () => {
-  test('after a release the tracks stop at once while the decode is still pending', async () => {
-    await recordFor(3000);
-    letGo();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(liveTracks()).toBe(0);
-    expect(mic.ready).toBeNull();
-
-    // The take carries on from what was captured: its clip is decoded and the
-    // verdict still lands, with the mic already off.
+describe('the mic is released when the take is finished, not when its transcript lands', () => {
+  test('the tracks stop right after the tail, with the decode still pending, and the clip keeps the tail', async () => {
+    const clips: number[] = [];
+    offs.push(pipeline.on('clip', (b) => clips.push(b.size)));
     const utterances: string[] = [];
     offs.push(pipeline.on('utterance', (text) => utterances.push(text)));
-    await vi.advanceTimersByTimeAsync(1000);
+    await recordFor(3000);
+    letGo();
+    // The 600 ms tail is still being captured: the mic stays.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(liveTracks()).toBe(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(liveTracks()).toBe(0);
+    expect(mic.ready).toBeNull();
+    // 3000 ms held plus the 600 ms tail, all heard on a live track.
+    expect(clips).toEqual([3600]);
     expect(decodes).toHaveLength(1);
     expect(pipeline.capturesInFlight).toHaveLength(1);
+
+    // The take carries on from its clip: the verdict lands with the mic off.
     decodes[0]('hello there');
     await vi.advanceTimersByTimeAsync(0);
     expect(utterances).toEqual(['hello there']);
     expect(pipeline.capturesInFlight).toHaveLength(0);
   });
 
-  test('backgrounding with no press down stops the tracks while a decode is pending', async () => {
-    // A take ended by the pipeline itself (no composer release, so nothing has
-    // asked for the mic back yet) leaves the mic open with its decode pending;
-    // the page then goes to the background, which storeBindings answers with
-    // releaseMicIfIdle().
-    await ensureMic();
-    pipeline.startPTT();
-    await vi.advanceTimersByTimeAsync(3000);
-    pipeline.endPTT();
-    expect(pipeline.capturesInFlight).toHaveLength(1);
-    expect(liveTracks()).toBe(1);
+  test('backgrounding with no press down stops the tracks after the tail while a decode is pending', async () => {
+    // 09:55:06: released, then the app goes to the background, which
+    // storeBindings answers with releaseMicIfIdle().
+    await recordFor(3000);
+    letGo();
+    await vi.advanceTimersByTimeAsync(100);
     api.releaseMicIfIdle();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(600);
     expect(liveTracks()).toBe(0);
+    expect(decodes).toHaveLength(1);
     expect(pipeline.capturesInFlight).toHaveLength(1);
   });
 
   test('a new press after a release re-acquires the mic and records normally', async () => {
     await recordFor(2000);
     letGo();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(700);
     expect(liveTracks()).toBe(0);
 
     await recordFor(2000);
@@ -242,10 +254,9 @@ describe('the mic is released when the take is, not when its transcript lands', 
     const clips: number[] = [];
     offs.push(pipeline.on('clip', (b) => clips.push(b.size)));
     letGo();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(700);
     expect(liveTracks()).toBe(0);
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(clips).toEqual([4000]);
+    expect(clips).toEqual([2600]);
   });
 
   test('a press before the previous verdict, then its release: the mic never waits on either verdict', async () => {
@@ -253,7 +264,7 @@ describe('the mic is released when the take is, not when its transcript lands', 
     // take 10's verdict, so no idle edge came and nothing disposed the mic.
     await recordFor(3000);
     letGo();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(700);
     expect(liveTracks()).toBe(0);
 
     await recordFor(2000);
@@ -262,7 +273,7 @@ describe('the mic is released when the take is, not when its transcript lands', 
     expect(liveTracks()).toBe(1);
 
     letGo();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(700);
     expect(liveTracks()).toBe(0);
     expect(pipeline.capturesInFlight).toHaveLength(1);
   });

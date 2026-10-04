@@ -94,7 +94,8 @@ const pipelineMock = vi.hoisted(() => ({
   startPTT: vi.fn(),
   endPTT: vi.fn(),
   cancelCapture: vi.fn(),
-  forceEnd: vi.fn()
+  forceEnd: vi.fn(),
+  on: vi.fn(() => () => {})
 }));
 vi.mock('../audio/pipeline', () => ({pipeline: pipelineMock}));
 const micMock = vi.hoisted(() => ({ready: null as Promise<void> | null}));

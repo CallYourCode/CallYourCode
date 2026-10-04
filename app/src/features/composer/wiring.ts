@@ -81,9 +81,10 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       if (pipeline.handsFreeSessionId) return;
       if (sessionState.activeId && sessionState.chatConversationMode.has(sessionState.activeId))
         return;
-      // Only a take still recording needs the mic. A released take decodes
-      // from what it already captured, so its transcript never holds the mic.
-      if (pipeline.liveCaptureId) {
+      // Only a take still recording or capturing its tail needs the mic. A
+      // released take decodes from its finished clip, so its transcript never
+      // holds the mic.
+      if (pipeline.micInUse) {
         if (retries > 0) window.setTimeout(() => attempt(retries - 1), 400);
         return;
       }
@@ -103,6 +104,9 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
     };
     void p.catch(() => {}).then(() => window.setTimeout(() => attempt(4), 0));
   }
+  // A finished clip means its tail is captured: ask again so the mic goes at
+  // once, not at the next retry.
+  deps.onTeardown(pipeline.on('clip', () => releaseMicIfIdle()));
 
   const cap = createCaptureState();
 
