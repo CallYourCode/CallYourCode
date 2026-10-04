@@ -31,6 +31,7 @@ import { wireCore, type WireCore, type WireCoreOpts, type FakeClient, wireId } f
 import { PANE } from "../test-utils/fake-herdr.ts";
 import { until, settle } from "../test-utils/wait.ts";
 import { onChat } from "./reply.ts";
+import { dispatchClientFrame } from "../transport/frames.ts";
 import { batchMs, ceilingMs, ceilingTickMs, sendDismissal } from "./notify.ts";
 import { onPresenceChange, graceMs, stableMs, recentUseMs } from "../sessions/presence.ts";
 import { unreadOf } from "../sessions/readstate.ts";
@@ -818,4 +819,40 @@ test("a chat read INSIDE the window never buzzes at all", async () => {
 
   expect(hits()).toHaveLength(0);
   expect(sink().dismissals.map((d) => d.sessionId)).toEqual([`seam-host:${wireId(PANE)}`]);
+});
+
+test("a visible frame on the chat cancels its queued banner before the window sends it", async () => {
+  /* HIS BUG, 2026-10-03 18:44: the phone was hidden when the reply landed, so a
+   * banner was queued, and it was back on that chat at 18:44:29, a second before
+   * the :30 window. The window sent it anyway: nothing but a read took a queued
+   * banner out. A banner for the chat on his screen is the noise this avoids. */
+  const c = core.client({ attach: wireId(PANE), visible: false });
+  await holdOpen(c);
+  c.setVisible(false, core.clock.now());
+  await core.clock.advance(recentUseMs() + 1_000);
+  await say("back in time");
+  expect(decision()).toContain("all say backgrounded");
+
+  await dispatchClientFrame(c.sock, { t: "visible", on: true });
+  await quietWindow();
+  // the window had nothing left to post (flushBatch logs before its fetch)
+  expect(saidSomething("[notify] batch seam-host")).toBe(false);
+  expect(hits()).toHaveLength(0);
+  // nothing reached the phone, so nothing stands there, and it is still unread:
+  // the read is the app's to report
+  expect(session().notified).toBe(false);
+  expect(unreadOf(session())).toBe(1);
+});
+
+test("a visible frame on ANOTHER chat does not cancel this one's banner", async () => {
+  const c = core.client({ attach: wireId(PANE), visible: false });
+  await holdOpen(c);
+  c.setVisible(false, core.clock.now());
+  await core.clock.advance(recentUseMs() + 1_000);
+  await say("elsewhere");
+
+  c.attached("some-other-chat");
+  await dispatchClientFrame(c.sock, { t: "visible", on: true });
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
 });

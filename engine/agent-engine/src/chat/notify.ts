@@ -254,9 +254,10 @@ export async function notifyUnlessWatched(
     }
     console.log(`[notify] send ${key} ${msg} why=${why}${lateMs ? ` late=${secs(lateMs)}` : ""}`);
     s.silentSince = undefined; // a banner is going out: nothing is being held back
+    const standing = s.notified;
     s.notified = true; // one is standing on the devices now
     scheduleHeardSave(s.id);
-    queueNotify(key, { title: p.title, body: p.body, unread: unreadOf(s) });
+    queueNotify(key, { title: p.title, body: p.body, unread: unreadOf(s), standing });
   };
 
   const attached = [...C().clients()].filter((c) => c.data.attached === s.id);
@@ -590,7 +591,9 @@ const NOTIFY_BODY_MAX = 2000;
 /* No icon field: pushes stopped referencing engine photo URLs (sealed-transport
  * enforcement -- /session-photo is owner-gated, so an OS icon fetch could never
  * answer). The service worker keeps the app logo. */
-type Queued = { title: string; body: string; unread: number };
+/* standing: whether a banner for this chat was already on the devices before
+ * this one was queued, so a cancelled one can put `notified` back. */
+type Queued = { title: string; body: string; unread: number; standing?: boolean };
 const queuedNew = new Map<string, Queued>();
 const queuedDismiss = new Set<string>();
 let batchTimer: unknown = null;
@@ -723,8 +726,27 @@ export function queueNotify(key: string, q: Queued) {
   queuedDismiss.delete(key); // it is unread again: a dismissal would be a lie
   // the preview, not the whole reply (NOTIFY_BODY_MAX): the one choke point every
   // queueNotify caller passes through, so the wire size is bounded here
-  queuedNew.set(key, { ...q, body: q.body.slice(0, NOTIFY_BODY_MAX) });
+  const standing = queuedNew.get(key)?.standing ?? q.standing;
+  queuedNew.set(key, { ...q, body: q.body.slice(0, NOTIFY_BODY_MAX), standing });
   scheduleBatch();
+}
+
+/** A visible frame for this chat: a banner queued for it and not yet sent would
+ *  buzz for the chat on his screen (2026-10-03, back on the chat a second before
+ *  the window). It never leaves. Nothing is marked read here; the app reports
+ *  the read as it does for anything it shows. */
+export function cancelQueued(sessionId: string) {
+  if (!queuedNew.size) return;
+  const key = `${C().engineHost}:${sessionId}`;
+  const q = queuedNew.get(key);
+  if (!q) return;
+  queuedNew.delete(key);
+  for (const s of C().sessions()) {
+    if (s.id !== sessionId) continue;
+    s.notified = q.standing === true;
+    scheduleHeardSave(s.id);
+  }
+  console.log(`[notify] dropped ${key} unread=${q.unread} (visible on this chat before the window, never sent)`);
 }
 
 /* THE 30 SECOND GRACE and the away clock live in presence.ts:

@@ -9,6 +9,7 @@ import { TerminalHub, clampCols, clampRows, safeInput, safeScroll,
 import { clients, send } from "./wire.ts";
 import { sessions } from "../sessions/session-state.ts";
 import { onPresenceChange } from "../sessions/presence.ts";
+import { cancelQueued } from "../chat/notify.ts";
 import { onHeard } from "../chat/reply.ts";
 import { onAttach, onProgress } from "../chat/attach.ts";
 import { onUtterance } from "../chat/deliver.ts";
@@ -257,6 +258,7 @@ export async function dispatchClientFrame(ws: Sock, m: any): Promise<void> {
     ws.data.visible = m.on !== false;
     ws.data.visibleAt = now;
     if (ws.data.visible || wasVisible) ws.data.lastVisibleAt = now;
+    if (ws.data.visible && ws.data.attached) cancelQueued(ws.data.attached);
     /* The device kind, as the app tells it (a laptop sends desktop:true). Only a
      * desktop holds a push via recentlyUsed; a phone, a tablet, or an app too
      * old to say reads as NOT desktop (m.desktop !== true), so locking it buzzes
