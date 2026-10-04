@@ -14,6 +14,8 @@
  *                   is written, nothing typed again (claude and pi shapes)
  *   D1 completion   a pending note's completion stopped after its Enter
  *   D1 SIGTERM      the drain finishes what is typing and holds the rest
+ *   E1-E5           verifier round 3: a stale stage, a refusal with no socket,
+ *                   another chat's stuck write, an unreadable box, a draft
  *   D2              the frame leaves the disk only after its row is there
  *   D3              a resend racing the redrive is delivered once
  *   D4 / orphans    a frame given up on, or whose session never returns, is
@@ -40,10 +42,12 @@ let voice: FakeVoice | null = null;
 let gate: Promise<void> = Promise.resolve();
 const never = new Promise<void>(() => {});
 
+let failEnter = false;
 async function boot(o: { agents?: Record<string, string> } = {}): Promise<WireCore> {
   voice = fakeVoice({ transcript: "the words of the note" });
   const v = voice;
   core = await wireCore({ with: ["delivery"], ...o,
+    failKeys: (keys: string[]) => failEnter && keys.includes("enter"),
     voiceUrl: async () => { await gate; return v.base; } });
   await until(() => !!core!.byHandle(PANE), { what: "the pane to reconcile" });
   return core;
@@ -51,6 +55,7 @@ async function boot(o: { agents?: Record<string, string> } = {}): Promise<WireCo
 
 afterEach(async () => {
   gate = Promise.resolve();
+  failEnter = false;
   // whatever is still settling (a row's flush, a take's file) finishes in this wiring
   await until(async () => (await takenFor()).every((t) => t.attempt === "dead"), { timeoutMs: 3000 })
     .catch(() => {});
@@ -176,28 +181,6 @@ test("D1 completion: a pending note whose completion stopped after its Enter is 
   expect(rowsFor(cid)[0].text).toBe(voice!.transcript);
 });
 
-test("D1 pi (direct input): the stage is written around the send, and a submitted message is not sent again", async () => {
-  const c = await boot({ agents: { [PANE]: "pi" } });
-  const sent: { text: string; stage: Stage | null }[] = [];
-  const s = c.byHandle(PANE)!;
-  c.adapter.registerDirectInput(s.muxHandle, {
-    send: async (text) => { sent.push({ text, stage: await stageFor(s.id, cidA) }); },
-  });
-  const client = c.client({ attach: wireId(PANE) });
-  // a plain delivery: `typing` is on disk while pi takes it, nothing after
-  const cidA = crypto.randomUUID();
-  await onUtterance(client.sock, textFrame(cidA, "to pi"));
-  await until(() => rowsFor(cidA).length === 1, { what: "the pi delivery" });
-  expect(sent).toEqual([{ text: "TEXT: to pi", stage: "typing" }]);
-  expect(await stageFor(s.id, cidA)).toBeNull();
-  // a resend of a message a stopped process had already handed to pi
-  const cidB = crypto.randomUUID();
-  await noteStage(s.id, cidB, "submitted");
-  await onUtterance(client.sock, textFrame(cidB, "pi had it"));
-  await until(() => rowsFor(cidB).length === 1, { what: "the row" });
-  expect(sent.length, "pi was handed the same message twice").toBe(1);
-});
-
 test("D1 SIGTERM: the drain finishes the delivery that is typing, holds the queued one, takes no new frame", async () => {
   const c = await boot();
   const client = c.client({ attach: wireId(PANE) });
@@ -233,9 +216,9 @@ test("D2 (P3): the frame leaves the disk only after the pending row is on disk",
   await cacheAudio(msgId, new Uint8Array(4096).fill(0x42), "audio/webm");
   gate = never;
   let release = () => {};
-  const flush = chatStore.flush.bind(chatStore);
+  const flush = chatStore.flushFile.bind(chatStore);
   const held = new Promise<void>((r) => { release = r; });
-  chatStore.flush = async () => { await held; await flush(); };
+  chatStore.flushFile = async (a, c) => { await held; await flush(a, c); };
   try {
     const client = c.client({ attach: wireId(PANE) });
     const taken = onUtterance(client.sock, { t: "utterance", id: wireId(PANE), text: "", kind: "voice",
@@ -250,7 +233,7 @@ test("D2 (P3): the frame leaves the disk only after the pending row is on disk",
     await taken;
     expect((await takenFor(sid())).length).toBe(0);
   } finally {
-    chatStore.flush = flush;
+    chatStore.flushFile = flush;
     release();
   }
 });
@@ -322,4 +305,93 @@ test("a frame whose session never comes back is failed visibly, and the file goe
   expect(app.of("send-failed").find((f) => f.cid === "c-orphan"))
     .toMatchObject({ id: "ag-gone-for-good", reason: ORPHAN_REASON });
   expect((await takenFor()).length).toBe(0);
+});
+
+/* ---- verifier round 3 (scratchpad/reply-words-verify3/REPORT.md) ---- */
+
+const CHOOSER = ["(transcript)", "", "─".repeat(60), " Bash command", "", "   ls build", "",
+  " Do you want to proceed?", " ❯ 1. Yes", "   2. No", "", " Esc to cancel"].join("\n");
+
+test("E1 (V-stale-stage): an Enter that failed leaves `typing`, so a same-cid retry after a restart is typed, not marked delivered", async () => {
+  const c = await boot();
+  const app = c.client({ attach: wireId(PANE) });
+  const cid = crypto.randomUUID();
+  failEnter = true; // herdr refuses the Enter, twice
+  await onUtterance(app.sock, textFrame(cid, "enter failed"));
+  await until(() => has(c, cid, "utterance.delivery-failed"), { what: "the failure" });
+  failEnter = false;
+  expect(await stageFor(sid(), cid)).toBe("typing");
+  c.hooks.clearInput!(PANE); // the box emptied (by hand, or a fresh harness)
+  await restart(c);
+  const app2 = c.client({ attach: wireId(PANE) });
+  await onUtterance(app2.sock, textFrame(cid, "enter failed")); // the retry tap: same cid
+  await until(() => rowsFor(cid).length === 1, { what: "the retry's row" });
+  expect(c.submitted.map((x) => x.text), "the retried message never reached the agent")
+    .toEqual(["TEXT: enter failed"]);
+});
+
+test("E2 (V-refused-redrive): a redrive refused before any app connects is told to the app that connects later", async () => {
+  const c = await boot();
+  const cid = crypto.randomUUID();
+  await stoppedAt(c, cid, "held", "acked");
+  c.hooks.setScreen!(PANE, CHOOSER);
+  await restart(c);
+  await until(() => has(c, cid, "utterance.dropped"), { what: "the refusal" });
+  await until(async () => (await takenFor(sid())).length === 0, { what: "the frame to go" });
+  const app = c.client({ attach: wireId(PANE) });
+  c.hello(app);
+  expect(rowsFor(cid).length).toBe(0);
+  expect(app.of("send-failed").some((f) => f.cid === cid), "the sender was never told").toBe(true);
+  c.hooks.setScreen!(PANE, null);
+});
+
+test("E3: another chat's write that never lands holds neither this session's deliveries nor the drain", async () => {
+  const c = await boot();
+  const app = c.client({ attach: wireId(PANE) });
+  const chains = (chatStore as unknown as { chains: Map<string, Promise<void>> }).chains;
+  const stuck = "/nowhere/ag-other/chats/other.jsonl";
+  chains.set(stuck, new Promise<void>(() => {}));
+  try {
+    const a = crypto.randomUUID();
+    const b = crypto.randomUUID();
+    void onUtterance(app.sock, textFrame(a, "first"));
+    void onUtterance(app.sock, textFrame(b, "second"));
+    await until(() => rowsFor(b).length === 1, { what: "both rows", timeoutMs: 4000 });
+    expect(c.submitted.map((x) => x.text)).toEqual(["TEXT: first", "TEXT: second"]);
+    const t0 = Date.now();
+    expect(await drainDeliveries(1000)).toBe(0);
+    expect(Date.now() - t0, "the drain waited on another chat's write").toBeLessThan(900);
+  } finally {
+    chains.delete(stuck);
+  }
+});
+
+test("E4 (V-unknown): `entering`, a screen the parser cannot read as a box: nothing pressed, no row, the sender told", async () => {
+  const c = await boot();
+  const cid = crypto.randomUUID();
+  await stoppedAt(c, cid, "still in the box", "before_enter");
+  c.hooks.setScreen!(PANE, "user@host:~/proj$ claude --resume\n\nResuming conversation...\n");
+  await restart(c);
+  await until(() => has(c, cid, "utterance.dropped"), { what: "the visible failure" });
+  c.hooks.setScreen!(PANE, null);
+  const app = c.client({ attach: wireId(PANE) });
+  c.hello(app);
+  expect(rowsFor(cid).length, "a row (tick) was written for a message never submitted").toBe(0);
+  expect(c.submitted.length).toBe(0);
+  expect(app.of("send-failed").some((f) => f.cid === cid)).toBe(true);
+  expect(await stageFor(sid(), cid)).toBeNull();
+});
+
+test("E5 (V-draft): `entering`, someone else's draft in the box: the draft is not submitted, the sender told", async () => {
+  const c = await boot();
+  const cid = crypto.randomUUID();
+  const delivered = await stoppedAt(c, cid, "already submitted", "after_enter");
+  c.hooks.setInput!(PANE, "my own half typed draft");
+  await restart(c);
+  await until(() => has(c, cid, "utterance.dropped"), { what: "the visible failure" });
+  const app = c.client({ attach: wireId(PANE) });
+  c.hello(app);
+  expect(c.submitted.map((x) => x.text), "Enter was pressed on someone else's draft").toEqual([delivered]);
+  expect(c.herdr.keys.length, "a key was pressed at the draft").toBe(0);
+  expect(app.of("send-failed").some((f) => f.cid === cid)).toBe(true);
 });

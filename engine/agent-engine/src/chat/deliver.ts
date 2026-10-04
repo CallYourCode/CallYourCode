@@ -45,8 +45,8 @@ export type DeliverDeps = {
   /** the upload binder (uploads.ts instance) */
   bindOwnedUploads(claimed: UploadRec[], cid?: string, sessionId?: string): Promise<{ ups: UploadRec[]; missing: string[] }>;
   adoptStagedUploads(sessionId: string, ups: UploadRec[]): Promise<void>;
-  /** every chat append issued so far is on disk (chatStore.flush) */
-  flushChat?(): Promise<void>;
+  /** every append issued so far to this session's chat file is on disk */
+  flushChat?(sessionId: string): Promise<void>;
   /** every log line written so far is on disk (the engine log's flush) */
   flushLog?(): Promise<void>;
 };
@@ -96,7 +96,6 @@ export function resetForTest(): void {
   ackQueue.clear();
   redrivenTaken.clear();
   ownTakes.clear();
-  stagedHere.clear();
   draining = false;
   inPane = 0;
   deps = null;
@@ -115,7 +114,6 @@ export async function drainDeliveries(maxMs: number): Promise<number> {
   draining = true;
   const until = Date.now() + maxMs;
   while (inPane > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
-  await D().flushChat?.();
   return inPane;
 }
 
@@ -244,7 +242,7 @@ export function onUtterance(ws: Sock, m: any): Promise<void> {
  * on disk too. */
 async function settleTake(s: CidSession, t: Taken): Promise<void> {
   cidsInFlight(s).delete(t.cid);
-  await D().flushChat?.();
+  await D().flushChat?.(t.sessionId);
   await forgetTaken(t);
   ownTakes.delete(t.attempt);
 }
@@ -370,9 +368,11 @@ function cidsInFlight(s: CidSession): Set<string> {
 
 export async function handleUtterance(ws: Sock | null, m: any, takenAt: number) {
   /* The sender's socket, or none for a frame driven again after a restart
-   * (redriveTaken): a refusal is then broadcast on its cid, and only the device
-   * holding that cid's row acts on it. */
-  const answer = (msg: unknown) => ws ? D().send(ws, msg) : D().broadcast(msg);
+   * (redriveTaken): a refusal is then broadcast on its cid AND kept for every
+   * app that connects later (intake.ts noteFailed), since the sender may not
+   * be connected yet; only the device holding that cid's row acts on it. */
+  const answer = (msg: { t: string; id: string; cid: string; reason: string }) =>
+    ws ? D().send(ws, msg) : D().broadcast(noteFailed(msg.id, msg.cid, msg.reason));
   /* The recording's correlation id, minted in the browser when the mic opened
    * and carried on the frame. Falls back to one of ours so that a message from
    * an older bundle still has SOMETHING to grep on. */
@@ -909,21 +909,15 @@ export async function injectUserMessage(
   return { ok: true, ts };
 }
 
-/* The keystroke half of injectUserMessage, for a live mux pane. HOW FAR A
- * STOPPED PROCESS GOT is the cid's Stage (intake.ts), written before the body is
- * typed (`typing`) and before the Enter (`entering`), and removed once the row
- * is on disk. A drive after a restart hands it to the guard: the box still
- * holding the body gets Enter only, and after `entering` an empty box means the
- * Enter took it, so nothing is typed again and only the missing row is written.
- * pi's direct send writes `submitted` after the send. What is left: a stop in
- * the milliseconds between pi taking a direct send and `submitted` reaching the
- * disk sends it again (the SIGTERM drain takes ordinary restarts out of it). */
-const stagedHere = new Set<string>();
+/* The keystroke half of injectUserMessage, for a live mux pane. HOW FAR AN
+ * EARLIER ATTEMPT GOT is the cid's Stage (intake.ts), written before the body is
+ * typed (`typing`) and before the Enter (`entering`), put back to `typing` by
+ * any failure that is not a clean refusal, and removed once the row is on disk.
+ * The guard acts on it only with positive evidence from the box (delivery-
+ * machine noteCheck); anything it cannot read plainly fails visibly. */
 async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
   const { cid, text } = inj;
-  /* Only a stage a stopped process left steers this drive; a retry of an
-   * attempt this process made is the in-memory stranded note's, as before. */
-  const stage = stagedHere.has(cid) ? null : await stageFor(s.id, cid);
+  const stage = await stageFor(s.id, cid);
   /* The agent gets a real path per attachment, in the order they were
    * composed, and the caption (if any) rides along after them. ONE message:
    * several attachments make the line longer, they never
@@ -942,11 +936,7 @@ async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
    * with it. */
   const delivered = `${inj.how}${inj.note ? ` (${inj.note})` : ""}: ` +
     D().transformOutgoing({ sessionId: s.id, text: body, channels: s.channels });
-  if (stage === "submitted") {
-    D().log("delivery.already-submitted", { cid, session: s.id,
-      why: "a previous process pressed Enter on this message and stopped before its row " +
-        "was written; the row is written now and nothing is typed again" });
-  } else {
+  {
     // On disk before the agent can possibly read the message: the Stop hook at
     // the end of this turn asks the state file whether a reply went out.
     const noted = D().noteDelivery(s.id, inj.how);
@@ -966,18 +956,16 @@ async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
     armAwaiting(cid, s.id, 0, delivered);
     try {
       await deliverToPane(s.muxHandle, delivered, cid, inj.takenAt, {
-        progress: (st) => {
-          stagedHere.add(cid);
-          return noteStage(s.id, cid, st).catch((e) =>
-            D().log("intake.stage-unsaved", { cid, err: String(e) }));
-        },
+        progress: (st) => noteStage(s.id, cid, st).catch((e) =>
+          D().log("intake.stage-unsaved", { cid, err: String(e) })),
         ...(stage ? { resumed: stage } : {}),
       });
     } catch (e) {
       clearAwaiting(cid);
-      // the stage follows what is in the box now: the body (stranded), or nothing
-      if (e instanceof DeliveryStranded) await noteStage(s.id, cid, "typing").catch(() => {});
-      else if (e instanceof PaneNotReady) await forgetStage(s.id, cid);
+      /* A clean refusal typed nothing (or was swallowed): no stage. Anything
+       * else may have left the body in the box: `typing`, so a retry looks. */
+      if (e instanceof PaneNotReady) await forgetStage(s.id, cid);
+      else await noteStage(s.id, cid, "typing").catch(() => {});
       /* Three failures now, and the user needs them told apart. A pane sitting
        * on a prompt (PaneNotReady, nothing typed) is "go and answer it". A body
        * typed but not submitted (DeliveryStranded) is "send it again and it will
@@ -1052,9 +1040,8 @@ async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
     queued: willQueue, consumedEarly: consumedEarly || undefined,
     chars: text.length, how: inj.how,
     completing: inj.completesTs != null || undefined });
-  await D().flushChat?.();
+  await D().flushChat?.(s.id);
   await forgetStage(s.id, cid);
-  stagedHere.delete(cid);
   return { ok: true, ts };
 }
 

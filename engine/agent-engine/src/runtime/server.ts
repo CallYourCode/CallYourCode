@@ -1093,7 +1093,7 @@ initDeliver({
   writeHookState: () => writeHookState(),
   bindOwnedUploads: (claimed, cid, sid) => uploads.bindOwnedUploads(claimed, cid, sid),
   adoptStagedUploads: (id, ups) => uploads.adoptStagedUploads(id, ups),
-  flushChat: () => chatStore.flush(),
+  flushChat: (id) => { const r = chatRefFor(id); return chatStore.flushFile(r.aid, r.chatId); },
   flushLog: () => LOG.flush(),
 });
 

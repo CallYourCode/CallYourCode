@@ -18,7 +18,7 @@
 // no mux and no herdr. The five delivery timings are DEFINED in mux-adapter.ts
 // and imported here, so there is one definition of each and no new literal.
 
-import { refusesDelivery, flat, tailVisible, TAIL_MAX, type PaneBox } from "../terminal/blocked.ts";
+import { refusesDelivery, flat, tailVisible, inputBoxText, TAIL_MAX, type PaneBox } from "../terminal/blocked.ts";
 import type { DeliverDeps } from "../adapters/mux-adapter.ts";
 import {
   settleMs,
@@ -164,18 +164,35 @@ export async function runDeliveryMachine(
    * the typed tail stands in for box.hasContent -- it is all a foreign screen
    * can tell us. */
   const note = io.unsubmitted.get(paneId);
-  const believable = !!io.resumed ||
-    (!!note && note.deliveryId === deliveryId && Date.now() - note.at < strandedTtlMs());
-  const stillThere = believable && (
+  const believable = !!note && note.deliveryId === deliveryId && Date.now() - note.at < strandedTtlMs();
+  let stillThere = believable && (
     canParse ? box.kind === "input" && box.hasContent : tailVisible(pre, text));
-  let typedThisAttempt = false;
-  if (!stillThere && io.resumed === "entering") {
-    /* A stopped process typed this and was pressing Enter: the box is empty, so
-     * the Enter took it. Typing it again would be a second message. */
-    console.log(`[deliver] ${paneId}: the body a stopped process was entering is gone from the ` +
-      `input; it was submitted, so nothing is typed again`);
-    return { kind: "delivered" };
+  if (io.resumed) {
+    /* A STOPPED PROCESS GOT THIS FAR, so only positive evidence acts: the box
+     * holding exactly this body gets Enter only; a box positively empty after
+     * `entering` means the Enter took it (nothing typed again), after `typing`
+     * that nothing landed (typed fresh). Anything else -- a screen this engine
+     * cannot read as a box, someone else's draft, a collapsed paste -- is not
+     * guessed at: nothing is pressed and the send fails visibly. */
+    const inBox = canParse && box.kind === "input" ? inputBoxText(pre) : null;
+    const empty = box.kind === "input" && inBox !== null && !box.hasContent;
+    stillThere = box.kind === "input" && inBox !== null && box.hasContent && flat(inBox) === flat(text);
+    if (empty && io.resumed === "entering") {
+      console.log(`[deliver] ${paneId}: the body a stopped process was entering is gone from the ` +
+        `input; it was submitted, so nothing is typed again`);
+      return { kind: "delivered" };
+    }
+    if (!empty && !stillThere) {
+      return {
+        kind: "refusedUnreadable",
+        why: "the engine stopped while delivering this and the pane does not show plainly " +
+          "whether it arrived (the box holds other text, or cannot be read); nothing was pressed",
+        tell: "(not sent: the engine restarted while delivering this and cannot tell whether it " +
+          "arrived. Check the session, then send it again.)",
+      };
+    }
   }
+  let typedThisAttempt = false;
   if (stillThere) {
     // STATE skipType (row 6, skip branch): the body is there, enter-only retry.
     console.log(`[deliver] ${paneId}: the body is still in the input from a failed attempt; ` +

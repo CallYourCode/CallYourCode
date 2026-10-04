@@ -110,21 +110,30 @@ live pickup drives it again, deduped by cid against the chat log; a note shown
 with its words pending is completed at that same pickup.
 
 Exactly once across a stop. Each delivery keeps how far its keystrokes got,
-per cid: `typing` before the body is typed, `entering` before the Enter (pi's
-direct input: `typing` before the send, `submitted` after it). A drive after a
-restart presses Enter only when the box still holds the body; after
-`entering` an empty box means the Enter took it, so nothing is typed again and
-only the missing row is written; `submitted` is never sent again. On SIGTERM or
+per cid: `typing` before the body is typed, `entering` before the Enter; any
+failure that is not a clean refusal puts it back to `typing`. A later attempt
+(a restart's drive, or a retry of the same cid) acts on it only with positive
+evidence from the input box: the box holding exactly this body gets Enter
+only; a box positively empty means, after `entering`, that the Enter took it
+(nothing typed again, only the missing row written) and, after `typing`, that
+nothing landed (typed fresh). Anything else (a screen not readable as a box,
+someone else's text in it, a long paste the harness collapsed, a harness this
+engine cannot parse such as pi or codex) is not guessed at: nothing is pressed,
+the box is left alone, and the send fails visibly with a retry. On SIGTERM or
 SIGINT the engine drains: no new frame is taken (not acked, so the app sends it
 to the next process), nothing new starts typing (it stays on disk), and the
 deliveries already typing finish, rows on disk, within 10 s; a second signal
-exits at once. What remains: a kill -9 in the milliseconds between pi taking a
-direct send and `submitted` reaching the disk sends it again, and a box emptied
-by hand between `entering` and a restart is taken as submitted.
+exits at once. A delivery waits only on its own chat file's writes.
 
-Failures the sender is told: a frame driven by three boots without finishing,
-and a frame whose session is not picked up live within 10 minutes of boot,
-are dropped with `send-failed {id, cid, reason}`, broadcast and repeated to
+What remains: a kill -9 (or the 10 s bound running out) between the `entering`
+mark and the Enter, with the box then emptied by hand before the restart, is
+taken as delivered; a pending voice note whose completion fails this way stays
+pending and is completed at the session's next pickup rather than failed.
+
+Failures the sender is told: every refusal of a frame driven after a restart
+(no socket to answer on), a frame driven by three boots without finishing, and
+a frame whose session is not picked up live within 10 minutes of boot are
+dropped with `send-failed {id, cid, reason}`, broadcast and repeated to
 every app that connects to that process (a further restart before any app
 connects does not repeat it). The row goes to failed with a retry; the retry
 is the same cid taken fresh. `dup:true` marks

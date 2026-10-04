@@ -583,11 +583,11 @@ export type DeliverDeps = {
    *  profile fields. */
   canParseScreen: (handle: string) => boolean;
   /** Called (and awaited) before the body is typed ("typing") and before the
-   *  Enter ("entering"); a direct send: before ("typing") and after
-   *  ("submitted"). The caller keeps it on disk for a restart (intake.ts Stage). */
-  progress?: (stage: "typing" | "entering" | "submitted") => Promise<void>;
-  /** How far a stopped process got with THIS delivery: the box is believed to
-   *  hold its body, and after "entering" an empty box means the Enter took it. */
+   *  Enter ("entering"). The caller keeps it on disk for a restart (intake.ts
+   *  Stage). */
+  progress?: (stage: "typing" | "entering") => Promise<void>;
+  /** How far a stopped process got with THIS delivery (delivery-machine
+   *  noteCheck acts on it only with positive evidence from the box). */
   resumed?: "typing" | "entering";
 };
 
@@ -1275,9 +1275,7 @@ export class MuxAdapter implements MultiplexerAdapter {
     if (this.inputMethod(handle) === "direct") {
       const endpoint = this.directEndpoints.get(handle);
       if (endpoint) {
-        await deps?.progress?.("typing");
         await endpoint.send(text);
-        await deps?.progress?.("submitted");
         return;
       }
     }

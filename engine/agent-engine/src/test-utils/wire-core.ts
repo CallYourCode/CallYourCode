@@ -1031,7 +1031,7 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
         writeHookState: () => writeHookState(),
         bindOwnedUploads: (claimed, c, sid) => uploads!.bindOwnedUploads(claimed, c, sid),
         adoptStagedUploads: (id, ups) => uploads!.adoptStagedUploads(id, ups),
-        flushChat: () => chatStore.flush(),
+        flushChat: (id) => { const r = chatRefFor(id); return chatStore.flushFile(r.aid, r.chatId); },
       });
     }
 

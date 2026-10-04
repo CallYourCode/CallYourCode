@@ -168,6 +168,12 @@ export class ChatStore {
     await Promise.all([...this.chains.values()]);
   }
 
+  /** Every append issued so far to ONE chat file is on disk when this resolves
+   *  (a delivery waits on its own chat, never on another agent's). */
+  async flushFile(agentId: string, chatId: string): Promise<void> {
+    await this.chains.get(agentChatFile(agentId, chatId));
+  }
+
   /** Load one chat's messages. Missing file = empty log (a fresh chat id not
    *  yet written). */
   async load(agentId: string, chatId: string): Promise<StoredMsg[]> {
