@@ -506,13 +506,14 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
         cs.setNewBelow(cs.newBelowCount() + arrived);
       }
 
+      // Arrived = newer than the newest row shown, not a higher count: a full
+      // window (300) slides its oldest row out and the count never grows.
       if (
         s &&
         dataState.mode === 'live' &&
         !cs.openOwned() &&
         !cs.landingOwed() &&
         sameSession &&
-        count > prevMsgCount &&
         document.visibilityState === 'visible'
       ) {
         if (arrived > 0) deps.reportViewedThrough(s.id);

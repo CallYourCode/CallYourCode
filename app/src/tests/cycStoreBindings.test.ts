@@ -8,7 +8,9 @@ const fake = vi.hoisted(() => ({
   // Default true: the steady-state open where the reply is genuinely unheard. A
   // test flips it to false to model a say for a row already at/behind the
   // read-through (a stranded growing clip's frame reaching an open chat).
-  mayAutoplay: true
+  mayAutoplay: true,
+  // what sessionSelectors.active() answers: the open chat, null for none
+  active: null as unknown
 }));
 vi.mock('../engine/store', () => ({
   onReplayed: (fn: Handler) => {
@@ -75,7 +77,7 @@ vi.mock('../speakerEvents', () => ({installSpeakerEvents: vi.fn()}));
 vi.mock('../features/composer/voice/capture', () => ({installVoiceCapture: vi.fn()}));
 vi.mock('../features/chat/surface/audioPlayback', () => ({transcriptOf: (): null => null}));
 vi.mock('../sessionSelectors', () => ({
-  active: (): unknown => null,
+  active: (): unknown => fake.active,
   selectTabFor: () => 'e1#t1'
 }));
 vi.mock('../features/settings/preferences', () => ({
@@ -173,6 +175,7 @@ beforeEach(() => {
   fake.handlers = {};
   fake.sessions.clear();
   fake.mayAutoplay = true;
+  fake.active = null;
   dataState.mode = 'live';
   sessionState.activeId = null;
   localStorage.clear();
@@ -331,6 +334,34 @@ describe('the follow binding', () => {
     sessionState.activeId = null;
     (fake.handlers.store as Handler)();
     expect(deps.hub.render).toHaveBeenCalledWith(true);
+  });
+});
+describe('the arrival read report', () => {
+  const rows = (from: number, to: number) =>
+    Array.from({length: to - from + 1}, (_, i) => ({id: `m${from + i}`, ts: from + i}));
+  const arrive = (messages: unknown[]) => {
+    fake.active = {id: 's1', messages};
+    (fake.handlers.store as Handler)();
+  };
+  test('a reply into a full 300-row window is reported read, as in a short chat', () => {
+    // The 2026-10-03 lag: the window is capped at 300, so the reply slid the
+    // oldest row out, the count stayed 300 and the read waited for back-to-list.
+    const {deps} = mk();
+    arrive(rows(1, 300));
+    arrive(rows(2, 301));
+    expect(deps.reportViewedThrough).toHaveBeenCalledWith('s1');
+  });
+  test('a short chat reports the reply read', () => {
+    const {deps} = mk();
+    arrive(rows(1, 5));
+    arrive(rows(1, 6));
+    expect(deps.reportViewedThrough).toHaveBeenCalledWith('s1');
+  });
+  test('a repaint with nothing newer reports nothing', () => {
+    const {deps} = mk();
+    arrive(rows(1, 300));
+    arrive(rows(1, 300));
+    expect(deps.reportViewedThrough).not.toHaveBeenCalled();
   });
 });
 describe('conversation-list keyboard nav walks only the visible rows', () => {
