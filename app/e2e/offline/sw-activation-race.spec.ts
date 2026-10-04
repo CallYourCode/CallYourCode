@@ -247,22 +247,16 @@ test('a parked worker takes over when asked, and the reload then lands', async (
 test('a path the routing table does not name still reaches the worker (streamed downloads)', async ({
   page
 }) => {
+  // cyc-sw.js has the download lane's own /__cyc_dl/ handler; an id it does not
+  // know is answered by the worker itself, never by the server.
   const host = new Host();
-  // The download lane's handler, added the way it extends the worker: answers
-  // /__cyc_dl/ itself; every other request is left to cyc-sw.js.
-  const sw = host.current['cyc-sw.js'];
-  sw.body +=
-    "\nself.addEventListener('fetch', (e) => {" +
-    "  if (new URL(e.request.url).pathname.startsWith('/__cyc_dl/'))" +
-    "    e.respondWith(new Response('FROM-WORKER'));" +
-    '});\n';
   await host.listen();
   try {
     await bootFirst(page, host);
     const answer = await page.evaluate(() =>
       fetch('/__cyc_dl/abc123/report.pdf').then(async (r) => `${r.status} ${await r.text()}`)
     );
-    expect(answer, 'the download went to the server, past the worker').toBe('200 FROM-WORKER');
+    expect(answer, 'the download went to the server, past the worker').toBe('404 no such download');
     // And the app's constant traffic still skips it: the server answers.
     expect(
       await page.evaluate(() =>
