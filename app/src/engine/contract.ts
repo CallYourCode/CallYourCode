@@ -1,7 +1,7 @@
 import {setAppAuth} from './appFetch';
 import {setLogAutoShip} from '../shared/logging';
 import {hostnameOf} from './hostNames';
-import {markSelfReload, navigateSelf, netNavUrl} from '@/shared/selfReload';
+import {markSelfReload, navigateSelf} from '@/shared/selfReload';
 import {
   cachedImageBlob,
   cachedImagesMatching,
@@ -522,17 +522,16 @@ export function clearEnginePinAndReload(): void {
   try {
     delete document.documentElement.dataset.cycPin;
   } catch {}
-  // Through the self-navigation gate (a user action: held a few seconds at
-  // most while a new worker waits); no composer hold, a draft is on disk.
+  // Through the self-navigation gate; no composer hold, a draft is on disk.
   navigateSelf({
     why: 'engine-switch',
-    userAction: 'Reloading…',
-    go: ({viaNetwork}) => {
+    notice: 'Reloading…',
+    to: () => {
       const url = new URL(location.href);
       url.searchParams.delete('engine');
-      markSelfReload();
-      location.replace(viaNetwork ? netNavUrl(url.toString()) : url.toString());
-    }
+      return url.toString();
+    },
+    before: markSelfReload
   });
 }
 

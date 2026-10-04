@@ -41,7 +41,7 @@ function distA(): Files {
     'index.html': {
       type: 'text/html; charset=utf-8',
       body:
-        '<!doctype html><html><head><meta charset="utf-8"><title>cyc</title></head>' +
+        `<!doctype html><html><head><meta charset="utf-8"><meta name="cyc-build" content="${A.stamp}"><title>cyc</title></head>` +
         `<body><div id="cyc-build">BUILD-${A.stamp}</div>` +
         `<script src="/${asset}"></script></body></html>`
     },

@@ -94,10 +94,10 @@ export function installStaleTabReload(): void {
 
   const swSupported = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
 
-  // The update reload, through the one self-navigation gate (held while a new
-  // worker waits to take over), with its own hold on top: a
-  // recording, a vault write, an unsent send, a draft in the box (until it is
-  // emptied or the app goes to the background) or a playing clip (reloadHold).
+  // The update reload, through the one self-navigation gate, with its own hold
+  // on top: a recording, a vault write, an unsent send, a draft in the box
+  // (until it is emptied or the app goes to the background) or a playing clip
+  // (reloadHold).
   const reloadSoon = (target: string) => {
     if (reloading) return;
     reloading = true;
@@ -124,13 +124,15 @@ export function installStaleTabReload(): void {
         lastLogged = waited;
         cyclog('reload.deferred', {...holds, hold, hidden, waited});
       },
-      go: ({waited, hidden}) => {
-        cyclog('reload.go', {waited, hidden, from: cycBuildStamp || bootStamp, to: target});
+      to: () => {
         const url = new URL(location.href);
         url.searchParams.set('b', String(Date.now()));
+        return url.toString();
+      },
+      before: ({waited, hidden}) => {
+        cyclog('reload.go', {waited, hidden, from: cycBuildStamp || bootStamp, to: target});
         markSelfReload();
         markReloadDeparture(cycBuildStamp || bootStamp, target, hidden);
-        location.replace(url.toString());
       }
     });
   };

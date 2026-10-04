@@ -47,7 +47,7 @@ function distFor(b: Build): Record<string, {type: string; body: string}> {
     'index.html': {
       type: 'text/html; charset=utf-8',
       body:
-        '<!doctype html><html><head><meta charset="utf-8"><title>cyc</title></head>' +
+        `<!doctype html><html><head><meta charset="utf-8"><meta name="cyc-build" content="${b.stamp}"><title>cyc</title></head>` +
         `<body><div id="cyc-build">BUILD-${b.stamp}</div>` +
         `<script src="/${assetPath}"></script></body></html>`
     },
@@ -109,7 +109,9 @@ class SwapHost {
 }
 
 async function cacheKeys(page: Page): Promise<string[]> {
-  return page.evaluate(async () => (await caches.keys()).filter((n) => n.startsWith('cyc-precache-')));
+  return page.evaluate(async () =>
+    (await caches.keys()).filter((n) => n.startsWith('cyc-precache-'))
+  );
 }
 
 // The shell the worker serves right now, read through the controller (a fetch

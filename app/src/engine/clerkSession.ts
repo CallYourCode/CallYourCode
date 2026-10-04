@@ -1,4 +1,4 @@
-import {navigateSelf, netNavUrl} from '@/shared/selfReload';
+import {navigateSelf} from '@/shared/selfReload';
 
 type ClerkSession = {getToken(): Promise<string | null>};
 type ClerkJS = {
@@ -169,13 +169,8 @@ export async function clerkSignOut(): Promise<void> {
   try {
     await clerk?.signOut?.({});
   } catch {}
-  // Through the self-navigation gate (a user action: held a few seconds at
-  // most while a new worker waits); no composer hold.
-  navigateSelf({
-    why: 'sign-out',
-    userAction: 'Signing out…',
-    go: ({viaNetwork}) => location.replace(viaNetwork ? netNavUrl('/') : '/')
-  });
+  // Through the self-navigation gate; no composer hold.
+  navigateSelf({why: 'sign-out', notice: 'Signing out…', to: () => '/'});
 }
 
 // Redirect to Clerk's HOSTED sign-in. Clerk owns the whole flow on

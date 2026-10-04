@@ -7,6 +7,8 @@
 //   they never answer (a stalled radio: the install runs for minutes), while
 //   build.txt, cyc-sw.js and cyc-precache.json still answer so the update is
 //   discovered.
+//   GET /assets/zz-hold-forever.js never answers: a request in flight through
+//   the active worker, which keeps a new worker WAITING (both browsers).
 // Prints "LISTENING <port>" once up. Never binds a live port (port 0).
 import {serveStatic} from '../../../server/src/platform/static';
 
@@ -25,6 +27,7 @@ const server = Bun.serve({
       state.stall = url.searchParams.get('stall') === '1';
       return new Response('ok');
     }
+    if (p === '/assets/zz-hold-forever.js') return new Promise<Response>(() => {});
     const precached = p === '/' || p === '/index.html' || p.startsWith('/assets/');
     if (state.fail && precached) return new Response('unavailable', {status: 503});
     // Only the worker's precache (cache: 'reload') stalls; the page's own loads

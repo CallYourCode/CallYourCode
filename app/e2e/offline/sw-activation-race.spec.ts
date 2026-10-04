@@ -36,7 +36,7 @@ function distFor(i: number): Record<string, File> {
     'index.html': {
       type: 'text/html; charset=utf-8',
       body:
-        '<!doctype html><html><head><meta charset="utf-8"><title>cyc</title></head>' +
+        `<!doctype html><html><head><meta charset="utf-8"><meta name="cyc-build" content="${stamp}"><title>cyc</title></head>` +
         `<body><div id="cyc-build">BUILD-${stamp}</div>` +
         `<script src="/${asset}"></script></body></html>`
     },
@@ -274,10 +274,9 @@ test('a path the routing table does not name still reaches the worker (streamed 
   }
 });
 
-// A user action (sign-out, engine switch, clear data) that a parked worker
-// holds past its few-second bound goes to the escape-hatch URL '/?cyc-net=1'
-// (shared/selfReload.ts netNavUrl), which the routing table sends straight to
-// the network. A plain navigation into the parked activation hangs blank
+// A self-navigation that a parked worker holds past its few-second bound goes
+// to the same URL with cyc-net=1 (shared/selfReload.ts netNavUrl), which the
+// routing table sends straight to the network. A plain navigation into the parked activation hangs blank
 // (9/9 in a minimal page, 2026-10-03; it fails this test on the round-3
 // worker); this one boots. WebKit never parks: there it is a plain network
 // boot of the same URL.

@@ -9,10 +9,9 @@ import {markSelfReload, navigateSelf} from './selfReload';
 // load fails again soon after (a genuinely broken deploy) the page does not
 // loop: it tells the user and rethrows.
 //
-// The reload goes through the self-navigation gate: it holds while a new
-// worker is parked waiting (a missing chunk usually means a deploy is landing
-// right now; navigating into a parked activation would hang the page blank,
-// and the asked worker takes over in about a second). It does NOT take the update reload's composer hold: the page is broken (the
+// The reload goes through the self-navigation gate (a missing chunk usually
+// means a deploy is landing right now, so a new worker may be waiting; the
+// gate never navigates into one). It does NOT take the update reload's composer hold: the page is broken (the
 // feature that was asked for cannot load until it reloads), and the draft is
 // on disk, restored after the reload.
 
@@ -59,13 +58,7 @@ export function lazy<T>(load: () => Promise<T>, what: string): Promise<T> {
     reloadRequested = true;
     markReloaded();
     notify('The app was updated; reloading');
-    navigateSelf({
-      why: 'chunk-missing',
-      go: () => {
-        markSelfReload();
-        location.reload();
-      }
-    });
+    navigateSelf({why: 'chunk-missing', before: markSelfReload});
     throw err;
   });
 }

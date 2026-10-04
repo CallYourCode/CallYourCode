@@ -363,11 +363,16 @@ describe('service worker install fails an update it cannot precache', () => {
   const STAMP = '1791000000';
   const ASSETS = ['/index.html', '/assets/index-AAAA.js'].map((p) => ORIGIN + p);
 
+  const shellOf = (stamp: string, entry: string) =>
+    `<meta name="cyc-build" content="${stamp}" /><script type="module" src="./assets/${entry}"></script>`;
+
   const boot = (o: {
     active: boolean;
     manifestVersion?: string;
     failAsset?: string;
     badAsset?: string;
+    // The index.html the network hands back (default: this build's).
+    shell?: string;
   }) => {
     const w = bootWorker(SW_CODE.replace('__CYC_BUILD__', STAMP));
     const self = w.sw as unknown as Record<string, unknown>;
@@ -378,7 +383,11 @@ describe('service worker install fails an update it cannot precache', () => {
       if (p === '/cyc-precache.json') return {ok: true, json: async () => manifest};
       if (p === o.failAsset) throw new TypeError('Load failed');
       if (p === o.badAsset) return {ok: false, status: 503};
-      return {ok: true, precached: p};
+      const res = {ok: true, precached: p};
+      const html = o.shell ?? shellOf(STAMP, 'index-AAAA.js');
+      // non-enumerable, so the stored marker still compares equal
+      Object.defineProperty(res, 'clone', {value: () => ({text: async () => html})});
+      return res;
     };
     const install = async () => {
       const waited: Promise<unknown>[] = [];
@@ -411,6 +420,18 @@ describe('service worker install fails an update it cannot precache', () => {
     const w = boot({active: false, failAsset: '/assets/index-AAAA.js'});
     await expect(w.install()).resolves.toBeUndefined();
     expect(await w.caches.keys()).toEqual([]);
+  });
+
+  // THE TORN DEPLOY (verifier, 2026-10-04): the next build lands between the
+  // manifest fetch and the shell fetch, so the shell is the next build's and
+  // names a chunk this bucket never holds; installed, the next offline launch
+  // was blank.
+  test('a shell of another build fails the install and leaves no bucket', async () => {
+    for (const shell of [shellOf('1791000999', 'index-AAAA.js'), shellOf(STAMP, 'index-CCCC.js')]) {
+      const w = boot({active: true, shell});
+      await expect(w.install()).rejects.toThrow(/another build/);
+      expect(await w.caches.keys()).toEqual([]);
+    }
   });
 
   test('a 503 on any file fails the install before a bucket is even opened', async () => {
@@ -516,13 +537,20 @@ describe('service worker routes and the take-over ask', () => {
       return pathHit && (!q || search.includes(q.slice(1, -1)));
     })?.source ?? 'fetch-event';
 
-  // A user action that a parked worker held past its bound navigates to
-  // '/?cyc-net=1': it must boot from the network, never reaching the stuck old
-  // worker (Chromium), and the handler must agree (WebKit).
-  test('the escape hatch: /?cyc-net=1 goes to the network, / still reaches the worker', () => {
-    expect(sourceFor('/', '?cyc-net=1')).toBe('network');
-    expect(sourceFor('/', '?b=2&cyc-net=1')).toBe('network');
-    expect(sw.cycRouteRequest(req('/?b=2&cyc-net=1'))).toBe('network');
+  // A self-navigation that finds a new worker still waiting past its bound
+  // goes to the same URL with cyc-net=1: whatever the path, it must load from
+  // the network, never reaching the stuck old worker (Chromium), and the
+  // handler must agree (WebKit).
+  test('the escape hatch: any path with cyc-net=1 goes to the network, plain / reaches the worker', () => {
+    for (const [path, search] of [
+      ['/', '?cyc-net=1'],
+      ['/', '?b=2&cyc-net=1'],
+      ['/index.html', '?cyc-net=1'],
+      ['/some/page', '?x=1&cyc-net=1']
+    ]) {
+      expect(sourceFor(path, search), path + search).toBe('network');
+      expect(sw.cycRouteRequest(req(path + search)), path + search).toBe('network');
+    }
     expect(sourceFor('/', '?testhooks=1')).toBe('fetch-event');
     expect(sw.cycRouteRequest(req('/?testhooks=1'))).toBe('shell');
   });
@@ -548,7 +576,6 @@ describe('service worker routes and the take-over ask', () => {
       '/settings',
       '/report',
       '/push/read',
-      '/engines/announce',
       '/cyc-precache.json',
       '/__cyc_dl/abc/x.bin'
     ]) {

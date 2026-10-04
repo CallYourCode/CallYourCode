@@ -14,7 +14,8 @@ const chromiumLaunch = {args: ['--mute-audio', '--autoplay-policy=no-user-gestur
 
 export default defineConfig({
   testDir: './e2e/offline',
-  testMatch: /sw-(stuck-build|deploy-lands|activation-race|chunk-reload)\.spec\.ts$/,
+  testMatch:
+    /sw-(stuck-build|deploy-lands|activation-race|chunk-reload|waiting-hatch|torn-deploy)\.spec\.ts$/,
   fullyParallel: false,
   workers: 1,
   timeout: 180_000,

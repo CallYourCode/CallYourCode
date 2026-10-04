@@ -65,7 +65,7 @@ import {createEnginesSection} from '@/features/pairing/enginesSettings';
 import {fileReport, waitingReports, startReportOutbox} from '@/features/diagnostics/reporting';
 import {clearCachedData} from '@/features/settings/preferences';
 import {cyclog} from '@/shared/logging';
-import {navigateSelf, netNavUrl} from '@/shared/selfReload';
+import {navigateSelf} from '@/shared/selfReload';
 import {sessionState, dataState} from '@/sessionState';
 import {bundleInfo} from '@/bundleReload';
 import {active, activeEngineKey, visibleTabs} from '@/sessionSelectors';
@@ -280,16 +280,10 @@ export function createSettingsPane(deps: SettingsPaneDeps) {
         {
           text: 'Clear',
           danger: true,
-          // Through the self-navigation gate (a user action: held a few seconds
-          // at most while a new worker waits); no composer hold.
+          // Through the self-navigation gate; no composer hold.
           callback: () =>
             void clearCachedData().then(() =>
-              navigateSelf({
-                why: 'clear-data',
-                userAction: 'Reloading…',
-                go: ({viaNetwork}) =>
-                  viaNetwork ? location.replace(netNavUrl(location.href)) : location.reload()
-              })
+              navigateSelf({why: 'clear-data', notice: 'Reloading…'})
             )
         },
         {text: 'Cancel'}

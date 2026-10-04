@@ -81,7 +81,7 @@ test('a missing chunk while the new worker is parked waits, asks it to take over
   browserName
 }) => {
   test.skip(browserName !== 'chromium', 'only Chromium parks a skip-waiting worker');
-  test.setTimeout(480_000);
+  test.setTimeout(170_000);
   const N = 12;
   const {dirs, stamps} = makeBuilds(N);
   const host = await startHost(dirs[0]);
@@ -153,10 +153,9 @@ test('a missing chunk while the new worker is parked waits, asks it to take over
     expect(await missingChunk(page)).toContain('failed');
     await expect
       .poll(() => builds(log).length, {
-        // An ask that is itself raced is lost; Chromium then activates once
-        // the old worker idles, or at its 300 s cap. The reload holds until
-        // then, on a usable page (rare: about 1 parked run in 30 here).
-        timeout: 330_000,
+        // An ask that is itself raced is lost: then the reload goes via the
+        // network hatch 4 s after the ask.
+        timeout: 20_000,
         message: `the missing-chunk reload never landed (hung?) on ${own} -> ${stamps[parked]}`
       })
       .toBe(before + 1);
