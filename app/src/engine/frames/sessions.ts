@@ -69,6 +69,8 @@ function parseSession(s: any, ctx: FrameContext): EngineSession {
     if (Number.isFinite(s.stateChangeSeq)) es.stateChangeSeq = Number(s.stateChangeSeq);
 
     if (Number.isFinite(s.heardTs)) es.heardTs = Number(s.heardTs);
+    // how far speech has got: not read state, but speech on this device skips it
+    if (Number.isFinite(s.spokenTs)) es.spokenTs = Number(s.spokenTs);
     if (s.readThrough === null) es.readThrough = null;
     else if (
       s.readThrough &&
