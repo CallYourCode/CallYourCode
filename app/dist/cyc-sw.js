@@ -23,7 +23,7 @@
 // re-activates (drops old caches + clients.claim). In app/public it stays the
 // literal placeholder. cyc-precache.json's version drives the cache name, and
 // install checks that it is this build's (cycPrecacheInstall).
-const CYC_BUILD = '1791068022';
+const CYC_BUILD = '1791073774';
 
 const CYC_CACHE_PREFIX = 'cyc-precache-';
 const CYC_MANIFEST_URL = '/cyc-precache.json';
@@ -95,11 +95,65 @@ async function cycPrecacheActivate() {
   await Promise.all(names.filter((n) => !keep.has(n)).map((n) => caches.delete(n)));
 }
 
-// Which requests this worker may answer from the precache. Pulled out so it can
-// be unit-tested without a Cache. Anything that is not a same-origin GET for the
-// app shell or a hashed assets/ file is 'network': API routes, websockets,
-// sealed push, uploads, transfers and every cross-origin request fall straight
-// through untouched. When in doubt, 'network'.
+// THE routing table, one copy driving both the fetch handler (cycRouteRequest)
+// and the browser's Static Routing rules (CYC_ROUTES, Chromium). Rows are
+// [pathname, route, query]: pathname exact or a prefix ending '/*'; query, when
+// given, must appear in the search; the first match wins.
+//  - 'shell' / 'asset': answered from the precache. The boot watchdog is a
+//    non-hashed shell file precached next to index.html (scripts/build-cyc.sh);
+//    the shell is stored last, so any bucket holding the shell holds it too.
+//  - 'network': straight to the network without waking this worker. In
+//    Chromium a request reaching the old worker while it is stopped for a new
+//    build's activation restarts it and parks the new build in "waiting", and a
+//    navigation into a parked activation hangs blank (2026-10-03,
+//    sw-activation-race.spec.ts). So: the app's own API, log and stamp traffic
+//    (sent all the time), and the escape hatch '/?cyc-net=1', the URL a user
+//    action (sign-out, engine switch, clear data) navigates to when a new worker
+//    stays parked (shared/selfReload.ts): it boots from the network, never
+//    touching the stuck old worker.
+// Anything NOT named here still reaches the fetch handler (so a path the handler
+// learns to serve later works without touching this table), as does every
+// cross-origin request (a urlPattern dict cannot name "another origin"); the
+// handler sends what it does not serve to the network untouched.
+const CYC_ROUTE_TABLE = [
+  ['/', 'network', 'cyc-net='],
+  ['/', 'shell'],
+  ['/index.html', 'shell'],
+  ['/assets/*', 'asset'],
+  ['/boot-watchdog.js', 'asset'],
+  ['/build.txt', 'network'],
+  ['/cyc-precache.json', 'network'],
+  ['/clientlog', 'network'],
+  ['/config', 'network'],
+  ['/settings', 'network'],
+  ['/report', 'network'],
+  ['/health', 'network'],
+  ['/push/*', 'network'],
+  ['/engines', 'network'],
+  ['/engines/*', 'network']
+];
+
+function cycTableRoute(pathname, search) {
+  for (const [path, route, query] of CYC_ROUTE_TABLE) {
+    const hit = path.endsWith('/*') ? pathname.startsWith(path.slice(0, -1)) : pathname === path;
+    if (hit && (!query || String(search || '').includes(query))) return route;
+  }
+  return '';
+}
+
+// Only the network rows: everything else falls to the browser's default, the
+// fetch event.
+const CYC_ROUTES = CYC_ROUTE_TABLE.filter(([, route]) => route === 'network').map(
+  ([path, , query]) => ({
+    condition: {urlPattern: query ? {pathname: path, search: '*' + query + '*'} : {pathname: path}},
+    source: 'network'
+  })
+);
+
+// What the fetch handler does with a request. Only a same-origin GET for a
+// shell or asset row is answered from the precache; everything else (API,
+// websockets, sealed push, uploads, transfers, cross-origin) is 'network':
+// no respondWith, straight through. When in doubt, 'network'.
 function cycRouteRequest(req) {
   if (!req || req.method !== 'GET') return 'network';
   let url;
@@ -109,33 +163,9 @@ function cycRouteRequest(req) {
     return 'network';
   }
   if (url.origin !== self.location.origin) return 'network';
-  const p = url.pathname;
-  if (p === '/' || p === '/index.html') return 'shell';
-  // The boot watchdog is a non-hashed shell file (precached by name alongside
-  // index.html; see scripts/build-cyc.sh). The shell is stored last, so any
-  // bucket that holds the shell holds this too, and cycServeAsset's cross-
-  // bucket match keeps it present on an offline boot exactly like a chunk.
-  if (p.startsWith('/assets/') || p === '/boot-watchdog.js') return 'asset';
-  return 'network';
+  const route = cycTableRoute(url.pathname, url.search);
+  return route === 'shell' || route === 'asset' ? route : 'network';
 }
-
-// The same split, declared to the browser (the Static Routing API, Chromium):
-// only the shell and asset paths ever wake this worker; every other request
-// goes straight to the network without a fetch event, exactly the answer
-// cycRouteRequest gives it. Without this, every API call, log POST and stamp
-// check dispatched a fetch event to the worker that then did nothing with it,
-// and in Chromium one landing while the old worker is being stopped for a new
-// build's activation restarts the old worker and loses the activation: the new
-// build sits "waiting" (proven 2026-10-03, sw-activation-race.spec.ts). Rules
-// match in order; a non-GET on a shell path still reaches the handler, which
-// sends it to the network as before.
-const CYC_ROUTES = [
-  {condition: {urlPattern: {pathname: '/'}}, source: 'fetch-event'},
-  {condition: {urlPattern: {pathname: '/index.html'}}, source: 'fetch-event'},
-  {condition: {urlPattern: {pathname: '/boot-watchdog.js'}}, source: 'fetch-event'},
-  {condition: {urlPattern: {pathname: '/assets/*'}}, source: 'fetch-event'},
-  {condition: {urlPattern: {pathname: '/*'}}, source: 'network'}
-];
 
 async function cycServeShell(req) {
   // Newest bucket FIRST, but only a bucket that actually HOLDS the shell. A
@@ -176,7 +206,8 @@ async function cycServeAsset(req) {
 // must not wait on a flaky radio.
 self.addEventListener('install', (event) => {
   // Best effort: a browser without the API (WebKit) or a rule it rejects
-  // leaves every request to the fetch handler, which routes it the same way.
+  // leaves every request to the fetch handler, which routes it the same way
+  // (both read CYC_ROUTE_TABLE).
   if (typeof event.addRoutes === 'function')
     event.waitUntil(Promise.resolve(event.addRoutes(CYC_ROUTES)).catch(() => {}));
   event.waitUntil(
@@ -191,9 +222,10 @@ self.addEventListener('install', (event) => {
 // over again. Chromium can park a skip-waiting worker: the old worker is
 // stopped to make way, a request then restarts it, and the activation is not
 // retried until the old worker idles (30 s with no events, 5 min at most). A
-// second skipWaiting() retries it. The page also never reloads while a worker
-// waits: a navigation that triggers the parked activation is dispatched to the
-// old worker as it is stopped, and never completes (the hung reload).
+// second skipWaiting() retries it. The page also holds its own navigations a
+// few seconds while a worker waits (shared/selfReload.ts navigateSelf): a
+// navigation that triggers the parked activation is dispatched to the old
+// worker as it is stopped, and never completes (the hung reload).
 self.addEventListener('message', (event) => {
   // On a worker that is already active this is a no-op.
   if (event.data && event.data.t === 'skip-waiting') self.skipWaiting();
@@ -805,3 +837,4 @@ self.cycPrecacheActivate = cycPrecacheActivate;
 self.cycServeShell = cycServeShell;
 self.cycServeAsset = cycServeAsset;
 self.CYC_ROUTES = CYC_ROUTES;
+self.CYC_ROUTE_TABLE = CYC_ROUTE_TABLE;
