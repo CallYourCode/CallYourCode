@@ -176,14 +176,17 @@ describe('mark -> the row shows unread', () => {
     expect(s.unread).toBe(2); // honoured, not zeroed
   });
 
-  test('incidental live activity on the open chat is still zeroed (no false badge)', () => {
+  test('the open chat shows the engine count: replies he has not seen are not zeroed (B2b)', () => {
+    // It used to be zeroed for the attached chat. On a phone, back to the list
+    // keeps the chat attached, so replies that landed meanwhile showed 0, the
+    // re-open landed at the bottom with no divider, and they were read unseen.
     const s = seed('p1', {unread: 0});
     const {fire} = fakeConn(() => s.id);
-    // no markedUnread: a reply arrived while he reads, count not deliberate
 
     fire('sessions', [frameRow(3)], []);
 
-    expect(s.unread).toBe(0);
+    expect(s.unread).toBe(3);
+    expect(s.engineUnread).toBe(3);
   });
 
   test('a definitive refusal (4xx) reverts the optimistic paint', async () => {
@@ -212,14 +215,14 @@ describe('mark -> the row shows unread', () => {
 });
 
 describe('open -> the badge clears', () => {
-  test('attaching drops the intent and zeroes the count', () => {
+  test('attaching drops the intent; opening is not seeing, so the count stands', () => {
     const s = seed('p1', {unread: 2});
     markedUnread.add(s.id);
 
     attach(s.id);
 
     expect(markedUnread.has(s.id)).toBe(false);
-    expect(s.unread).toBe(0);
+    expect(s.unread).toBe(2);
   });
 
   test('after open, a later frame is no longer force-held unread', () => {

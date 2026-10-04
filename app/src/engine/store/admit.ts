@@ -4,7 +4,6 @@ import type {CycMessage} from '../../types';
 import {capSeen, seen} from './registry';
 import {stampRowId} from './rows/core';
 import {settleSend} from './sends';
-import {reportSighting} from './readState';
 import {noteClip} from './voiceNotes';
 import {prefetchShownDoc} from './shownPrefetch';
 import type {CycEngineMessage, CycEngineSession} from './types';
@@ -136,13 +135,12 @@ export function adoptEngineRow(
   if (m.transcriptPending) local.transcriptPending = true;
 
   if (m.seq !== undefined) local.seq = m.seq;
-  // THE OWN ROW IS DELIVERED: report a SIGHTING of it by its durable identity
-  // (fix-unread). The engine is the one authority and moves the marker to this
-  // row for every device; there is no local ts-marking to drift. Reporting the
-  // ROW (mid), not a press-time timestamp, is exactly what keeps a
-  // delivery-restamped send read with no divider stranded above it: the marker
-  // lands on this row's identity wherever the engine restamped it to.
-  reportSighting(s.id, {mid: local.mid ?? m.mid, ts: local.ts});
+  // NO READ ON SEND (owner, 2026-10-03). The own row's delivery used to report
+  // a sighting of it, which moved the one forward marker past every reply above
+  // it, seen or not (a hands-free send from a locked phone read them all). What
+  // he has seen is read by the on-screen sightings (the send scrolls to the
+  // bottom), and his own row is never unread: the divider only lands on agent
+  // rows (firstUnheardId), so nothing strands above it.
   // A pending echo (a long note shown before its transcript) carries no words
   // yet: the device's streaming display stands and keeps growing, so
   // draftCommitted stays until the completion row lands (settleTranscript).

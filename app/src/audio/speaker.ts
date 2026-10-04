@@ -109,6 +109,7 @@ class Speaker {
   private stateName: SpeakerStateName = 'idle';
   private stateListeners = new Set<StateListener>();
   private errorListeners = new Set<ErrorListener>();
+  private endedListeners = new Set<(item: SpeakerItem) => void>();
   private startGate: StartGate | null = null;
 
   constructor() {
@@ -118,6 +119,8 @@ class Speaker {
     this.audio.addEventListener('ended', () => {
       const done = this.current;
       this.current = null;
+      // played through to its end: the one moment a clip counts as heard
+      if (done) for (const fn of [...this.endedListeners]) fn(done);
       if (!this.playNext()) {
         this.emit('finished', done || undefined);
 
@@ -192,6 +195,14 @@ class Speaker {
   onError(fn: ErrorListener): () => void {
     this.errorListeners.add(fn);
     return () => this.errorListeners.delete(fn);
+  }
+
+  /* A clip that played through to its END, whatever plays next. 'finished' is
+   * not that: it fires only when the queue runs dry, and 'speaking' is the
+   * START. A clip stopped or skipped part way never arrives here. */
+  onEnded(fn: (item: SpeakerItem) => void): () => void {
+    this.endedListeners.add(fn);
+    return () => this.endedListeners.delete(fn);
   }
 
   setStartGate(fn: StartGate): void {

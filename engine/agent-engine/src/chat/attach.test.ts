@@ -332,11 +332,13 @@ test("with nothing unread the pointer sits past the newest seq and the pages col
     expect(ok.pages.map((p: any) => p.page)).toEqual([1]);
   });
 
-test("a user message reads everything above it, and the next reply is unread again", async () => {
-  /* #452: his own message reads the conversation above it (the marker moves
-   * with the utterance), and the reply that comes back after it is news. The
-   * two together are what makes the unread count mean "things I have not seen"
-   * rather than "things since I last tapped". */
+test("a user message reads nothing: replies above it stay unread until seen (M2, was #452)", async () => {
+  /* #452 made his own message read the conversation above it, so the count meant
+   * "things I have not seen" rather than "things since I last tapped". It read
+   * rows nobody saw: a hands-free note from a locked phone read every reply on
+   * every device. Owner, 2026-10-03: a row is read only when it has been on
+   * screen (or heard to the end); the app's sightings say so. The reply after
+   * his message is still news, and the divider still never sits on his row. */
   core = await wireCore({ with: ["delivery", "frames"] });
   const c = core;
   await until(() => c.sessions.size === 1, { what: "the pane to reconcile" });
@@ -344,14 +346,13 @@ test("a user message reads everything above it, and the next reply is unread aga
   expect(row().unread).toBe(3);
 
   const page = c.client();
-  await onUtterance(page.sock, { id: wireId(PANE), text: "I read all that" });
-  expect(row().unread, "his own message did not read the conversation above it (#452)").toBe(0);
+  await onUtterance(page.sock, { id: wireId(PANE), text: "sent from my pocket" });
+  expect(row().unread, "a send read replies nobody saw").toBe(3);
 
   await seedReplies(c, 1, "after");
-  expect(row().unread, "the reply that followed his message is not news").toBe(1);
+  expect(row().unread, "the reply that followed his message is news").toBe(4);
   const ok = await attach(c, PANE);
   expect(ok.pages[0].messages.at(-1).text).toBe("after0");
-  expect(ok.pointer, "the divider must sit on the reply, not on his own message").toBe(4);
 });
 
 /* Plant a sparse (or gapped) seq axis directly. ensureSeqs leaves a fully

@@ -3,7 +3,7 @@
 
 import { describe, expect, test, beforeEach } from "bun:test";
 import { initReadState, unreadOf, markRead, markReadRow, readThroughOf, markAllRead, markUnread,
-  markReadOnUtterance, filedAndQuiet, doneSeqFor, seenDoneSeqFor,
+  filedAndQuiet, doneSeqFor, seenDoneSeqFor,
   type ReadStateSession } from "./readstate.ts";
 
 let saved: string[] = [];
@@ -187,25 +187,6 @@ describe("markReadRow / readThroughOf (identity, fix-unread)", () => {
     // it, so an old persisted marker still resolves to a row the app can anchor.
     const s = withMids({ heardTs: 250 });
     expect(readThroughOf(s)).toEqual({ mid: "mr-a", ts: 200 });
-  });
-});
-
-describe("markReadOnUtterance", () => {
-  test("HIS OWN MESSAGE READS EVERYTHING ABOVE IT, and tells the other devices", () => {
-    const s = mk();
-    markReadOnUtterance(s, 350);
-    expect(s.heardTs).toBe(350);
-    expect(unreadOf(s)).toBe(0);
-    expect(broadcasts).toBe(1);
-    expect(saved).toEqual(["s1"]);
-  });
-  test("an utterance that moves nothing broadcasts nothing", () => {
-    // the broadcast is guarded on the marker actually moving; a replayed or
-    // out-of-order utterance must not cost every device a snapshot
-    const s = mk({ heardTs: 400 });
-    markReadOnUtterance(s, 350);
-    expect(s.heardTs).toBe(400);
-    expect(broadcasts).toBe(0);
   });
 });
 
