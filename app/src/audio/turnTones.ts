@@ -55,6 +55,10 @@ function blip(from: number, to: number): boolean {
   return true;
 }
 
+export function toneContextState(): AudioContextState | 'none' {
+  return ctx?.state ?? 'none';
+}
+
 export function turnOpened(): void {
   if (!blip(OPEN_HZ * 0.75, OPEN_HZ)) return;
   opened++;

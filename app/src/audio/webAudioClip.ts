@@ -46,6 +46,10 @@ export async function stretchProbe(): Promise<{worklet: boolean; stretched: numb
   return {worklet, stretched: out[0]?.length ?? 0};
 }
 
+export function playbackContextState(): AudioContextState | 'none' {
+  return ctx?.state ?? 'none';
+}
+
 function playbackContext(): AudioContext {
   if (ctx) return ctx;
   ctx = new CtxCtor!();

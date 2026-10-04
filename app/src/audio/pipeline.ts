@@ -1,5 +1,6 @@
 import {speaker} from './speaker';
-import {setCallPlayback} from './webAudioClip';
+import {playbackContextState, setCallPlayback} from './webAudioClip';
+import {toneContextState} from './turnTones';
 import {Pcm16kChunker, PCM_TAP_PROCESSOR_NAME, PCM_TAP_WORKLET_JS, STT_RATE} from './pcm';
 import {openSttStream} from '../engine/store/audioDocs';
 import {transcriptAtRelease} from './releaseDecode';
@@ -93,6 +94,9 @@ type Capture = {
   // The longest gap between waveform paints seen during this take (ms). It is
   // logged on capture.clip so a slow phone's frozen strip is visible in the log.
   maxPaintGapMs: number;
+
+  // PCM-tap chunks the mic graph delivered while held (0 = a silent graph).
+  tapChunks: number;
 };
 
 type ReleasedCapture = {
@@ -566,6 +570,7 @@ class Pipeline {
 
   private onPcmChunk(chunk: Float32Array): void {
     if (this.active) {
+      this.active.tapChunks++;
       this.active.stream?.push(chunk);
       return;
     }
@@ -882,6 +887,7 @@ class Pipeline {
       arbitrating: false,
       settled: false,
       maxPaintGapMs: 0,
+      tapChunks: 0,
 
       fromPress: false
     };
@@ -958,6 +964,14 @@ class Pipeline {
       heldMs: Math.round(performance.now() - cap.startedAt),
       wasPlaying: cap.wasPlaying,
       liveCaption: cap.streamOpen
+    });
+    // Every AudioContext the app holds, so a flat take names its cause.
+    cyclog('capture.audio', {
+      cid: cap.cid,
+      micCtx: this.actx?.state ?? 'none',
+      playCtx: playbackContextState(),
+      toneCtx: toneContextState(),
+      tapChunks: cap.tapChunks
     });
 
     if (cap.stream) this.tailFor = cap;
