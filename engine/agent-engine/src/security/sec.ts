@@ -310,6 +310,10 @@ export async function verifyRelayAuth(
  * derived bearer exists at all. deriveHttpCap/httpCapFor/verifyHttpCap and the
  * sec-done `cap` field all went with it. */
 
+/** Which lane of the sealed writer a frame rides (EngineSecConn.sealSend). */
+export type WriteLane = "ctl" | "bulk";
+type WriteJob = { inner: unknown; resolve: () => void };
+
 /* The engine's per-connection sec state machine. Feed it every
  * plaintext string the pipe delivers; it answers the hello, verifies the
  * device's sec-ok, enrols or refuses, sends sec-done, then hands each OPENED
@@ -320,10 +324,20 @@ export class EngineSecConn {
   ready = false;
   devFp: string | null = null;
   private done = false;
-  // Serialises sealed writes so the GCM counter order == the order bytes hit the
-  // pipe; a burst sealed concurrently would otherwise reach the receiver out of
-  // n-order and be refused as a replay.
-  private writeChain: Promise<void> = Promise.resolve();
+  /* THE SEALED WRITER: two lanes, one pump. Every write is sealed and sent by
+   * the one pump, one at a time, so the GCM counter order == the order bytes hit
+   * the pipe (a burst sealed concurrently would reach the receiver out of n-order
+   * and be refused as a replay). The `ctl` lane is everything the engine says:
+   * chat, acks, attach pages, a tunnel answer that fits one frame. The `bulk`
+   * lane is the body of a big tunnel answer (a download): a bulk frame goes out
+   * only when no control frame is waiting AND the pipe has drained under its
+   * low-water mark, so a download can never hold a chat frame or an upload's ack
+   * behind its bytes, and never queues more than one frame past the drain gate. */
+  private ctlQ: WriteJob[] = [];
+  private bulkQ: WriteJob[] = [];
+  private pumping = false;
+  /** wakes a pump parked on the bulk gate when a control frame arrives */
+  private wakeCtl: (() => void) | null = null;
 
   constructor(
     private state: E2EState,
@@ -341,21 +355,50 @@ export class EngineSecConn {
     private onFrame: (inner: any) => void,
     /** tear the socket down with a close code. */
     private onClose: (code: number, reason: string) => void,
+    /** resolves once the pipe's send buffer is under its low-water mark (or the
+     * pipe is closed); the bulk lane's gate. Absent: bulk is never held. */
+    private drain: () => Promise<void> = () => Promise.resolve(),
   ) {}
 
-  /** Seal + send an inner frame (only valid once the channel exists), chained so
-   * counter order matches wire order. */
-  sealSend(inner: unknown): Promise<void> {
-    const chan = this.chan;
-    if (!chan) return Promise.resolve();
-    this.writeChain = this.writeChain.then(async () => {
-      try {
-        this.send(await chan.seal(inner));
-      } catch {
-        // socket gone; the close handler cleans up
-      }
+  /** Seal + send an inner frame (only valid once the channel exists). Resolves
+   * once the sealed frame was handed to the pipe, so a caller that awaits it
+   * and then the pipe's drain sees the bytes it just wrote. */
+  sealSend(inner: unknown, lane: WriteLane = "ctl"): Promise<void> {
+    if (!this.chan) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      (lane === "bulk" ? this.bulkQ : this.ctlQ).push({ inner, resolve });
+      if (lane === "ctl") this.wakeCtl?.();
+      void this.pump();
     });
-    return this.writeChain;
+  }
+
+  private async pump(): Promise<void> {
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      for (;;) {
+        let job = this.ctlQ.shift();
+        if (!job && this.bulkQ.length) {
+          const gate = await new Promise<"ctl" | "drained">((resolve) => {
+            this.wakeCtl = () => resolve("ctl");
+            void this.drain().then(() => resolve("drained"));
+          });
+          this.wakeCtl = null;
+          if (gate === "ctl" || this.ctlQ.length) continue;
+          job = this.bulkQ.shift();
+        }
+        if (!job) break;
+        const chan = this.chan;
+        try {
+          if (chan) this.send(await chan.seal(job.inner));
+        } catch {
+          // socket gone; the close handler cleans up
+        }
+        job.resolve();
+      }
+    } finally {
+      this.pumping = false;
+    }
   }
 
   private async fail(reason: string, code = 4403): Promise<void> {
