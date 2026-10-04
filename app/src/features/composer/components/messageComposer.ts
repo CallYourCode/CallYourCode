@@ -382,10 +382,13 @@ export function createComposer({
     }
   };
 
-  // The pill is the input box: a press anywhere in it that does not land on a
-  // control of its own focuses the input. The rule is inverted on purpose (name
-  // the controls, not the surfaces), so a quote card, the band around the text
-  // and any block added later are part of the box without being listed.
+  // The composer's own surface is the input box: a press on the pill itself, the
+  // blocks row or the text line that does not land on a control focuses the
+  // input. The rule names the controls, not the surfaces, so a quote card, the
+  // band around the text and any block added later are part of the box without
+  // being listed. Panels docked into the pill with their own interaction (the
+  // ask panel, plugin dials) are siblings of the blocks row and the line, so
+  // they are outside the surface by construction.
   //
   // The reply card's panel is a control (it jumps to the replied message), but
   // the caret stays: its mousedown never takes focus, and a mouse press puts the
@@ -400,7 +403,9 @@ export function createComposer({
   const JUMP = '.cyc-block-reply .cyc-reply.cyc-callout-surface';
   const CONTROL =
     'button, a[href], input, textarea, select, label, [role="button"], [role="slider"], ' +
-    `[tabindex], cyc-voice-card, .cyc-attach-chip, .cyc-rec-panel, .cyc-pill-partial, ${JUMP}`;
+    `[tabindex], cyc-voice-card, .cyc-attach-chip, .cyc-rec-panel, ${JUMP}`;
+  const onSurface = (t: Element) =>
+    t === composerRows || blocksRow.contains(t) || composerLine.contains(t);
   const controlOf = (t: Element) => {
     const c = t.closest(CONTROL);
     return c && composerRows.contains(c) ? c : null;
@@ -411,7 +416,7 @@ export function createComposer({
   composerRows.addEventListener('pointerdown', (e) => {
     press = null;
     const t = e.target as Element;
-    if (!e.isPrimary || e.button !== 0 || disabled || input.contains(t)) return;
+    if (!e.isPrimary || e.button !== 0 || disabled || input.contains(t) || !onSurface(t)) return;
     // A press on a scrollbar (outside the target's client box) is the scroller's.
     // Inline targets have no client box (clientWidth 0) and no scrollbar.
     if (t.clientWidth && (e.offsetX >= t.clientWidth || e.offsetY >= t.clientHeight)) return;

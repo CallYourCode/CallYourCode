@@ -7,6 +7,7 @@ import {describe, expect, test, vi} from 'vitest';
 };
 
 import {createComposer} from '../features/composer/components/messageComposer';
+import {createAskPanel} from '../components/askPanel';
 import type {CycReplyTo} from '../types';
 
 // The pill is the input box (fix-reply-focus): a press anywhere in it that is
@@ -24,7 +25,7 @@ function setup() {
     onSend: () => {},
     onJumpToReply,
     onAttach: () => {},
-    onStage: () => {},
+    onStage: () => Promise.resolve(),
     onVoiceStart: () => {},
     onVoiceEnd: () => {},
     onLiveSend: () => {},
@@ -44,11 +45,12 @@ function setup() {
 
 // jsdom has no layout: give the pressed element a box and the event an offset
 // inside it, the way a real press on it reads.
-function pointerdown(el: HTMLElement) {
+function pointerdown(el: HTMLElement, pointerType = 'mouse') {
   Object.defineProperty(el, 'clientWidth', {value: 100, configurable: true});
   Object.defineProperty(el, 'clientHeight', {value: 20, configurable: true});
   const e = new MouseEvent('pointerdown', {bubbles: true, cancelable: true, button: 0});
   Object.defineProperty(e, 'isPrimary', {value: true});
+  Object.defineProperty(e, 'pointerType', {value: pointerType});
   Object.defineProperty(e, 'offsetX', {value: 10});
   Object.defineProperty(e, 'offsetY', {value: 5});
   el.dispatchEvent(e);
@@ -130,6 +132,72 @@ describe('composer surface press', () => {
     const md = mousedown(line);
     expect(md.defaultPrevented).toBe(false);
     expect(document.activeElement).not.toBe(input);
+    c.el.remove();
+  });
+
+  // The real docked panels: the ask panel (main.ts mounts it with mountAsk) and
+  // a plugin dial (setPluginWidgets docks its panel in the pill). Their presses
+  // are theirs; a tap must not raise the keyboard over them.
+  for (const sel of [
+    '.cyc-ask-question',
+    '.cyc-ask-context',
+    '.cyc-replylevel-title',
+    '.cyc-replylevel-label',
+    '.cyc-steprange-track',
+    '.cyc-steprange-track > span',
+    'fieldset'
+  ]) {
+    for (const pointerType of ['mouse', 'touch']) {
+      test(`a ${pointerType} press on a docked panel (${sel}) is the panel's, not the input's`, () => {
+        const {c, input} = setup();
+        const ask = createAskPanel({onAnswer: () => {}} as never);
+        c.mountAsk(ask.el);
+        ask.update(
+          {question: 'Which db?', context: ['psql -h db'], choices: [{n: 1, label: 'Postgres'}], fingerprint: 'f'} as never,
+          false,
+          's1'
+        );
+        c.setPluginWidgets([
+          {
+            widget: {
+              type: 'slider',
+              icon: 'x',
+              label: 'Complexity',
+              key: 'complexity',
+              value: 1,
+              steps: [
+                {n: 1, name: 'low'},
+                {n: 2, name: 'mid'},
+                {n: 3, name: 'high'}
+              ]
+            }
+          }
+        ] as never);
+        const el = c.el.querySelector(sel) as HTMLElement;
+        expect(el, sel).not.toBeNull();
+        expect(c.el.querySelector('.cyc-composer-rows')!.contains(el), `${sel} is docked in the pill`).toBe(true);
+        pointerdown(el, pointerType);
+        const md = mousedown(el);
+        expect(md.defaultPrevented).toBe(false);
+        expect(document.activeElement).not.toBe(input);
+        c.el.remove();
+      });
+    }
+  }
+
+  // Removing a block puts the caret back in the input, the same for every X.
+  test('the quote X and the attach chip X put the caret back in the input, like the reply X', () => {
+    const {c, input} = setup();
+    c.addQuote('quoted words', 'Agent', REPLY);
+    c.attach(new File(['x'], 'notes.txt', {type: 'text/plain'}));
+    for (const sel of ['.cyc-block-quote button', '.cyc-attach-chip button', '.cyc-block-reply .cyc-reply-cancel']) {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+      const x = c.el.querySelector(sel) as HTMLElement;
+      expect(x, sel).not.toBeNull();
+      click(x);
+      expect(c.el.querySelector(sel), `${sel} was not removed`).toBeNull();
+      expect(document.activeElement, `${sel} left the caret out of the input`).toBe(input);
+    }
     c.el.remove();
   });
 });
