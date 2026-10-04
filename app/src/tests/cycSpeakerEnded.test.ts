@@ -38,7 +38,10 @@ vi.mock('../audio/webAudioClip', () => {
   }
   return {WebAudioClip: FakeClip, unlockPlayback: async () => {}};
 });
-vi.mock('../audio/audioCache', () => ({resolveAudioUrl: async (_id: string, url: string) => url}));
+vi.mock('../audio/audioCache', () => ({
+  resolveAudioUrl: async (_id: string, url: string) => url,
+  streamAudioUrl: async (_id: string, url: string) => url
+}));
 vi.mock('@/shared/logging', () => ({cyclog: vi.fn()}));
 
 import {speaker} from '../audio/speaker';
