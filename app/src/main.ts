@@ -376,7 +376,9 @@ function buildApp() {
     readMarkerOf: (s) => readMarkerOf(s),
     reportViewedThrough: (id) => reportViewedThrough(id),
     noteOnScreen: (id) => noteOnScreen(id),
-    play: (sid, mid, text) => play(sid, mid, text),
+    heardOrSeen: (sid, rowId) => heardOrSeen(sid, rowId),
+    // the reason rides through, so speech on open logs as autoplay-open
+    play: (sid, mid, text, reason) => play(sid, mid, text, reason),
     suppressAutoSpeak: () => suppressAutoSpeak,
     clearSuppressAutoSpeak: () => {
       suppressAutoSpeak = false;
@@ -604,16 +606,23 @@ function buildApp() {
 
   let suppressAutoSpeak = false;
 
-  const {heardTsOf, readMarkerOf, markSeen, reportViewedThrough, markHeard, noteOnScreen} =
-    createHeardProgress({
-      store: engine,
-      isLive: () => dataState.mode === 'live',
-      activeId: () => sessionState.activeId,
-      isChatViewOpen: () => mainColumns.dataset.view === 'chat',
-      onScreenRows: (id) => cs.onScreenRows(id),
-      historyBelowWindow: (id) => engine.historyBelowWindow(id),
-      onHeardMarked: (sessionId, marker) => noteHeardMarked(sessionId, marker)
-    });
+  const {
+    heardTsOf,
+    readMarkerOf,
+    markSeen,
+    reportViewedThrough,
+    markHeard,
+    noteOnScreen,
+    heardOrSeen
+  } = createHeardProgress({
+    store: engine,
+    isLive: () => dataState.mode === 'live',
+    activeId: () => sessionState.activeId,
+    isChatViewOpen: () => mainColumns.dataset.view === 'chat',
+    onScreenRows: (id) => cs.onScreenRows(id),
+    historyBelowWindow: (id) => engine.historyBelowWindow(id),
+    onHeardMarked: (sessionId, marker) => noteHeardMarked(sessionId, marker)
+  });
 
   const {
     sessionAttachments,

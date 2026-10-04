@@ -58,6 +58,8 @@ export interface ChatSurfaceDeps {
   reportViewedThrough(id: string): void;
   /* Record the rows on screen as seen, without reporting (heardProgress). */
   noteOnScreen(id: string): void;
+  /* Whether a row has been on screen or heard to the end (heardProgress). */
+  heardOrSeen?(sessionId: string, rowId: string): boolean;
   play(sessionId: string, msgId: string, text: string, reason?: PlayReason): void;
   suppressAutoSpeak(): boolean;
   clearSuppressAutoSpeak(): void;

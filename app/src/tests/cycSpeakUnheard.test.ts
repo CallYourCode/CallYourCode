@@ -31,10 +31,20 @@ const hooks = vi.hoisted(() => ({
   // The read-through marker effectiveMarkerOf resolves; a getter so a single
   // test can model the stale (undefined) state before the catchup and the
   // engine's identity after it.
-  marker: undefined as unknown
+  marker: undefined as unknown,
+  // the chat the speaker is playing right now (speaker.state.sessionId)
+  speakingSession: undefined as string | undefined,
+  // rows heardProgress has seen (on screen or heard to the end)
+  seen: new Set<string>()
 }));
 vi.mock('../audio/speaker', () => ({
-  speaker: {pending: (): Set<string> => hooks.pendingSet, stopAll: hooks.stopAll}
+  speaker: {
+    pending: (): Set<string> => hooks.pendingSet,
+    stopAll: hooks.stopAll,
+    get state() {
+      return {state: 'speaking', sessionId: hooks.speakingSession};
+    }
+  }
 }));
 vi.mock('../speechGate', () => ({mayStartSpeech: () => true}));
 vi.mock('../engine/store', () => ({
@@ -86,7 +96,8 @@ function makeReader(played: {sessionId: string; msgId: string}[]) {
       readMarkerOf: () => hooks.marker as ReadMarker | undefined,
       play: (sessionId, msgId) => played.push({sessionId, msgId}),
       suppressAutoSpeak: () => false,
-      isChatViewOpen: () => true
+      isChatViewOpen: () => true,
+      heardOrSeen: (_sid, rowId) => hooks.seen.has(rowId)
     },
     messages: inner,
     scroll,
@@ -103,6 +114,8 @@ beforeEach(() => {
   sessionState.activeId = 's1';
   hooks.fresh = true;
   hooks.marker = undefined;
+  hooks.speakingSession = undefined;
+  hooks.seen.clear();
 });
 
 describe('speech-on-open waits for the engine, then derives from the unread count', () => {
@@ -312,5 +325,61 @@ describe('the stale cache (read-through newer than the loaded window) speaks not
     reader.speakUnheard('s1');
 
     expect(played).toEqual([]);
+  });
+});
+
+describe('release-1 B1: a clip heard to the end is never picked again, and a re-run never cuts the run', () => {
+  // Since the marker only moves through a contiguous seen run, a clip heard to
+  // the end can sit AFTER the marker while earlier unread rows are unseen. The
+  // replay edge (12 s), the back-live timer and a return to the page re-ran
+  // speakUnheard, which picked the heard clip again, stopAll'd the clip playing
+  // and dropped the rest of the queue.
+  const open = () => {
+    const session: EngineSession = {
+      id: 's1',
+      name: 's1',
+      messages: [claude(1, 100), claude(2, 200), claude(3, 300), claude(4, 400)],
+      unread: 3,
+      engineUnread: 3
+    } as EngineSession;
+    setSession(session);
+    setMarker({mid: 'mr-1', ts: 100});
+  };
+  test('heard mr-2, mr-3 playing, mr-4 queued: a re-run adds nothing and stops nothing', () => {
+    open();
+    hooks.seen.add('m:mr-2'); // heard to the end; the marker is still on mr-1
+    pendingSet.add('mr-3');
+    pendingSet.add('mr-4');
+    hooks.speakingSession = 's1';
+    const played: {sessionId: string; msgId: string}[] = [];
+    makeReader(played).speakUnheard('s1');
+    expect(played).toEqual([]);
+    expect(stopAll).not.toHaveBeenCalled();
+  });
+  test('a heard clip after the marker is skipped on a fresh run too', () => {
+    open();
+    hooks.seen.add('m:mr-2');
+    const played: {sessionId: string; msgId: string}[] = [];
+    makeReader(played).speakUnheard('s1');
+    expect(played.map((p) => p.msgId)).toEqual(['mr-3', 'mr-4']);
+  });
+  test("a new clip during this chat's run is added behind it, without a restart", () => {
+    open();
+    pendingSet.add('mr-2');
+    pendingSet.add('mr-3');
+    hooks.speakingSession = 's1';
+    const played: {sessionId: string; msgId: string}[] = [];
+    makeReader(played).speakUnheard('s1');
+    expect(played.map((p) => p.msgId)).toEqual(['mr-4']);
+    expect(stopAll).not.toHaveBeenCalled();
+  });
+  test('audio from another chat is still replaced', () => {
+    open();
+    pendingSet.add('other-clip');
+    hooks.speakingSession = 's2';
+    const played: {sessionId: string; msgId: string}[] = [];
+    makeReader(played).speakUnheard('s1');
+    expect(stopAll).toHaveBeenCalledTimes(1);
+    expect(played.map((p) => p.msgId)).toEqual(['mr-2', 'mr-3', 'mr-4']);
   });
 });
