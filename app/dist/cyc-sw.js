@@ -23,7 +23,7 @@
 // re-activates (drops old caches + clients.claim). In app/public it stays the
 // literal placeholder. cyc-precache.json's version drives the cache name, and
 // install checks that it is this build's (cycPrecacheInstall).
-const CYC_BUILD = '1791101502';
+const CYC_BUILD = '1791102821';
 
 const CYC_CACHE_PREFIX = 'cyc-precache-';
 const CYC_MANIFEST_URL = '/cyc-precache.json';
@@ -253,7 +253,133 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(cycPrecacheActivate().then(() => self.clients.claim()));
 });
 
+// --- Streamed downloads (download-lane, 2026-10-03) --------------------------
+// A shown file the page pulls over the sealed tunnel, part by part, is handed
+// to the BROWSER's own download manager through this worker, so one tap saves
+// it straight to disk with the browser's own progress (laptop, Android) and
+// nothing is held whole in memory. The page opens a download here with a
+// MessagePort (cyc-dl-open), then points a hidden frame at /__cyc_dl/<id>/...;
+// this worker answers that request with an attachment whose body is a stream
+// the page feeds through the port: a 'pull' asks the page for the next part,
+// 'chunk' enqueues it, 'end' closes, 'abort' fails it. A cancel in the
+// browser's download UI tells the page to stop. Only an id the page opened is
+// answered, once; anything else under the prefix is a 404, never the network
+// (the app server would answer it with the shell).
+const CYC_DL_PREFIX = '/__cyc_dl/';
+const cycDownloads = new Map();
+
+// A stream whose page has said nothing (no part, no keepalive) for this long
+// lost its page (closed, crashed): fail it, so the browser never shows a
+// download in progress that nothing will finish.
+const CYC_DL_QUIET_MS = 45000;
+
+function cycDlOpen(d, port) {
+  const id = String(d.id || '');
+  if (!id) return;
+  let ctrl = null;
+  let over = false;
+  let heard = Date.now();
+  const watchdog = setInterval(() => {
+    if (over) return clearInterval(watchdog);
+    if (Date.now() - heard < CYC_DL_QUIET_MS) return;
+    over = true;
+    clearInterval(watchdog);
+    cycDownloads.delete(id);
+    try {
+      ctrl.error(new Error('the page feeding this download went away'));
+    } catch {
+      // the browser already dropped the stream
+    }
+  }, 5000);
+  const stream = new ReadableStream(
+    {
+      start(c) {
+        ctrl = c;
+      },
+      pull() {
+        port.postMessage({t: 'pull'});
+      },
+      cancel() {
+        over = true;
+        cycDownloads.delete(id);
+        port.postMessage({t: 'cancel'});
+      }
+    },
+    new CountQueuingStrategy({highWaterMark: Math.max(1, Number(d.credits) || 4)})
+  );
+  port.onmessage = (ev) => {
+    const m = ev.data || {};
+    heard = Date.now();
+    if (over) return;
+    try {
+      if (m.t === 'chunk') ctrl.enqueue(new Uint8Array(m.bytes));
+      else if (m.t === 'end') {
+        over = true;
+        cycDownloads.delete(id);
+        ctrl.close();
+      } else if (m.t === 'abort') {
+        over = true;
+        cycDownloads.delete(id);
+        ctrl.error(new Error(String(m.reason || 'download aborted')));
+      }
+    } catch {
+      // the browser already dropped the stream
+    }
+  };
+  cycDownloads.set(id, {
+    stream,
+    port,
+    name: String(d.name || 'download'),
+    size: Number(d.size) || 0,
+    served: false
+  });
+  port.postMessage({t: 'ready'});
+}
+
+function cycDlDisposition(name) {
+  const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\\r\n]/g, '_');
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+}
+
+function cycServeDownload(req) {
+  const rest = new URL(req.url).pathname.slice(CYC_DL_PREFIX.length);
+  const id = rest.split('/')[0];
+  const dl = cycDownloads.get(id);
+  if (!dl || dl.served) return new Response('no such download', {status: 404});
+  dl.served = true;
+  dl.port.postMessage({t: 'started'});
+  const headers = {
+    'content-type': 'application/octet-stream',
+    'content-disposition': cycDlDisposition(dl.name),
+    'x-content-type-options': 'nosniff',
+    'cache-control': 'no-store'
+  };
+  if (dl.size > 0) headers['content-length'] = String(dl.size);
+  return new Response(dl.stream, {headers});
+}
+
+function cycIsDownload(req) {
+  try {
+    const url = new URL(req.url);
+    return (
+      req.method === 'GET' &&
+      url.origin === self.location.origin &&
+      url.pathname.startsWith(CYC_DL_PREFIX)
+    );
+  } catch {
+    return false;
+  }
+}
+
+self.addEventListener('message', (event) => {
+  const d = event.data;
+  // cyc-dl-keepalive needs no answer: the message itself keeps this worker up
+  // while the page feeds a download.
+  if (d && d.t === 'cyc-dl-open' && event.ports && event.ports[0]) cycDlOpen(d, event.ports[0]);
+});
+
 self.addEventListener('fetch', (event) => {
+  if (cycIsDownload(event.request)) return event.respondWith(cycServeDownload(event.request));
   const route = cycRouteRequest(event.request);
   if (route === 'network') return; // untouched: no respondWith, straight to network
   if (route === 'shell') return event.respondWith(cycServeShell(event.request));
