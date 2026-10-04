@@ -16,6 +16,7 @@
 import {describe, expect, test} from 'vitest';
 import {adoptEngineRow} from '../engine/store/admit';
 import {audioMessage} from '../features/chat/messages/audioMessages';
+import {reachOf} from '../features/chat/content';
 import type {CycMessage} from '../types';
 import type {CycEngineMessage, CycEngineSession} from '../engine/store/types';
 import type {EngineChatMessage} from '../engine/contract';
@@ -142,6 +143,39 @@ describe('adoptEngineRow on a streaming voice display', () => {
     expect(local.text).toBe('not what I asked\n\ncaption');
     expect(local.draftCommitted).toBe(8);
     expect(local.transcriptPending).toBe(true);
+  });
+});
+
+describe('a note the engine gave up on (undelivered)', () => {
+  // the row exactly as a page or a live frame paints it on any device
+  const row = {
+    id: 'r2',
+    role: 'user',
+    kind: 'voice',
+    text: 'my caption',
+    ts: 1,
+    cid: 'c-old',
+    msgId: 'clip-1',
+    durationS: 30,
+    undelivered: 'the engine restarted while delivering this and cannot tell whether it arrived.'
+  } as unknown as CycMessage;
+
+  test('is painted failed on any device, says why, and offers the retry', () => {
+    const node = audioMessage(row, true, true, () => {});
+    expect(node.classList.contains('cyc-msg-failed')).toBe(true);
+    const note = node.querySelector('button.cyc-voice-failed');
+    expect(note, 'no retry offered').not.toBeNull();
+    expect(note!.textContent).toContain('the engine restarted while delivering this');
+    expect(note!.textContent).toContain('Tap to try again');
+    expect(node.textContent).not.toContain('recording was not saved');
+  });
+
+  test("the sender's own bubble takes the failure from the row", () => {
+    const local = mkLocal({text: 'my words', status: 'sent'});
+    adoptEngineRow(mkSession(local), local,
+      engineRow({text: 'my caption', undelivered: 'it did not arrive'}), 'my caption', 'k9');
+    expect(local.undelivered).toBe('it did not arrive');
+    expect(reachOf(local)).toBe('failed');
   });
 });
 

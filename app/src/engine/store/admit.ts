@@ -147,6 +147,7 @@ export function adoptEngineRow(
   if (m.queued) local.queued = true;
 
   if (m.transcriptPending) local.transcriptPending = true;
+  if (m.undelivered) local.undelivered = m.undelivered;
 
   if (m.seq !== undefined) local.seq = m.seq;
   // THE OWN ROW IS DELIVERED: report a SIGHTING of it by its durable identity

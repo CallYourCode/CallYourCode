@@ -1080,7 +1080,7 @@ initTranscribe({
   inOrder: (id, f) => inOrder(id, f),
   deliver: (s, opts) => injectUserMessage(s as Session, opts),
   sessionOf: (id) => sessions.get(id),
-  failNote: (s, ts, cid, tell) => failUndeliveredNote(s as Session, ts, cid, tell),
+  failNote: (s, ts, tell) => failUndeliveredNote(s as Session, ts, tell),
 });
 
 // Delivery: deliver.ts.

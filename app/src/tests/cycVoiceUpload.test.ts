@@ -530,6 +530,34 @@ describe('honest voice-clip send over the transfer queue', () => {
     expect(intents.get(m.cid!)?.state).toBe('queued');
   });
 
+  test('a note the engine gave up on (undelivered) retries as ONE new send naming its clip', async () => {
+    // the row as every device holds it: the engine's, no local bytes or intent
+    const failed = {
+      id: 'mr-1',
+      role: 'user',
+      kind: 'voice',
+      text: '> the agent asked\n\nmy caption',
+      ts: 50,
+      cid: 'c-old',
+      msgId: 'clip-1',
+      durationS: 9,
+      status: 'delivered',
+      undelivered: 'the engine restarted while delivering this'
+    } as unknown as CycEngineMessage;
+    s.messages.push(failed);
+    retrySend(s.id, 'mr-1');
+    retrySend(s.id, 'mr-1'); // a second tap is the same send
+    await flush();
+    expect(planted.sent.length, 'one frame for two taps').toBe(1);
+    const [, wire, opts] = planted.sent[0] as [string, string, Record<string, unknown>];
+    expect(wire, 'the engine puts the words into the kept quote and caption').toBe('');
+    expect(opts).toMatchObject({cid: 'c-old-r', kind: 'voice', msgId: 'clip-1', durationS: 9});
+    const fresh = s.messages.find((x) => (x as CycEngineMessage).cid === 'c-old-r') as CycEngineMessage;
+    expect(fresh).toMatchObject({status: 'sending', msgId: 'clip-1'});
+    expect(failed.undelivered, 'the failed row stays as it is').toBeTruthy();
+    expect(vi.mocked(transfers.enqueue)).not.toHaveBeenCalled();
+  });
+
   test('the message menu "Try again" routes a failed voice note through the kept bytes', async () => {
     const id = sendVoiceClip(s.id, clip(128), {durationS: 2});
     const m = s.messages.find((x) => x.id === id) as CycEngineMessage;

@@ -96,7 +96,6 @@ export function resetForTest(): void {
   ackQueue.clear();
   redrivenTaken.clear();
   ownTakes.clear();
-  stagedHere.clear();
   draining = false;
   inPane = 0;
   deps = null;
@@ -313,20 +312,16 @@ export async function redriveTaken(s: CidSession & { id: string }): Promise<numb
 }
 
 /* A PENDING NOTE GIVEN UP ON (transcribe.ts, a completion driven after a
- * restart that the pane refused): its row stops being pending, the cid stops
- * counting as taken, and the sender is told, so its retry is delivered into
- * this same row. */
-export function failUndeliveredNote(s: Session, ts: number, cid: string, tell: string): void {
+ * restart that the pane refused): the row stops being pending and says why, on
+ * disk, so every device shows it failed after any reload or restart. Its retry
+ * is a new send naming the same clip (onUtterance, gaveUp). */
+export function failUndeliveredNote(s: Session, ts: number, tell: string): void {
   const row = s.chat.find((r) => r.role === "user" && r.ts === ts);
-  if (row) {
-    delete row.transcriptPending;
-    delete row.wordsInto;
-    row.undelivered = true;
-    persistPatch(s.id, ts, { undelivered: true }, ["transcriptPending", "wordsInto"]);
-    broadcast({ t: "chat", ...row });
-  }
-  recentCids(s).delete(cid);
-  D().broadcast(noteFailed(s.id, cid, failReason(tell)));
+  if (!row) return;
+  delete row.transcriptPending;
+  row.undelivered = failReason(tell);
+  persistPatch(s.id, ts, { undelivered: row.undelivered }, ["transcriptPending"]);
+  broadcast({ t: "chat", ...row });
 }
 
 /* A take that will not be delivered: the sender is told (send-failed, and on
@@ -365,7 +360,7 @@ export function recentCids(s: CidSession): Map<string, { msgId?: string }> {
   const map = new Map<string, { msgId?: string }>();
   for (let i = Math.max(0, s.chat.length - USER_CIDS_KEEP * 2); i < s.chat.length; i++) {
     const c = s.chat[i];
-    if (c.role === "user" && c.cid && !c.undelivered) map.set(c.cid, { msgId: c.msgId });
+    if (c.role === "user" && c.cid) map.set(c.cid, { msgId: c.msgId });
   }
   while (map.size > USER_CIDS_KEEP) map.delete(map.keys().next().value as string);
   s.recentCids = map;
@@ -564,9 +559,16 @@ export async function handleUtterance(ws: Sock | null, m: any, takenAt: number) 
    * pass runs, no marker survives it whether or not the frame named that one --
    * so a real marker still cannot reach a pane, and the only thing this decides
    * is whether the message is one the pass has any business touching. */
+  /* THE RETRY OF A NOTE THIS ENGINE GAVE UP ON (failUndeliveredNote): a new cid
+   * naming that note's clip, with no body of its own. It goes as the note would
+   * have, its words put into the quote and caption kept on the failed row. */
+  const gaveUp = m.kind === "voice" && !text && typeof voice.msgId === "string"
+    ? s.chat.find((r) => r.undelivered && r.msgId === voice.msgId && r.wordsInto && r.cid) : undefined;
+  if (gaveUp) text = gaveUp.wordsInto!.split(wordsToken(gaveUp.cid!)).join(wordsToken(cid));
   const inBody = new Set([...text.matchAll(WORDS_TOKEN_RE)].map((x) => x[1]));
   const asked: string[] = Array.isArray(m.words)
     ? m.words.filter((x: unknown): x is string => typeof x === "string" && !!x) : [];
+  if (gaveUp) asked.push(cid);
   /* THE NOTE'S OWN MARKER ("note-words"): a voice note whose body is a reply
    * quote or a caption with a marker naming THIS frame's cid, asked for in
    * `words`. Its words come from the note's own clip (the rescue below), not
@@ -868,20 +870,15 @@ export const OFFLINE: Injected = { ok: false, retriable: true,
  * cannot land on any other message. */
 export function commitDelivery(s: Session, inj: Injection, ts: number, willQueue: boolean): ChatMsg {
   const { cid, text } = inj;
-  // the retry of a note given up on is delivered into that note's own row
-  const prior = inj.completesTs == null &&
-    s.chat.find((r) => r.role === "user" && r.cid === cid && r.undelivered);
-  if (inj.completesTs != null || prior) {
-    const row = prior || s.chat.find((r) => r.role === "user" && r.ts === inj.completesTs);
+  if (inj.completesTs != null) {
+    const row = s.chat.find((r) => r.role === "user" && r.ts === inj.completesTs);
     if (row) {
       row.text = text;
       delete row.transcriptPending;
       delete row.wordsInto;
-      delete row.undelivered;
       if (willQueue) row.queued = true;
-      persistPatch(s.id, row.ts, { text, ...(willQueue ? { queued: true } : {}) },
-        ["transcriptPending", "wordsInto", "undelivered"]);
-      rememberCid(s, cid, row.msgId);
+      persistPatch(s.id, row.ts,
+        { text, ...(willQueue ? { queued: true } : {}) }, ["transcriptPending", "wordsInto"]);
       broadcast({ t: "chat", ...row });
       return row;
     }
@@ -933,17 +930,14 @@ export async function injectUserMessage(
 }
 
 /* The keystroke half of injectUserMessage, for a live mux pane. HOW FAR AN
- * EARLIER ATTEMPT GOT is the cid's Stage (intake.ts), written before the body is
- * typed (`typing`) and before the Enter (`entering`), put back to `typing` by
- * any failure that is not a clean refusal, and removed once the row is on disk.
- * The guard acts on it only with positive evidence from the box (delivery-
- * machine noteCheck); anything it cannot read plainly fails visibly. */
-const stagedHere = new Set<string>();
+ * ATTEMPT GOT is the cid's Stage (intake.ts), written before the body is typed
+ * (`typing`) and before the Enter (`entering`), and removed when the attempt
+ * ends either way. So a stage found here was left by a stopped process; the
+ * guard acts on it only with positive evidence from the box (delivery-machine
+ * noteCheck), and a retry in this process keeps the in-memory rules. */
 async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
   const { cid, text } = inj;
-  /* A stage this process wrote is its own attempt's: a retry here keeps main's
-   * in-memory rules. Only a stage a stopped process left is handed on. */
-  const stage = stagedHere.has(cid) ? null : await stageFor(s.id, cid);
+  const stage = await stageFor(s.id, cid);
   /* The agent gets a real path per attachment, in the order they were
    * composed, and the caption (if any) rides along after them. ONE message:
    * several attachments make the line longer, they never
@@ -981,24 +975,14 @@ async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
   armAwaiting(cid, s.id, 0, delivered);
   try {
     await deliverToPane(s.muxHandle, delivered, cid, inj.takenAt, {
-      progress: (st) => {
-        stagedHere.add(cid);
-        return noteStage(s.id, cid, st).catch((e) =>
-          D().log("intake.stage-unsaved", { cid, err: String(e) }));
-      },
+      progress: (st) => noteStage(s.id, cid, st).catch((e) =>
+        D().log("intake.stage-unsaved", { cid, err: String(e) })),
       ...(stage ? { resumed: stage } : {}),
     });
   } catch (e) {
     clearAwaiting(cid);
-    /* A clean refusal typed nothing (or was swallowed): no stage. Anything
-     * else may have left the body in the box: `typing`, so a retry looks. */
-    if (e instanceof PaneNotReady) {
-      stagedHere.delete(cid);
-      await forgetStage(s.id, cid);
-    } else {
-      stagedHere.add(cid);
-      await noteStage(s.id, cid, "typing").catch(() => {});
-    }
+    // the attempt is over: what it left in the box is the in-memory note's
+    await forgetStage(s.id, cid);
     /* Three failures now, and the user needs them told apart. A pane sitting
      * on a prompt (PaneNotReady, nothing typed) is "go and answer it". A body
      * typed but not submitted (DeliveryStranded) is "send it again and it will
@@ -1074,7 +1058,6 @@ async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
     completing: inj.completesTs != null || undefined });
   await D().flushChat?.(s.id);
   await forgetStage(s.id, cid);
-  stagedHere.delete(cid);
   return { ok: true, ts };
 }
 

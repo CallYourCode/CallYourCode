@@ -14,8 +14,10 @@
  *                   is written, nothing typed again (claude and pi shapes)
  *   D1 completion   a pending note's completion stopped after its Enter
  *   R1              a retry in the same process keeps main's Enter-only rule
- *   R2              a pending note's completion refused after a restart fails
- *                   visibly and is never driven again on its own
+ *   R2 / V5-A..C    a pending note's completion refused after a restart marks
+ *                   its row undelivered (every device reads it) and is never
+ *                   driven again; its retry is a new cid, delivered once
+ *   V5-D            a same-process retry of a voice note reads its words again
  *   D1 SIGTERM      the drain finishes what is typing and holds the rest
  *   E1-E5           verifier round 3: a stale stage, a refusal with no socket,
  *                   another chat's stuck write, an unreadable box, a draft
@@ -30,13 +32,15 @@ import { test, expect, afterEach } from "bun:test";
 import { onUtterance, redriveTaken, drainDeliveries, failOrphanedTaken,
   GIVEN_UP_REASON, ORPHAN_REASON } from "./deliver.ts";
 import { takenFor, noteTaken, noteStage, stageFor, type Stage } from "./intake.ts";
-import { RESCUE_INLINE_MS } from "../voice/transcribe.ts";
+import { RESCUE_INLINE_MS, wordsToken } from "../voice/transcribe.ts";
+import { QUEUE_STUCK_MS } from "./chatlog.ts";
+import { dispatchClientFrame } from "../transport/frames.ts";
 import { cacheAudio } from "./clips.ts";
 import { chatStore, flushAgentSave, resolveSession } from "../sessions/session-state.ts";
 import { PANE, defaultSessionIdOf } from "../test-utils/fake-herdr.ts";
 import { fakeVoice, type FakeVoice } from "../test-utils/fake-voice.ts";
 import { until } from "../test-utils/wait.ts";
-import { wireCore, type WireCore, wireId } from "../test-utils/wire-core.ts";
+import { wireCore, type WireCore, type WireLayer, wireId } from "../test-utils/wire-core.ts";
 
 const PANE_SID = defaultSessionIdOf(PANE);
 
@@ -46,7 +50,7 @@ let gate: Promise<void> = Promise.resolve();
 const never = new Promise<void>(() => {});
 
 let failEnter = false;
-async function boot(o: { agents?: Record<string, string> } = {}): Promise<WireCore> {
+async function boot(o: { agents?: Record<string, string>; with?: WireLayer[] } = {}): Promise<WireCore> {
   voice = fakeVoice({ transcript: "the words of the note" });
   const v = voice;
   core = await wireCore({ with: ["delivery"], ...o,
@@ -184,47 +188,118 @@ test("D1 completion: a pending note whose completion stopped after its Enter is 
   expect(rowsFor(cid)[0].text).toBe(voice!.transcript);
 });
 
-test("R2: a pending note whose completion is refused after a restart fails visibly and is never driven again", async () => {
-  const c = await boot();
+/** A quoted note shown pending, its completion stopped mid-way (`entering`),
+ *  and a draft in the box at the next boot: the completion is refused (R2). */
+async function refusedNote(c: WireCore) {
   const cid = crypto.randomUUID();
   const msgId = crypto.randomUUID();
   await cacheAudio(msgId, new Uint8Array(4096).fill(0x42), "audio/webm");
   gate = never;
   const client = c.client({ attach: wireId(PANE) });
-  void onUtterance(client.sock, { t: "utterance", id: wireId(PANE), text: "", kind: "voice",
-    msgId, durationS: 900, cid });
+  void onUtterance(client.sock, { t: "utterance", id: wireId(PANE), kind: "voice", msgId, durationS: 900,
+    cid, text: `> the agent asked\n\n${wordsToken(cid)}\n\nmy caption`, words: [cid] });
   await until(() => has(c, cid, "rescue.start"), { what: "the decode to start" });
   await c.clock.advance(RESCUE_INLINE_MS);
   await until(() => has(c, cid, "utterance.shown-pending"), { what: "the note shown pending" });
-  // stopped mid-completion; the box now holds text this engine did not type
   await noteStage(sid(), cid, "entering");
   c.hooks.setInput!(PANE, "my own half typed draft");
   gate = Promise.resolve();
-
   await restart(c);
   await until(() => has(c, cid, "rescue.complete-failed"), { what: "the refused completion" });
-  const app = c.client({ attach: wireId(PANE) });
-  c.hello(app);
-  expect(app.of("send-failed").some((f) => f.cid === cid), "the sender was never told").toBe(true);
-  expect(rowsFor(cid)[0].transcriptPending, "the note is still owed").toBeUndefined();
+  c.hooks.setInput!(PANE, "");
+  return { cid, msgId };
+}
+const WHOLE = (words: string) => `VOICE: > the agent asked\n\n${words}\n\nmy caption`;
+const retryFrame = (cid: string, msgId: string) =>
+  ({ t: "utterance", id: wireId(PANE), kind: "voice", msgId, durationS: 900, cid: `${cid}-r`, text: "" });
+
+test("R2 / V5-B: a completion refused after a restart marks its row undelivered, on disk, and is never driven again", async () => {
+  const c = await boot({ with: ["delivery", "frames"] });
+  const { cid } = await refusedNote(c);
+  const row = rowsFor(cid)[0];
+  expect(row.transcriptPending, "the note is still owed").toBeUndefined();
+  expect(row.undelivered, "the row does not say it failed").toContain("restarted");
 
   const drives = () => c.logs.filter((l) => l.event === "rescue.redrive" && l.fields.cid === cid).length;
   expect(drives()).toBe(1);
-  c.hooks.setInput!(PANE, "");
   await restart(c);
   await new Promise((r) => setTimeout(r, 300));
   expect(drives(), "a later boot drove the note again").toBe(1);
   expect(c.submitted.length, "the note reached the agent with no user action").toBe(0);
-
-  // the retry the send-failed asks for is delivered once, into the same row
-  const again = c.client({ attach: wireId(PANE) });
-  void onUtterance(again.sock, { t: "utterance", id: wireId(PANE), text: "", kind: "voice",
-    msgId, durationS: 900, cid });
-  await until(() => c.submitted.length === 1 && rowsFor(cid)[0].transcriptPending === undefined &&
-    !rowsFor(cid)[0].undelivered, { what: "the retry to deliver", timeoutMs: 4000 });
-  expect(c.submitted.map((x) => x.text)).toEqual([`VOICE: ${voice!.transcript}`]);
-  expect(rowsFor(cid).length).toBe(1);
+  // what every device reads: the row itself, after the restart, on attach
+  expect(rowsFor(cid)[0].undelivered).toContain("restarted");
+  const app = c.client();
+  await dispatchClientFrame(app.sock, { t: "attach", id: wireId(PANE) });
+  await until(() => app.of("attach-ok").length > 0, { what: "the attach answer" });
+  const served = app.of("attach-ok")[0].pages.flatMap((p: { messages: { cid?: string }[] }) => p.messages)
+    .find((m: { cid?: string }) => m.cid === cid);
+  expect(served?.undelivered, "a fresh device is not told the note failed").toContain("restarted");
 });
+
+test("R2 retry: a new cid naming the clip delivers the note once, quote and caption around its words", async () => {
+  const c = await boot();
+  const { cid, msgId } = await refusedNote(c);
+  const app = c.client({ attach: wireId(PANE) });
+  await onUtterance(app.sock, retryFrame(cid, msgId));
+  await onUtterance(app.sock, retryFrame(cid, msgId)); // a second tap, or another device
+  await until(() => rowsFor(`${cid}-r`).length === 1 && !rowsFor(`${cid}-r`)[0].transcriptPending,
+    { what: "the retry delivered", timeoutMs: 4000 });
+  await new Promise((r) => setTimeout(r, 100));
+  expect(c.submitted.map((x) => x.text)).toEqual([WHOLE(voice!.transcript)]);
+  expect(rowsFor(cid)[0].undelivered, "the failed row was changed").toContain("restarted");
+});
+
+test("V5-A: a retry acked and then stopped mid-read by a restart is delivered after it, once", async () => {
+  const c = await boot();
+  const { cid, msgId } = await refusedNote(c);
+  gate = never;
+  const app = c.client({ attach: wireId(PANE) });
+  void onUtterance(app.sock, retryFrame(cid, msgId));
+  await until(() => app.of("ack").some((a) => a.cid === `${cid}-r`), { what: "the retry acked" });
+  gate = Promise.resolve();
+  await restart(c);
+  await until(() => rowsFor(`${cid}-r`).length === 1 && !rowsFor(`${cid}-r`)[0].transcriptPending,
+    { what: "the retry delivered after the restart", timeoutMs: 4000 });
+  expect(c.submitted.map((x) => x.text)).toEqual([WHOLE(voice!.transcript)]);
+});
+
+test("V5-C: the failed note's own cid sent again is the same message: nothing delivered, no queued mark left on it", async () => {
+  const c = await boot();
+  const { cid, msgId } = await refusedNote(c);
+  resolveSession(PANE_SID)!.busy = true;
+  const app = c.client({ attach: wireId(PANE) });
+  await onUtterance(app.sock, { ...retryFrame(cid, msgId), cid });
+  await until(() => app.of("ack").some((a) => a.cid === cid), { what: "the answer" });
+  await c.clock.advance(QUEUE_STUCK_MS + 1000);
+  await new Promise((r) => setTimeout(r, 50)); // the polls that advance fired settle before the stop
+  expect(app.of("ack").find((a) => a.cid === cid)?.dup).toBe(true);
+  expect(c.submitted.length, "a rewrite of the failed note's frame was delivered").toBe(0);
+  expect(rowsFor(cid).length).toBe(1);
+  expect(rowsFor(cid)[0].queued, "a queued mark no deadline clears").toBeUndefined();
+  expect(rowsFor(cid)[0].undelivered).toContain("restarted");
+});
+
+for (const kind of ["plain", "quoted"] as const) {
+  test(`V5-D: a same-process retry of a ${kind} voice note reads its words again, not the placeholder`, async () => {
+    const c = await boot();
+    const cid = crypto.randomUUID();
+    const msgId = crypto.randomUUID();
+    await cacheAudio(msgId, new Uint8Array(4096).fill(0x42), "audio/webm");
+    const frame = { t: "utterance", id: wireId(PANE), kind: "voice", msgId, durationS: 3, cid,
+      text: kind === "plain" ? "" : `> the agent said a thing\n\n${wordsToken(cid)}`,
+      ...(kind === "quoted" ? { words: [cid] } : {}) };
+    const app = c.client({ attach: wireId(PANE) });
+    failEnter = true;
+    await onUtterance(app.sock, frame);
+    await until(() => has(c, cid, "utterance.delivery-failed"), { what: "the failure" });
+    failEnter = false;
+    c.hooks.setInput!(PANE, ""); // the box emptied: the retry types fresh
+    await onUtterance(app.sock, frame);
+    await until(() => c.submitted.length === 1, { what: "the retry" });
+    expect(c.submitted[0].text).toContain(voice!.transcript);
+    expect(rowsFor(cid)[0].text).toContain(voice!.transcript);
+  });
+}
 
 test("D1 SIGTERM: the drain finishes the delivery that is typing, holds the queued one, takes no new frame", async () => {
   const c = await boot();
@@ -357,7 +432,7 @@ test("a frame whose session never comes back is failed visibly, and the file goe
 const CHOOSER = ["(transcript)", "", "─".repeat(60), " Bash command", "", "   ls build", "",
   " Do you want to proceed?", " ❯ 1. Yes", "   2. No", "", " Esc to cancel"].join("\n");
 
-test("E1 (V-stale-stage): an Enter that failed leaves `typing`, so a same-cid retry after a restart is typed, not marked delivered", async () => {
+test("E1 (V-stale-stage) / N4: a failed attempt leaves no stage, so a same-cid retry after a restart is typed, not marked delivered", async () => {
   const c = await boot();
   const app = c.client({ attach: wireId(PANE) });
   const cid = crypto.randomUUID();
@@ -365,7 +440,7 @@ test("E1 (V-stale-stage): an Enter that failed leaves `typing`, so a same-cid re
   await onUtterance(app.sock, textFrame(cid, "enter failed"));
   await until(() => has(c, cid, "utterance.delivery-failed"), { what: "the failure" });
   failEnter = false;
-  expect(await stageFor(sid(), cid)).toBe("typing");
+  expect(await stageFor(sid(), cid), "a failed attempt's stage was left on disk").toBeNull();
   c.hooks.clearInput!(PANE); // the box emptied (by hand, or a fresh harness)
   await restart(c);
   const app2 = c.client({ attach: wireId(PANE) });

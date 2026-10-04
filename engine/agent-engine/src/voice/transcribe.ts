@@ -21,7 +21,6 @@ import { recordVoiceOp } from "./voicelog.ts";
 import { newCid } from "../../../shared/logbook.ts";
 import { realClock, type Clock } from "../runtime/clock.ts";
 import { stampTs, logChat, type ChatSession } from "../chat/chatlog.ts";
-import { persistPatch } from "../sessions/session-state.ts";
 import { markReadOnUtterance, type ReadStateSession } from "../sessions/readstate.ts";
 import { admitPartial, noteDecodeStart, noteDecodeResult, wordsOf, release, reopen,
   setTranscriptRecordLog, type DecodeMode } from "./transcript-record.ts";
@@ -129,9 +128,9 @@ export type TranscribeDeps = {
   deliver(s: NoteSession, opts: { cid: string; how: string; text: string;
     extra: Partial<ChatMsg>; completesTs: number; takenAt: number }): Promise<{ ok: boolean; why?: string; tell?: string }>;
   sessionOf(id: string): NoteSession | undefined;
-  /** give up on a pending note: its row stops being pending, the sender is
-   *  told send-failed (deliver.ts failUndeliveredNote) */
-  failNote?(s: NoteSession, ts: number, cid: string, reason: string): void;
+  /** give up on a pending note: its row stops being pending and is marked
+   *  undelivered with the reason (deliver.ts failUndeliveredNote) */
+  failNote?(s: NoteSession, ts: number, tell: string): void;
   /* EVERY DEADLINE IN THIS FILE COMES FROM HERE. Defaults to the real timers,
    * so production is what it always was; a test passes manualClock() and the
    * four budgets above become arithmetic. That matters more here than almost
@@ -309,7 +308,9 @@ export async function transcribeStored(msgId: string, cid?: string,
   const tailOnly = !!settled && fromS > 0;
   /* The streamed-words floor lives in the record now: admit it here and read it
    * back through wordsOf, rather than keeping `settled` as a second copy of the
-   * same rule. */
+   * same rule. This is a new read of the clip (a retry reads it again after the
+   * last read released it), so it owns a fresh record from here to its release. */
+  reopen(msgId);
   admitPartial(msgId, partial);
   const clip = audio.get(msgId) ?? (await audioFromDisk(msgId));
   if (!clip) {
@@ -401,9 +402,7 @@ export async function transcribeStored(msgId: string, cid?: string,
  * completePendingVoiceNote, which fills THIS same row when the decode lands. */
 export function showPendingVoiceNote(s: NoteSession, d: PendingNote, rescue: Promise<string>): void {
   const dd = D();
-  /* The retry of a note given up on fills that note's own row again. */
-  const prior = s.chat.find((r) => r.role === "user" && r.cid === d.cid && r.undelivered);
-  const ts = prior?.ts ?? stampTs(s);
+  const ts = stampTs(s);
   /* The body the words go into is kept ON THE ROW, so a restart that loses the
    * in-flight decode still completes the note with its quote and caption
    * (redrivePendingNotes). The app reads frames field by field and never
@@ -411,12 +410,7 @@ export function showPendingVoiceNote(s: NoteSession, d: PendingNote, rescue: Pro
   const msg: ChatMsg = { id: s.id, role: "user", text: d.into ? noteWithoutWords(d.into, d.cid) : "",
     ts, cid: d.cid, ...d.extra, transcriptPending: true, ...(d.into ? { wordsInto: d.into } : {}) };
   drivingNotes.add(`${s.id}|${d.cid}`);
-  if (prior) {
-    Object.assign(prior, msg);
-    delete prior.undelivered;
-    persistPatch(s.id, ts, { text: msg.text, transcriptPending: true,
-      ...(d.into ? { wordsInto: d.into } : {}) }, ["undelivered"]);
-  } else logChat(s, msg);
+  logChat(s, msg);
   markReadOnUtterance(s, ts); // his own message reads everything above it (#452)
   dd.broadcast({ t: "chat", ...msg });
   dd.log("utterance.shown-pending", { cid: d.cid, session: s.id, msgId: d.msgId, ts,
@@ -449,9 +443,8 @@ export async function completePendingVoiceNote(s: NoteSession, ts: number, d: Pe
     } else if (d.redriven && dd.failNote) {
       /* A drive after a restart that was refused: what is in the box is not
        * known, so the note is not owed again on its own (a later drive could
-       * deliver it twice); the sender is told and can retry. */
-      reopen(d.msgId); // this decode is done; the retry's own may record
-      dd.failNote(live, ts, d.cid, res.tell ?? "it could not be delivered");
+       * deliver it twice); the row says so on every device. */
+      dd.failNote(live, ts, res.tell ?? "it could not be delivered");
       dd.log("rescue.complete-failed", { cid: d.cid, session: s.id, msgId: d.msgId, ts,
         why: res.why ?? "the session refused the completion driven after a restart" });
     } else {
@@ -503,7 +496,6 @@ export function redrivePendingNotes(s: NoteSession): number {
         "restart, or a delivery the session did not take); it is completed now its session is live" });
     const extra: Partial<ChatMsg> = { kind: "voice", msgId: m.msgId,
       ...(Number.isFinite(m.durationS) ? { durationS: m.durationS } : {}) };
-    reopen(m.msgId);
     void completePendingVoiceNote(s, m.ts, { cid, how: "VOICE", extra, msgId: m.msgId, takenAt: Date.now(),
       redriven: true, ...(m.wordsInto ? { into: m.wordsInto } : {}) },
       transcribeStored(m.msgId, cid));

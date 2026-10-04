@@ -160,11 +160,11 @@ export function release(id: string): void {
   released.add(id);
 }
 
-/** A NEW decode of a recording whose last one has finished: the re-drive of a
- *  pending note its session did not take (transcribe.ts redrivePendingNotes).
+/** A NEW decode of a recording whose last one has finished (transcribeStored:
+ *  the retry of a note whose delivery failed, the re-drive of a pending note).
  *  The released mark guards against a LATE writer from a decode still in
- *  flight; the re-drive runs only after the previous completion returned, so
- *  there is none, and the fresh decode must be allowed a record of its own. */
+ *  flight; a stored clip's read releases only at its own end, so there is none,
+ *  and the fresh decode must be allowed a record of its own. */
 export function reopen(id: string): void {
   released.delete(id);
 }

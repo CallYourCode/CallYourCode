@@ -77,6 +77,11 @@ export type CycMessage = {
 
   transcriptPending?: boolean;
 
+  // The engine gave up delivering this note, and why (the row's own field, so
+  // every device shows it failed after any reload or restart). The retry is a
+  // new send naming the same clip (retryUndelivered).
+  undelivered?: string;
+
   growing?: boolean;
 
   scheduled?: string;
