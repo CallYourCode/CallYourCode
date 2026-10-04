@@ -265,6 +265,8 @@ class Pipeline {
   private unbindContext: (() => void) | null = null;
   private lifeBound = false;
   private recoverWait: Promise<MicSnapshot | null> | null = null;
+  // The mic session (bumped by dispose): a recovery belongs to the one that started it.
+  private micGen = 0;
   private lastReacquireAt = 0;
 
   // Proof that audio flows through the graph: the tap's deliveries (or, with no
@@ -407,10 +409,10 @@ class Pipeline {
   ensureLive(engaging = false, listening = false): Promise<MicSnapshot | null> {
     if (!this.stream && !this.actx) return Promise.resolve(null);
     if (this.recoverWait) return this.recoverWait;
-    this.recoverWait = this.runRecover(engaging, listening).finally(() => {
-      this.recoverWait = null;
+    const wait = this.runRecover(engaging, listening).finally(() => {
+      if (this.recoverWait === wait) this.recoverWait = null;
     });
-    return this.recoverWait;
+    return (this.recoverWait = wait);
   }
 
   private readSnapshot(engaging: boolean, listening = false): MicSnapshot {
@@ -579,12 +581,13 @@ class Pipeline {
       }))
     });
     this.lastReacquireAt = performance.now();
+    const gen = this.micGen;
     const next = await navigator.mediaDevices.getUserMedia({
       audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}
     });
     // Disposed while getUserMedia was answering (the press ended, the mic was
-    // released): the new tracks would hold the mic open for nobody.
-    if (!this.stream) {
+    // released, maybe reopened): the new tracks would hold the mic for nobody.
+    if (gen !== this.micGen) {
       next.getTracks().forEach((t) => t.stop());
       return;
     }
@@ -860,6 +863,8 @@ class Pipeline {
   }
 
   dispose(): void {
+    this.micGen++;
+    this.recoverWait = null;
     this.pttDown = false;
     this.pttCaptureId = 0;
     this.handsFreeId = null;
@@ -927,8 +932,9 @@ class Pipeline {
     this.syncRecordingState();
     // A live track records even when the graph could not be revived (see
     // mic.recover.still-dead): the take is kept, without waveform or live words.
+    const gen = this.micGen;
     void this.ensureLive(true).then((after) => {
-      if (!this.pttDown) return;
+      if (!this.pttDown || gen !== this.micGen) return;
       if (!after || !this.stream || !canRecord(after)) {
         this.refusePress(
           !this.stream

@@ -419,3 +419,64 @@ describe('a re-acquire that answers after the mic was disposed', () => {
     expect(pipeline.stream).toBeNull();
   });
 });
+
+// A recovery belongs to the mic session that started it. Press 1 finds a dead
+// track and re-acquires it slowly; the finger lifts and the mic is released;
+// press 2 opens a fresh mic at once. Press 2 must record from its first moment
+// (not wait for press 1's stale re-acquire), and the stale stream, when it
+// answers, is stopped rather than installed over press 2's.
+describe("a new press does not wait on an older mic session's recovery", () => {
+  test('press 2 records at once and keeps its own stream; the stale one is stopped', async () => {
+    const track = (readyState: string) => ({
+      readyState,
+      muted: false,
+      stop: vi.fn(),
+      addEventListener() {}
+    });
+    const stream = (t: ReturnType<typeof track>) => ({
+      getTracks: () => [t],
+      getAudioTracks: () => [t]
+    });
+    const ctx = () => ({state: 'running', currentTime: 0, close: () => Promise.resolve()});
+    let answer!: (s: unknown) => void;
+    const gum = vi.fn(() => new Promise((r) => (answer = r)));
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {getUserMedia: gum},
+      configurable: true
+    });
+
+    // Press 1: the track is dead, the press re-acquires it (slowly).
+    pipeline.stream = stream(track('ended'));
+    pipeline.actx = ctx();
+    pipeline.holdForPress();
+    pipeline.startPTT();
+    await settle();
+    await settle();
+    expect(gum).toHaveBeenCalledTimes(1);
+    // Released: the press ends and the composer releases the mic.
+    pipeline.endPTT();
+    (pipeline as unknown as {dispose(): void}).dispose();
+
+    // Press 2 on a freshly opened mic.
+    const fresh = track('live');
+    pipeline.stream = stream(fresh);
+    pipeline.actx = ctx();
+    pipeline.holdForPress();
+    pipeline.startPTT();
+    await settle();
+    await settle();
+    const take = pipeline.pressCaptureId;
+    expect(take).not.toBe(0);
+
+    // Press 1's re-acquire answers late.
+    const stale = track('live');
+    answer(stream(stale));
+    await settle();
+    await settle();
+    expect(stale.stop).toHaveBeenCalled();
+    expect(fresh.stop).not.toHaveBeenCalled();
+    expect((pipeline.stream as {getAudioTracks(): unknown[]}).getAudioTracks()[0]).toBe(fresh);
+    expect(pipeline.pttDown).toBe(true);
+    expect(pipeline.pressCaptureId).toBe(take);
+  });
+});
