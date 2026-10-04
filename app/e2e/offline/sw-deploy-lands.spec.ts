@@ -233,3 +233,46 @@ test('a reload held by a draft lands as soon as the box is emptied', async ({pag
     await teardown(r);
   }
 });
+
+// A missing chunk while the update reload waits out a draft: the page is
+// broken (the feature cannot load until it reloads), so the chunk's reload
+// goes at once; it must not inherit the update reload's draft hold
+// (verifier round 4). The draft is on disk and comes back.
+test('a missing chunk during a draft-held update reload reloads at once', async ({page}) => {
+  test.setTimeout(120_000);
+  let r: Rig | undefined;
+  try {
+    r = await warmWithDraft(page);
+    const {b, stampA, stampB, host, log} = r;
+    await deploy(host.origin, b, false);
+    await foreground(page);
+    await expect
+      .poll(() => onB(page, stampB), {timeout: 30_000, message: "B's worker never took over"})
+      .toBe(true);
+    await expect.poll(() => log.of('reload.deferred').length, {timeout: 20_000}).toBeGreaterThan(0);
+    expect(log.of('reload.deferred').pop()?.field('hold')).toBe('draft');
+    expect(builds(log)).toEqual([stampA]);
+
+    const at = Date.now();
+    await page.evaluate(
+      () =>
+        void (
+          window as unknown as {__cycLazyImport: (p: string, w: string) => Promise<string>}
+        ).__cycLazyImport('/assets/gone-chunk-0000.js?t=' + Date.now(), 'the probe chunk')
+    );
+    await expect
+      .poll(() => builds(log), {
+        timeout: 5_000,
+        message: 'the missing-chunk reload was held by the draft'
+      })
+      .toEqual([stampA, stampB]);
+    expect(log.since('nav.go', at)[0]?.field('why')).toBe('chunk-missing');
+    await page.waitForSelector('.cyc-message-list-scroll', {timeout: 15_000});
+    await expect(page.locator(INPUT)).toHaveText(DRAFT, {timeout: 10_000});
+  } catch (e) {
+    await trail(page, r);
+    throw e;
+  } finally {
+    await teardown(r);
+  }
+});

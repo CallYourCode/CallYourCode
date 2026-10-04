@@ -83,13 +83,16 @@ export function readReloadDeparture(): ReloadDeparture | null {
 // reload's composer hold), re-decided every tick and at once when the app
 // goes to the background.
 // The gate holds ONE pending self-navigation; callers keep no flags of their
-// own. A later request re-uses it (a reload is a reload), except a user action
-// (it has a notice), which replaces it: a sign-out must not wait on an update
-// reload's draft hold. A hatch navigation is not tried when the server does
-// not answer (asked, not read from navigator.onLine: Playwright's WebKit always
-// says false, and true is no promise of a network); the user is told "You're
-// offline" and it stays pending: the next foreground, online edge or request
-// decides again. A page still alive ALIVE_MS after its navigation (it failed)
+// own. Merge rule: a new request replaces the pending one unless it would wait
+// longer, i.e. unless it brings a hold of its own. So a missing chunk or a user
+// action (no hold) replaces an update reload held by a draft and goes now; an
+// update reload (draft hold) never replaces a hold-free pending one, which
+// keeps its own `before` (the missing-chunk loop guard). A hatch navigation is
+// not tried when the server does not answer (asked, not read from
+// navigator.onLine: Playwright's WebKit always says false, and true is no
+// promise of a network); it stays pending: the next foreground, online edge or
+// request decides again. A user action says "You're offline" once per offline
+// spell (never on a hide edge); automatic reloads stay silent. A page still alive ALIVE_MS after its navigation (it failed)
 // lets that pending navigation be decided again the same way.
 
 export type SelfNavDeps = {
@@ -161,6 +164,8 @@ export function createSelfNavGate(deps: SelfNavDeps): (nav: SelfNav) => void {
   let ticking = false;
   let again = false;
   let subscribed = false;
+  let offline = false; // this offline spell is logged
+  let toldOffline = false; // and a user action was told
   const later = (ms: number) => {
     if (timer !== null) deps.cancel(timer);
     timer = deps.schedule(() => {
@@ -203,10 +208,15 @@ export function createSelfNavGate(deps: SelfNavDeps): (nav: SelfNav) => void {
       }
       const viaNetwork = waiting;
       if (viaNetwork && !(await deps.reachable().catch(() => false))) {
-        deps.log('nav.offline', {why: nav.why, waited});
-        deps.notify(OFFLINE_NOTICE);
+        if (!offline) deps.log('nav.offline', {why: nav.why, waited});
+        offline = true;
+        if (!toldOffline && nav.notice && !hidden) {
+          toldOffline = true;
+          deps.notify(OFFLINE_NOTICE);
+        }
         return; // still pending: the next edge or request decides again
       }
+      offline = toldOffline = false;
       if (pending !== p) return;
       going = true;
       deps.log('nav.go', {why: nav.why, waited, hidden, ...(viaNetwork ? {viaNetwork} : {})});
@@ -230,7 +240,7 @@ export function createSelfNavGate(deps: SelfNavDeps): (nav: SelfNav) => void {
       subscribed = true;
       deps.onEdge(() => void tick());
     }
-    if (pending && !nav.notice) return void tick();
+    if (pending && nav.hold) return void tick();
     pending = {nav, since: deps.now(), waitingSince: -1};
     later(nav.firstTickMs ?? 0);
   };

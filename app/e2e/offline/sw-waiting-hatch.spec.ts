@@ -90,7 +90,7 @@ test('an update reload with the new worker waiting past the bound lands via the 
   }
 });
 
-test('offline, a sign-out held by a waiting worker says so, and a second one still works', async ({
+test('offline, a sign-out held by a waiting worker says so once, and a later one still works', async ({
   page,
   context
 }) => {
@@ -102,24 +102,44 @@ test('offline, a sign-out held by a waiting worker says so, and a second one sti
     );
   try {
     await parkB(page, host.origin, dirs[1]);
+    // Count every "You're offline" toast that appears.
+    await page.evaluate(() => {
+      const w = window as unknown as {__offlineToasts: number};
+      w.__offlineToasts = 0;
+      new MutationObserver((ms) => {
+        for (const m of ms)
+          for (const n of m.addedNodes)
+            if (n instanceof HTMLElement && n.textContent?.includes("You're offline"))
+              w.__offlineToasts++;
+      }).observe(document.body, {childList: true, subtree: true});
+    });
+    const toasts = () =>
+      page.evaluate(() => (window as unknown as {__offlineToasts: number}).__offlineToasts);
     await context.setOffline(true);
+    // Two taps and a few hide/show edges in one offline spell: told once.
     for (let i = 1; i <= 2; i++) {
       await signOut();
       await expect
-        .poll(() => log.of('nav.offline').length, {
-          timeout: 10_000,
-          message: `sign-out ${i} offline failed silently`
-        })
+        .poll(() => log.of('nav.held').length, {timeout: 10_000, message: `sign-out ${i} not held`})
         .toBe(i);
-      await expect(page.getByText("You're offline").first()).toBeVisible();
+      await page.waitForTimeout(5000);
+      for (const hidden of [true, false]) {
+        await page.evaluate((h) => {
+          Object.defineProperty(document, 'hidden', {configurable: true, get: () => h});
+          document.dispatchEvent(new Event('visibilitychange'));
+        }, hidden);
+        await page.waitForTimeout(1500);
+      }
       expect(builds(log), 'the page navigated offline').toEqual([stamps[0]]);
     }
+    expect(await toasts(), 'the offline notice count in one offline spell').toBe(1);
+    expect(log.of('nav.offline')).toHaveLength(1);
     // Back online, the sign-out still pending goes, on the online edge or the
     // next tap, whichever is first (via the network if B still waits; going
     // offline may have ended the held request, and then B took over and it
     // goes the normal way).
+    const at = Date.now(); // before: Chromium's online edge goes at once
     await context.setOffline(false);
-    const at = Date.now();
     await signOut().catch(() => {}); // the online edge may already have navigated
     await expect
       .poll(() => builds(log).length, {timeout: 15_000, message: 'the online sign-out never went'})

@@ -135,14 +135,14 @@ describe('self-navigation gate', () => {
   // Offline + a worker waiting. The update and missing-chunk reloads kept
   // their own one-time flags, so after "You're offline" they never came back
   // (verifier round 3). The gate keeps the navigation pending instead.
-  test('offline: not tried, the user is told; it stays pending and the next edge lands it', async () => {
+  test('offline: not tried and stays pending; the next edge lands it', async () => {
     for (const why of ['update', 'chunk-missing', 'sign-out']) {
+      const user = why === 'sign-out';
       const r = rig({waiting: true, online: false});
       const gate = createSelfNavGate(r.deps);
-      gate({why, to: why === 'sign-out' ? () => '/' : undefined});
+      gate({why, to: user ? () => '/' : undefined, notice: user ? 'Signing out…' : undefined});
       await r.step(WAITING_MAX_MS + 600);
       expect(r.went, why).toEqual([]);
-      expect(r.said, why).toEqual([OFFLINE_NOTICE]);
       expect(r.events(), why).toContain('nav.offline');
       await r.step(60_000);
       expect(r.went, 'retried with no edge').toEqual([]);
@@ -154,14 +154,83 @@ describe('self-navigation gate', () => {
     }
   });
 
-  test('offline: the next request re-uses the pending navigation and decides again', async () => {
+  // Every visibility edge re-decided and re-said "You're offline", also into a
+  // hidden page, and automatic reloads said it too (verifier round 4).
+  test('offline notice: user actions only, once per offline spell, never on a hide edge', async () => {
+    const auto = rig({waiting: true, online: false});
+    createSelfNavGate(auto.deps)({why: 'update'});
+    await auto.step(WAITING_MAX_MS + 600);
+    for (let i = 0; i < 3; i++) {
+      auto.background();
+      await auto.step(0);
+      auto.edge();
+      await auto.step(0);
+    }
+    expect(auto.said, 'an automatic reload spoke').toEqual([]);
+    expect(auto.events().filter((e) => e === 'nav.offline')).toHaveLength(1);
+
+    const r = rig({waiting: true, online: false});
+    const gate = createSelfNavGate(r.deps);
+    r.st.hidden = true; // the action's hold ends while the app is hidden: no toast there
+    gate({why: 'sign-out', notice: 'Signing out…', to: () => '/'});
+    await r.step(WAITING_MAX_MS + 600);
+    expect(r.said).toEqual(['Signing out…']);
+    for (let i = 0; i < 3; i++) {
+      r.edge();
+      await r.step(0);
+      r.background();
+      await r.step(0);
+    }
+    expect(r.said).toEqual(['Signing out…', OFFLINE_NOTICE]);
+    // a second tap in the same spell: no second notice
+    r.st.hidden = false;
+    gate({why: 'sign-out', notice: 'Signing out…', to: () => '/'});
+    await r.step(WAITING_MAX_MS + 600);
+    expect(r.said.filter((m) => m === OFFLINE_NOTICE)).toHaveLength(1);
+  });
+
+  // A missing chunk while the update reload is held by a draft was held by
+  // that draft (it re-used the pending navigation and its hold).
+  test('a missing chunk replaces a draft-held update reload and goes now, with its own guard', async () => {
+    const r = rig();
+    const gate = createSelfNavGate(r.deps);
+    const ran: string[] = [];
+    gate({
+      why: 'update',
+      hold: () => 'draft',
+      to: () => '/?b=1',
+      before: () => void ran.push('update')
+    });
+    await r.step(5000);
+    expect(r.went).toEqual([]);
+    gate({why: 'chunk-missing', before: () => void ran.push('chunk')});
+    await r.step();
+    expect(r.went).toEqual([null]);
+    expect(ran).toEqual(['chunk']);
+  });
+
+  test('an update reload never replaces a hold-free pending navigation', async () => {
+    const r = rig({waiting: true, online: false});
+    const gate = createSelfNavGate(r.deps);
+    const ran: string[] = [];
+    gate({why: 'chunk-missing', before: () => void ran.push('chunk')});
+    await r.step(WAITING_MAX_MS + 600); // offline: pending
+    gate({why: 'update', hold: () => 'draft', before: () => void ran.push('update')});
+    r.st.online = true;
+    r.edge();
+    await r.step(0);
+    expect(r.went).toEqual(['https://app.example/?chat=x&cyc-net=1#app']);
+    expect(ran, 'the loop guard of the navigation that went').toEqual(['chunk']);
+  });
+
+  test('offline: the next held request re-uses the pending navigation', async () => {
     const r = rig({waiting: true, online: false});
     const gate = createSelfNavGate(r.deps);
     let before = 0;
-    gate({why: 'update', before: () => void before++});
+    gate({why: 'update', hold: () => '', before: () => void before++});
     await r.step(WAITING_MAX_MS + 600);
     r.st.online = true;
-    gate({why: 'update', before: () => void (before += 100)});
+    gate({why: 'update', hold: () => '', before: () => void (before += 100)});
     await r.step(0);
     expect(r.went).toEqual(['https://app.example/?chat=x&cyc-net=1#app']);
     expect(before, 'the first, pending navigation went').toBe(1);
@@ -229,11 +298,11 @@ describe('self-navigation gate', () => {
     expect(r.went).toEqual([null]);
   });
 
-  test('one pending navigation: a second automatic request re-uses it', async () => {
+  test('one pending navigation: two hold-free requests navigate once', async () => {
     const r = rig();
     const gate = createSelfNavGate(r.deps);
     gate({why: 'chunk-missing'});
-    gate({why: 'update', to: () => '/x'});
+    gate({why: 'chunk-missing'});
     await r.step();
     await r.step();
     expect(r.went).toEqual([null]);
