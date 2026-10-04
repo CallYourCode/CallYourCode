@@ -85,10 +85,11 @@ export function replicatorFor(sessionId: string, engineKey: string, paneId: stri
       },
       upsert: (rows, pg) => {
         // A fetched page names the axis it was cut from: one of another epoch
-        // is never filed among this session's rows by seq (fix-log-epoch).
+        // is discarded, never filed among this session's rows by seq, and never
+        // believed (it may have been cut before a re-sequence and answered
+        // after); the roster and the attach-ok decide the epoch (fix-log-epoch).
         const held = rowStore.metaSnapshot(sessionId)?.axis;
         if (pg.axis && held && pg.axis !== held) {
-          void settleAxis(sessionId, pg.axis, 'page');
           return Promise.reject(
             new Error(`page ${pg.page} is on axis ${pg.axis}, rows held on ${held}`)
           );
@@ -252,9 +253,10 @@ async function runAttachOk(
 // were served under in the session meta. A different epoch is PROOF that every
 // seq, the cursor, the holes and the fingerprints this device holds for the
 // session describe pages that no longer exist: the rows are dropped and the
-// session syncs afresh, never merged with the new axis by seq. The heuristics
-// below stay for what the epoch cannot speak to: an engine older than it, and
-// rows stored before this device ever saw one (checked once, then stamped).
+// session syncs afresh, never merged with the new axis by seq. Rows stored
+// before this device met an epoch prove nothing either way, so they are
+// dropped the same way, once, on the chat's first open. The heuristics below
+// stay for an engine that names no epoch.
 
 // Called by the store when the open chat's stamped rows turn out to belong to
 // a dead axis while they are on screen: it re-attaches, and the attach-ok (cold,
@@ -318,18 +320,18 @@ function forgetAxisState(sessionId: string, whole: boolean): void {
 // here, before anything paints them, unless the session is on screen right now:
 // then the dead rows stay until a tail replaces them (an empty chat is worse
 // than one about to be swapped), and the store re-attaches for that tail.
-// Unstamped rows are left to the attach-ok, which checks them once and stamps
-// them. Resolves true when it dropped rows.
+// Unstamped rows are dropped when the chat opens (the roster leaves them to
+// it). Resolves true when it dropped rows.
 export function settleAxis(
   sessionId: string,
   axis: string | undefined,
-  why: 'roster' | 'page' | 'open'
+  why: 'roster' | 'open'
 ): Promise<boolean> {
   if (!axis) return Promise.resolve(false);
   return withAxisLock(sessionId, async () => {
     const meta = await rowStore.readMeta(sessionId);
     const held = meta?.axis;
-    if (!held || held === axis) return false;
+    if (held === axis || (!held && why === 'roster')) return false;
     if (why !== 'open' && rowStore.isOpen(sessionId)) {
       cyclog('rowstore.axis-epoch.resync', {
         session: sessionId,
@@ -370,28 +372,25 @@ export function settleAxis(
 //   - another epoch: replace the rows with the served tail in one turn (the
 //     engine served cold, since the attach named the stamp), forget the old
 //     cursor and fingerprints, stamp the new epoch;
-//   - no stamp yet (rows stored before this device met an epoch, or none): the
-//     stale-axis heuristics check them this once, then the epoch is stamped.
+//   - no stamp yet (rows stored before this device met an epoch): the same,
+//     they prove nothing about this axis.
 // With none (an older engine) runAttachOk runs the heuristics alone.
 async function settleAttachAxis(sessionId: string, r: Replicator, a: AttachOkLite): Promise<void> {
   if (!a.axis) return;
   const meta = await rowStore.readMeta(sessionId);
   const held = meta?.axis;
   if (held === a.axis) return;
-  if (!held) {
-    if ((await resetIfStaleAxis(sessionId, r, a)) !== 'kept') stampAxis(sessionId, a.axis);
-    return;
-  }
   const served = servedRows(sessionId, a);
   if (!served.length && tailVersionOf(a) > 0) {
-    // the engine did not serve cold (this attach named no epoch): keep the rows
-    // on screen; the next attach states the stamp and gets the tail
+    // the engine did not serve cold (the attach named no epoch, or another):
+    // keep the rows on screen and ask again, cold (attachFrontier), for the tail
     cyclog('rowstore.axis-epoch.kept', {
       session: sessionId,
-      held,
+      held: held ?? null,
       axis: a.axis,
-      why: 'a re-sequenced log, but this attach-ok carries no tail to replace the rows with'
+      why: 'rows not on this epoch, but this attach-ok carries no tail to replace them with'
     });
+    axisResync(sessionId);
     return;
   }
   const heldTail = rowStore.highestHeldSeq(sessionId);
@@ -409,7 +408,7 @@ async function settleAttachAxis(sessionId: string, r: Replicator, a: AttachOkLit
   stampAxis(sessionId, a.axis);
   cyclog('rowstore.axis-epoch', {
     session: sessionId,
-    held,
+    held: held ?? null,
     axis: a.axis,
     heldTail,
     engineTailVersion: tailVersionOf(a),
@@ -418,8 +417,7 @@ async function settleAttachAxis(sessionId: string, r: Replicator, a: AttachOkLit
   });
 }
 
-// THE FALLBACK HEURISTICS (no epoch to compare: an engine older than it, or
-// rows stored before this device met one).
+// THE FALLBACK HEURISTICS (no epoch to compare: an engine older than it).
 //
 // A device that ran the pre-rebuild build cached history rows the one-boot
 // migration imported verbatim, and those rows make the local axis stale in one
@@ -471,15 +469,11 @@ async function settleAttachAxis(sessionId: string, r: Replicator, a: AttachOkLit
 //      attachOk re-commits the same pages (idempotent by mid) and advances the
 //      cursor; the background backfill of OLDER pages is best-effort and never
 //      blanks the window, so a refetch that never completes cannot lose the tail.
-async function resetIfStaleAxis(
-  sessionId: string,
-  r: Replicator,
-  a: AttachOkLite
-): Promise<'sound' | 'healed' | 'kept'> {
+async function resetIfStaleAxis(sessionId: string, r: Replicator, a: AttachOkLite): Promise<void> {
   const version = tailVersionOf(a);
-  if (version <= 0) return 'sound';
+  if (version <= 0) return;
   const reason = staleReason(sessionId, version);
-  if (!reason) return 'sound';
+  if (!reason) return;
   const served = servedRows(sessionId, a);
   if (!served.length) {
     // Guard 1: a stale axis, but this attach served no tail to replace it with.
@@ -493,7 +487,7 @@ async function resetIfStaleAxis(
       reason,
       why: 'stale axis detected but the attach-ok served no tail to replace it with; keep the existing rows visible and wait for an attach that carries the tail'
     });
-    return 'kept';
+    return;
   }
   cyclog('rowstore.stale-axis', {
     session: sessionId,
@@ -502,7 +496,7 @@ async function resetIfStaleAxis(
     reason,
     why: 'cached rows do not match the engine axis; drop the stale axis and re-sync at the served tail'
   });
-  if (await replaceWithServedTail(sessionId, r, a, served)) return 'healed';
+  if (await replaceWithServedTail(sessionId, r, a, served)) return;
   // Guard 3: the purge transaction ABORTED (an iOS page-freeze rolled back the
   // deletes), so the stale axis is still durable AND still warm. Treat the
   // session as NOT healed: leave the existing rows on screen, do NOT reset the
@@ -517,7 +511,6 @@ async function resetIfStaleAxis(
     reason,
     why: 'the purge transaction aborted (a frozen page rolled back the deletes); keep the rows and let the next attach redo the heal'
   });
-  return 'kept';
 }
 
 // Drop this session's rows and put the attach-ok's served tail in their place,
@@ -596,13 +589,12 @@ function staleReason(sessionId: string, version: number): string | null {
 // With no confirmed edge (no replicator, or one never fed an attach-ok) the
 // device attaches cold, so the engine re-serves its tail.
 //
-// Rows stamped with an epoch the engine no longer serves (`axis`, the roster's)
+// Rows not stamped with the epoch the engine states (`axis`, the roster's)
 // prove nothing on the current axis: cold, whatever the cursor says.
 export function attachFrontier(sessionId: string, heldTail: number, axis?: string): number {
   const r = repls.get(sessionId);
   if (!r) return -1;
-  const held = rowStore.metaSnapshot(sessionId)?.axis;
-  if (axis && held && held !== axis) return -1;
+  if (axis && rowStore.metaSnapshot(sessionId)?.axis !== axis) return -1;
   if (cursorSeq(r.cursor) > 0) return -1;
   const confirmed = r.cursor.tailVersion - 1;
   if (confirmed < 0) return -1;

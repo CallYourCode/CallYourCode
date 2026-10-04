@@ -718,11 +718,12 @@ export function axisOf(agentId: string): string | undefined {
  *  re-sequenced `chat`/`log` in memory: a new chat file is cut from them as
  *  they are now, served as the epoch at once, and every later append goes to
  *  it (chatRefFor). `after` is a write that must reach disk first (an absorb's
- *  tombstone). Resolves true once the file and the meta pointer naming it are
- *  on disk; false when the file could not be written (logged, and a fresh file
- *  is cut from the in-memory log and tried again, a bounded number of times). */
+ *  tombstone). Resolves once the file and the meta pointer naming it are
+ *  durable: both are retried until they land (ChatStore.writeNewQueued), and
+ *  until then every append stays queued behind them, so nothing is written to
+ *  the old file and nothing reaches the new one before it is readable. */
 export function rewriteLog(agentId: string, chat: readonly ChatMsg[], log: readonly SessionRec[],
-  after?: Promise<unknown>, attempt = 1): Promise<boolean> {
+  after?: Promise<unknown>): Promise<void> {
   const meta = metaFor(agentId);
   const aid = meta.agentId;
   const cid = newChatId();
@@ -730,37 +731,28 @@ export function rewriteLog(agentId: string, chat: readonly ChatMsg[], log: reado
   const landed = chatStore.writeNewQueued(aid, cid, chat as unknown as StoredMsg[], [...log], {
     after: Promise.all([after, rewriteLanding.get(aid)]),
     then: async () => {
-      meta.chat = cid;
-      meta.chats = [...(meta.chats ?? []), { id: cid, createdAt: Date.now() }];
-      // a save serialized before the flip must not land after it
+      if (meta.chat !== cid) {
+        meta.chat = cid;
+        meta.chats = [...(meta.chats ?? []), { id: cid, createdAt: Date.now() }];
+      }
+      // a save serialized before the flip must not land after it, and a
+      // debounced one is superseded by this
       await settleAgentSaves();
-      await flushAgentSave(aid);
+      const t = metaSaveTimers.get(aid);
+      if (t) { clearTimeout(t); metaSaveTimers.delete(aid); }
+      buildAgentMeta(meta);
+      // THROWS when the write did not land (writeMeta logs and swallows; the
+      // pointer of a re-sequence must not be counted durable on a failure)
+      await saveAgentMeta(meta);
     },
-  }).then((ok) => {
-    if (!ok) console.error(`[chat] could not write the re-sequenced log ${cid} for ${aid}`);
-    return ok;
   });
   rewriteLanding.set(aid, landed);
-  void landed.then((ok) => {
+  void landed.then(() => {
     if (rewriteLanding.get(aid) === landed) rewriteLanding.delete(aid);
-    if (pendingAxis.get(aid) !== cid) return; // a later rewrite owns the log now
-    if (ok) { pendingAxis.delete(aid); return; }
-    // The file could not be written (a disk error) and appends since the swap
-    // are queued for it. Cut a fresh file from the log as it is in memory NOW,
-    // which holds every one of them, until one lands.
-    if (attempt < REWRITE_TRIES) {
-      setTimeout(() => {
-        if (pendingAxis.get(aid) !== cid) return;
-        const chatNow = sessions.get(aid)?.chat ?? restoredChats.get(aid) ?? [];
-        const logNow = sessions.get(aid)?.log ?? restoredLogs.get(aid) ?? [];
-        void rewriteLog(aid, chatNow, logNow, undefined, attempt + 1);
-      }, REWRITE_RETRY_MS);
-    }
+    if (pendingAxis.get(aid) === cid) pendingAxis.delete(aid);
   });
   return landed;
 }
-const REWRITE_TRIES = 5;
-const REWRITE_RETRY_MS = 2000;
 
 /** One appended patch line: edit the message whose ts is `mts`. */
 export function persistPatch(agentId: string, mts: number,

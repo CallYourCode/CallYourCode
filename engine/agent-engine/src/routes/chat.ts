@@ -139,7 +139,7 @@ export async function chatRoutes(ctx: RoutesCtx, req: Request, url: URL, path: s
     bumpRowsGen(s); // both arrays were replaced and re-sequenced: drop the cache
     restoredChats.delete(id);
     restoredLogs.delete(id);
-    if (!(await rewriteLog(id, s.chat, s.log))) console.error("[chat] trim rewrite failed (retrying from memory)");
+    await rewriteLog(id, s.chat, s.log);
     /* No broadcast. This is a TEST/admin path (the name must start with TEST- and
      * echo exactly), so nothing is watching a trimmed session live. The app has
      * no decode for a mid-session trim: a `log-trimmed` frame was sent and never

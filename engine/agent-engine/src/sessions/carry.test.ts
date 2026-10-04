@@ -19,7 +19,7 @@
  */
 
 import { expect, test, beforeEach, afterAll } from "bun:test";
-import { rm } from "node:fs/promises";
+import { rm, rename, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as S from "./session-state.ts";
 import { adoptSession, absorb, mergeChats, carryDirectHandleBind } from "./carry.ts";
@@ -395,6 +395,71 @@ test("rows written while a re-sequence lands go to the new file only, each exact
   expect(back.map((r) => keyOf(r as never)).sort()).toEqual([...keys].sort());
   expect(S.axisOf(agentId)).toBe(fresh);
 });
+
+/* THE POINTER SAVE MUST BE DURABLE (verifier E4). The meta save used to log and
+ * swallow its failure, so a re-sequence whose pointer save failed counted as
+ * landed: the epoch fell back to the old file id, and a restart read the old
+ * file while every row written since the swap sat, on disk, in the new file
+ * nothing named (26 lost in the verifier's run). Now the pointer is retried
+ * until it lands, and the appends wait behind it. */
+test("a pointer save that fails during a re-sequence is retried until durable; a restart loses nothing", async () => {
+  const bulk = Array.from({ length: 300 }, (_, i) =>
+    row("x", `old ${i} `.padEnd(300, "."), 3001 + i, { seq: 2 + i, mid: `mr-old-${i}` }));
+  const { agentId } = await seedAgent(root, U1, [row("x", "one", 1000, { seq: 0, mid: "mr-1" }),
+    row("x", "three", 3000, { seq: 1, mid: "mr-3" }), ...bulk]);
+  await S.loadSessionState(deps);
+  S.sessionStateReady();
+  initChatlog({
+    chatOf: (id) => S.sessions.get(id)?.chat ?? S.restoredChats.get(id),
+    restoredChats: () => S.restoredChats,
+    persistPatch: (id, mts, set, unset) => S.persistPatch(id, mts, set, unset),
+    broadcast: () => {},
+    chatRefFor: (id) => S.chatRefFor(id),
+    indexMsgBlobs: () => {},
+    appendMsg: (aid, chatId, m) => S.chatStore.appendMsg(aid, chatId, m as never),
+    appendRec: (aid, chatId, rec) => S.chatStore.appendRec(aid, chatId, rec),
+  });
+  const target = live(agentId, U1, S.restoredChats.get(agentId)!);
+  const pid = S.freshAgentId();
+  const prov = live(pid, null, [row(pid, "two", 2000, { msgId: "m-2", mid: "mr-2", seq: 0 })]);
+  S.metaFor(pid);
+  S.chatRefFor(pid);
+  await S.flushAgentSave(pid);
+  // meta.json becomes unwritable (a directory in its place)
+  const mf = join(data, "agents", agentId, "meta.json");
+  await rename(mf, mf + ".bak");
+  await mkdir(mf);
+  await writeFile(join(mf, "x"), "block");
+  let n = 0;
+  const write = () => {
+    n++;
+    logChat(target as never, row(agentId, `live ${n}`, 100_000 + n, { mid: `mr-live-${n}` }));
+  };
+  try {
+    absorb(prov, agentId);
+    for (let i = 0; i < 20; i++) { write(); await new Promise((r) => setTimeout(r, 5)); }
+    await new Promise((r) => setTimeout(r, 1500));
+  } finally {
+    await rm(mf, { recursive: true, force: true });
+    await rename(mf + ".bak", mf);
+  }
+  const fresh = S.axisOf(agentId)!;
+  // the new file is still where the log lives: the epoch did not fall back
+  expect(fresh).not.toBe(JSON.parse(await Bun.file(mf).text()).chat);
+  const onDisk = async () => JSON.parse(await Bun.file(mf).text()).chat;
+  for (let i = 0; i < 400 && (await onDisk()) !== fresh; i++) await new Promise((r) => setTimeout(r, 25));
+  expect(await onDisk(), "the pointer landed once the disk recovered").toBe(fresh);
+  for (let i = 0; i < 5; i++) { write(); await new Promise((r) => setTimeout(r, 5)); }
+  await S.chatStore.flush();
+  await S.settleAgentSaves();
+  const keyOf = (r: Record<string, unknown>) => (typeof r.mid === "string" ? `m:${r.mid}` : `e:${r.id}`);
+  const mem = [...target.chat, ...target.log].map((r) => keyOf(r as never)).sort();
+  S.resetForTest();
+  await S.loadSessionState(deps);
+  const back = [...(S.restoredChats.get(agentId) ?? []), ...(S.restoredLogs.get(agentId) ?? [])];
+  expect(back.map((r) => keyOf(r as never)).sort(), "a restart reads every row").toEqual(mem);
+  expect(S.axisOf(agentId)).toBe(fresh);
+}, 30_000);
 
 test("absorbing an agent into itself is a no-op", async () => {
   const { agentId } = await seedAgent(root, U1, []);

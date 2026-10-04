@@ -29,7 +29,11 @@
 
 import { readdir } from "node:fs/promises";
 import { agentChatFile, agentChatsDir } from "../storage/datadir.ts";
-import { appendPrivate, mkdirPrivate } from "../../../shared/runfiles.ts";
+import { appendPrivate, mkdirPrivate, writeAtomicPrivate } from "../../../shared/runfiles.ts";
+
+/** How a re-sequence's file and pointer writes back off while they fail. */
+const RETRY_MIN_MS = 250;
+const RETRY_MAX_MS = 5000;
 import { parseSessionRec, type SessionRec } from "./sessionrec.ts";
 
 /** The store is generic over the message shape: server.ts owns ChatMsg. */
@@ -217,31 +221,45 @@ export class ChatStore {
    *  carry absorb, trim). The body is serialized NOW, from the rows as they are
    *  this instant, and the write is the first entry on the new file's append
    *  chain, after `after` (a write that must land first) and before `then` (the
-   *  caller flips and saves the meta pointer there). Every append the caller
-   *  routes to `chatId` from this instant queues behind both, so it can never
-   *  reach disk before the body or before the pointer that makes it readable,
-   *  and it is not in the body (it was not in the rows yet). Resolves true once
-   *  the body and `then` landed, false when the body could not be written. */
+   *  caller flips and saves the meta pointer there; it must THROW when the save
+   *  did not land). Every append the caller routes to `chatId` from this instant
+   *  queues behind both, so it can never reach disk before the body or before
+   *  the pointer that makes it readable, and it is not in the body (it was not
+   *  in the rows yet). The body is written atomically and both steps are retried
+   *  until they land (a full disk, a read-only meta dir): a rewrite is done only
+   *  when its file and the pointer naming it are durable. Resolves then. */
   writeNewQueued(agentId: string, chatId: string, msgs: StoredMsg[], recs: SessionRec[],
-    opts: { after?: Promise<unknown>; then: () => Promise<void> }): Promise<boolean> {
+    opts: { after?: Promise<unknown>; then: () => Promise<void> }): Promise<void> {
     const dir = agentChatsDir(agentId);
     const path = agentChatFile(agentId, chatId);
     const body = logBody(msgs, recs);
     const prev = this.chains.get(path) ?? Promise.resolve();
     const done = prev
       .then(() => opts.after)
+      .catch(() => {}) // a failed tombstone write does not stop the log landing
       .then(async () => {
-        await mkdirPrivate(dir);
-        await appendPrivate(path, body.length ? body + "\n" : "");
-        await opts.then();
-        return true;
-      })
-      .catch((e) => {
-        this.onError(e, path);
-        return false;
+        await this.untilDurable(path, async () => {
+          await mkdirPrivate(dir);
+          await writeAtomicPrivate(path, body.length ? body + "\n" : "");
+        });
+        await this.untilDurable(path, opts.then);
       });
-    this.chains.set(path, done.then(() => {}));
+    this.chains.set(path, done);
     return done;
+  }
+
+  /** Run `step` until it resolves, backing off from RETRY_MIN_MS to RETRY_MAX_MS
+   *  and reporting each failure through onError. */
+  private async untilDurable(path: string, step: () => Promise<void>): Promise<void> {
+    for (let wait = RETRY_MIN_MS; ; wait = Math.min(wait * 2, RETRY_MAX_MS)) {
+      try {
+        await step();
+        return;
+      } catch (e) {
+        this.onError(e, path);
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
   }
 
   /** The chat ids that have files on disk for this agent, no order promised. */

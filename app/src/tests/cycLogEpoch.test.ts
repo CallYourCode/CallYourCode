@@ -326,34 +326,38 @@ afterEach(() => {
 });
 
 describe('the field case: Hunter re-sequenced while the phone held the old axis', () => {
-  test('the roster already named the new epoch: the open paints nothing of the dead axis', async () => {
-    const engine = new FakeEngine(OLD);
-    await seedDevice(engine, 2600, OLD);
-    engine.resequence(NEW);
-    engine.grow(2578); // 18:45: the new tail is 2578, the held one 2600
-    // the roster frame the phone got on connect (persisted for a cold boot)
-    plantSession(NEW);
-    const {attaches} = stand(engine);
+  // the phone's own cache was stored by the pre-epoch app: unstamped
+  test.each([OLD, undefined])(
+    'the roster already named the new epoch: the open paints nothing of the dead axis (rows stamped %s)',
+    async (stamp) => {
+      const engine = new FakeEngine(OLD);
+      await seedDevice(engine, 2600, stamp);
+      engine.resequence(NEW);
+      engine.grow(2578); // 18:45: the new tail is 2578, the held one 2600
+      // the roster frame the phone got on connect (persisted for a cold boot)
+      plantSession(NEW);
+      const {attaches} = stand(engine);
 
-    attach(SID);
-    await settle(150);
+      attach(SID);
+      await settle(150);
 
-    // main painted 300 rows of the Sept 24 window, then asked with 2600
-    expect(attaches[0].shownAtAttach, 'rows painted before the engine answered').toBe(0);
-    expect(attaches[0].heldAtAttach, 'rows held when the open asked the engine').toBe(-1);
-    expect(attaches[0].frontier).toBe(-1);
-    expect(attaches[0].axis).toBe(NEW);
-    expect(events('rowstore.axis-epoch')[0]?.fields).toMatchObject({
-      held: OLD,
-      axis: NEW,
-      trigger: 'open'
-    });
+      // main painted 300 rows of the Sept 24 window, then asked with 2600
+      expect(attaches[0].shownAtAttach, 'rows painted before the engine answered').toBe(0);
+      expect(attaches[0].heldAtAttach, 'rows held when the open asked the engine').toBe(-1);
+      expect(attaches[0].frontier).toBe(-1);
+      expect(attaches[0].axis).toBe(NEW);
+      expect(events('rowstore.axis-epoch')[0]?.fields).toMatchObject({
+        held: stamp,
+        axis: NEW,
+        trigger: 'open'
+      });
 
-    await drain();
-    expect(heldPairs()).toEqual(enginePairs(engine));
-    expect(rowStore.metaSnapshot(SID)?.axis).toBe(NEW);
-    expect(events('rowstore.stale-axis')).toEqual([]);
-  });
+      await drain();
+      expect(heldPairs()).toEqual(enginePairs(engine));
+      expect(rowStore.metaSnapshot(SID)?.axis).toBe(NEW);
+      expect(events('rowstore.stale-axis')).toEqual([]);
+    }
+  );
 
   test('the new axis grew past the held tail and the roster has not said: the attach-ok replaces the rows', async () => {
     const engine = new FakeEngine(OLD);
@@ -429,7 +433,7 @@ describe('a re-sequence announced on the roster', () => {
     expect(rowStore.metaSnapshot(SID)?.axis).toBe(NEW);
   });
 
-  test('a fetched page of another epoch is never filed among the rows', async () => {
+  test('a fetched page of another epoch is discarded: nothing filed, nothing purged', async () => {
     const engine = new FakeEngine(OLD);
     await seedDevice(engine, 2645, OLD);
     // the replicator still owes page 3 on the old axis
@@ -447,12 +451,41 @@ describe('a re-sequence announced on the roster', () => {
     await r.pump();
     await settle(60);
     expect(engine.fetched).toContain(3);
-    const after = heldPairs();
-    // nothing of the new axis landed among the old rows: they were dropped whole
-    expect(after.filter((p) => !before.includes(p))).toEqual([]);
-    expect(rowStore.highestHeldSeq(SID)).toBe(-1);
+    // a page is no authority on the epoch: the roster or the next attach drops
+    // the rows; the page itself only goes unfiled
+    expect(heldPairs()).toEqual(before);
+    expect(rowStore.metaSnapshot(SID)?.axis).toBe(OLD);
+    expect(events('rowstore.axis-epoch')).toEqual([]);
+  });
+
+  // A page cut BEFORE the re-sequence answers AFTER the device moved onto the
+  // new epoch: it is the dead axis, and it must neither be filed nor purge the
+  // good rows and stamp the dead epoch back (round 1 of this branch did).
+  test('a late page of the old epoch, after the device moved on, is discarded', async () => {
+    const engine = new FakeEngine(OLD);
+    const oldEngine = new FakeEngine(OLD);
+    await seedDevice(engine, 2600, OLD);
+    engine.resequence(NEW);
+    engine.grow(2700);
+    plantSession(NEW);
+    stand(engine);
+    attach(SID);
+    await settle(150);
+    await drain();
     expect(rowStore.metaSnapshot(SID)?.axis).toBe(NEW);
-    expect(events('rowstore.axis-epoch')[0]?.fields).toMatchObject({trigger: 'page'});
+    detachChat();
+    rowStore.setOpen(null);
+    const before = heldPairs();
+
+    engine.page = (p: number) => oldEngine.page(p);
+    const r = replicatorFor(SID, KEY, PANE);
+    (r.cursor as {coveredFrom: number}).coveredFrom = 4;
+    await r.pump();
+    await settle(60);
+    expect(engine.fetched).toContain(3);
+    expect(heldPairs()).toEqual(before);
+    expect(heldPairs()).toEqual(enginePairs(engine));
+    expect(rowStore.metaSnapshot(SID)?.axis).toBe(NEW);
   });
 });
 
@@ -477,18 +510,33 @@ describe('the heuristics are the fallback, not the rule', () => {
     expect(heldPairs()).toEqual(enginePairs(engine));
   });
 
-  test('rows stored before the device met an epoch are checked once by the heuristics, then stamped', async () => {
+  test('rows stored before the device met an epoch prove nothing: dropped on open, loaded fresh', async () => {
     const engine = new FakeEngine(OLD);
-    await seedDevice(engine, 2645); // unstamped, and sound
+    await seedDevice(engine, 2645); // unstamped, and sound: a one-time reload
     plantSession(OLD);
     const {attaches} = stand(engine);
     attach(SID);
     await settle(150);
-    expect(attaches[0]).toMatchObject({frontier: 2645, axis: undefined});
+    expect(attaches[0]).toMatchObject({frontier: -1, axis: OLD, shownAtAttach: 0});
+    expect(events('rowstore.axis-epoch')[0]?.fields).toMatchObject({axis: OLD, trigger: 'open'});
+    await drain();
     expect(rowStore.metaSnapshot(SID)?.axis).toBe(OLD);
     expect(events('rowstore.stale-axis')).toEqual([]);
-    expect(events('rowstore.axis-epoch')).toEqual([]);
     expect(heldPairs()).toEqual(enginePairs(engine));
+  });
+
+  test('the roster has not named an epoch yet: unstamped rows are replaced by the attach-ok', async () => {
+    const engine = new FakeEngine(OLD);
+    await seedDevice(engine, 2600);
+    engine.resequence(NEW);
+    engine.grow(2700); // the dead axis looks sound to the heuristics
+    plantSession(); // offline boot: no epoch known at open
+    stand(engine);
+    attach(SID);
+    await settle(200);
+    await drain();
+    expect(heldPairs()).toEqual(enginePairs(engine));
+    expect(rowStore.metaSnapshot(SID)?.axis).toBe(NEW);
   });
 
   test('the same epoch: the rows are on this axis and no heuristic second-guesses them', async () => {

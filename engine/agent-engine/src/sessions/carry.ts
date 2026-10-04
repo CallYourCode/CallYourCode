@@ -84,7 +84,7 @@ export function mergeLogs(
  *  axis under the same session id. Returns the rows to append (both kinds, seqs
  *  stamped), or null when one of them would land inside the target's history:
  *  only a re-sequence orders an interleave, and that is a new axis (and a new
- *  epoch, session-state.ts mintAxis). */
+ *  epoch, session-state.ts rewriteLog). */
 export function appendOnly(
   a: { chat: ChatMsg[]; log: SessionRec[] }, b: { chat: ChatMsg[]; log: SessionRec[] },
 ): { chat: ChatMsg[]; log: SessionRec[] } | null {
