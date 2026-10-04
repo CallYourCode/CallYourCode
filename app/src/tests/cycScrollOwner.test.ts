@@ -250,6 +250,33 @@ describe('ScrollOwner reader-scroll clock', () => {
     owner.jump('to-bottom', () => scrollBy(scroll, 400));
     expect(owner.driving()).toBe(false);
   });
+
+  // The browser keeps flinging under a programmatic write, so a go-to-bottom or
+  // travel tapped mid-fling fought it (CYC Builder, iPhone, 2026-10-04): the
+  // move makes the box un-scrollable by hand for a moment, which ends the fling.
+  test('a go-to-bottom or travel tapped mid-fling ends the fling', () => {
+    vi.useFakeTimers({toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout']});
+    const {scroll, owner} = mount();
+    for (const kind of ['to-bottom', 'to-message']) {
+      scrollBy(scroll, -50, true);
+      vi.advanceTimersByTime(100);
+      scrollBy(scroll, -20);
+      let during = '';
+      owner.jump(kind, () => {
+        during = scroll.style.overflowY;
+      });
+      expect(during).toBe('hidden');
+      vi.advanceTimersByTime(99);
+      expect(scroll.style.overflowY).toBe('hidden');
+      vi.advanceTimersByTime(1);
+      expect(scroll.style.overflowY).toBe('');
+      vi.advanceTimersByTime(200);
+    }
+    // At rest there is no fling to end: the box is left alone.
+    owner.jump('to-bottom', () => {
+      expect(scroll.style.overflowY).toBe('');
+    });
+  });
 });
 
 // After a wheel stops at the end the browser can clamp the offset (the content
