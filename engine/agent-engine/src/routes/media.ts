@@ -440,33 +440,6 @@ export async function mediaRoutes(ctx: RoutesCtx, req: Request, url: URL, path: 
       const safe = j.name.replace(/["\r\n]/g, "_");
       headers["content-disposition"] = `attachment; filename="${safe}"`;
     }
-    headers["accept-ranges"] = "bytes";
-    /* THE DOWNLOAD LANE (download-lane, 2026-10-03). The app fetches a shown
-     * file as a run of `Range: bytes=a-b` requests, one tunnel CHUNK each, so a
-     * stalled download is a stalled chunk it can retry, and resume from, rather
-     * than one 13 MB answer with nothing to measure it by. Each part is marked
-     * for the sealed writer's bulk lane (x-cyc-lane, stripped by the tunnel),
-     * which yields to every chat frame and upload ack. One range only; anything
-     * else gets the whole file, as before. */
-    const range = req.headers.get("range");
-    const m = range && /^bytes=(\d*)-(\d*)$/.exec(range.trim());
-    if (m && (m[1] !== "" || m[2] !== "")) {
-      const total = bin.size;
-      let start = m[1] === "" ? 0 : Number(m[1]);
-      let end = m[2] === "" ? total - 1 : Number(m[2]);
-      if (m[1] === "") { start = Math.max(0, total - Number(m[2])); end = total - 1; }
-      if (!Number.isSafeInteger(start) || start >= total || end < start) {
-        return new Response("range not satisfiable", {
-          status: 416, headers: { ...headers, "content-range": `bytes */${total}` },
-        });
-      }
-      end = Math.min(end, total - 1);
-      return new Response(bin.slice(start, end + 1), {
-        status: 206,
-        headers: { ...headers, "content-range": `bytes ${start}-${end}/${total}`,
-          "x-cyc-lane": "bulk" },
-      });
-    }
     return new Response(bin, { headers });
   }
 

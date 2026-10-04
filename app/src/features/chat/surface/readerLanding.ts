@@ -15,11 +15,6 @@ interface ReaderLandingDeps {
   play(sessionId: string, msgId: string, text: string, reason?: PlayReason): void;
   suppressAutoSpeak(): boolean;
   isChatViewOpen(): boolean;
-  /* Whether this device has already had the row on screen or heard it to the
-   * end (heardProgress's seen set). The marker only moves through a contiguous
-   * seen run, so a clip heard to the end can still sit after it; speech must not
-   * pick it again. Absent: nothing is known seen beyond the marker. */
-  heardOrSeen?(sessionId: string, rowId: string): boolean;
 }
 
 interface ReaderLandingOptions {
@@ -185,20 +180,10 @@ export function createReaderLanding(options: ReaderLandingOptions) {
             .filter((m) => !marker || m.ts >= marker.ts)
             .slice(-unread);
     if (!candidates.length) return;
-    /* NOT A CLIP ALREADY HEARD (release-1 B1). A clip heard to the end is in the
-     * seen set but can sit after the marker (the marker waits for every unread
-     * row before it to be seen too), so the marker alone would pick it again:
-     * the replay edge, the back-live timer and a return to the page each re-ran
-     * this, cut the clip playing and replayed the heard one. */
     const pending = speaker.pending();
-    const queue = candidates.filter(
-      (m) => !pending.has(m.msgId!) && !deps.heardOrSeen?.(sessionId, m.id)
-    );
-    if (!queue.length) return; // nothing new: leave whatever is playing alone
-    /* Already speaking this chat: add the new clips behind it, never restart
-     * it. Only audio from another chat (or none) is replaced. */
-    const ownRun = pending.size > 0 && (speaker.state.sessionId ?? sessionId) === sessionId;
-    if (!ownRun) speaker.stopAll();
+    const queue = candidates.filter((m) => !pending.has(m.msgId!));
+    if (!queue.length) return;
+    speaker.stopAll();
     for (const m of queue) deps.play(sessionId, m.msgId!, m.text, 'autoplay-open');
   };
 

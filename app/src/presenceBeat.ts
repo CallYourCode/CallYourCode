@@ -3,7 +3,6 @@ import {sessionState, dataState} from './sessionState';
 import {speaker} from './audio/speaker';
 import {pipeline} from './audio/pipeline';
 import {TOUCH_DEVICE} from './speechGate';
-import {cyclog} from '@/shared/logging';
 
 interface PresenceBeatDeps {
   onTeardown(d: () => void): void;
@@ -43,49 +42,32 @@ export function installPresenceBeat(deps: PresenceBeatDeps) {
     let claimingPresence = false;
     const watching = () => Date.now() - lastActivityAt < IDLE_MS || speaker.isPlaying();
 
-    // EVERY PRESENCE TRANSITION, with the page event behind it (owner report,
-    // 2026-10-03: the engine said the phone was backgrounded while the owner was on the
-    // chat, and neither side could say which event made it so). Logged when the
-    // claim or whether it could be sent changes, not on the beat restating it;
-    // `why` also rides the frame so the engine's own presence line names it.
-    let lastLogged = '';
     // A presence fact goes to the engine only while the sync is live (offline
     // design v2, section 7); the live edge re-claims it.
-    const report = (on: boolean, why: string) => {
-      const live = engine.syncStatus() === 'live';
-      if (`${on}:${live}` !== lastLogged) {
-        lastLogged = `${on}:${live}`;
-        cyclog('presence.report', {
-          on,
-          why,
-          vis: document.visibilityState,
-          focus: document.hasFocus(),
-          sent: live
-        });
-      }
-      if (!live) return;
-      engine.setVisible(on, why);
+    const report = (on: boolean) => {
+      if (engine.syncStatus() !== 'live') return;
+      engine.setVisible(on);
     };
 
-    const beatOnce = (why: string) => {
+    const beatOnce = () => {
       if (document.hidden) return;
       if (watching()) {
-        report(true, why);
+        report(true);
         claimingPresence = true;
       } else if (claimingPresence) {
-        report(false, 'idle');
+        report(false);
         claimingPresence = false;
       }
     };
     deps.onTeardown(
       engine.onSyncStatus((st) => {
-        if (st === 'live' && !document.hidden) beatOnce('live');
+        if (st === 'live' && !document.hidden) beatOnce();
       })
     );
 
-    const markActivity = (e: Event) => {
+    const markActivity = () => {
       lastActivityAt = Date.now();
-      if (!claimingPresence && !document.hidden) beatOnce(e.type);
+      if (!claimingPresence && !document.hidden) beatOnce();
     };
     const ACTIVITY = ['pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'] as const;
     for (const ev of ACTIVITY) {
@@ -98,30 +80,29 @@ export function installPresenceBeat(deps: PresenceBeatDeps) {
     });
 
     const offSpeaker = speaker.onState(() => {
-      if (!claimingPresence && speaker.isPlaying() && !document.hidden) beatOnce('speaker');
+      if (!claimingPresence && speaker.isPlaying() && !document.hidden) beatOnce();
     });
     deps.onTeardown(offSpeaker);
 
-    const reportVisible = (e?: Event) => {
-      const why = e?.type ?? 'install';
+    const reportVisible = () => {
       if (document.hidden) {
-        report(false, why);
+        report(false);
         claimingPresence = false;
         return;
       }
       lastActivityAt = Date.now();
-      beatOnce(why);
+      beatOnce();
     };
     const reportGone = () => {
-      report(false, 'blur');
+      report(false);
       claimingPresence = false;
     };
-    const reportHidden = () => report(false, 'pagehide');
+    const reportHidden = () => report(false);
     document.addEventListener('visibilitychange', reportVisible);
     window.addEventListener('focus', reportVisible);
     window.addEventListener('blur', reportGone);
 
-    const beat = window.setInterval(() => beatOnce('beat'), BEAT_MS);
+    const beat = window.setInterval(beatOnce, BEAT_MS);
     deps.onTeardown(() => clearInterval(beat));
 
     window.addEventListener('pagehide', reportHidden);

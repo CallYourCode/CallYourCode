@@ -3,20 +3,8 @@ import {onSyncStatus, syncStatus} from './engine/store';
 import {pipeline} from './audio/pipeline';
 import {toast} from './components/widgets';
 import {unsentWork, vaultHolds} from './sessionState';
-import {
-  createStaleReloadController,
-  parseServedStamp,
-  reloadHold,
-  CACHE_PREFIX,
-  type ReloadHolds
-} from './staleReload';
-import {
-  markSelfReload,
-  markReloadDeparture,
-  dropNetNavParam,
-  navigateSelf,
-  readReloadDeparture
-} from './shared/selfReload';
+import {createStaleReloadController, parseServedStamp, CACHE_PREFIX} from './staleReload';
+import {markSelfReload, markReloadDeparture, readReloadDeparture} from './shared/selfReload';
 
 export const bundleInfo = {stamp: ''};
 
@@ -27,7 +15,6 @@ const RELOAD_MARK_KEY = 'cyc-stale-reload-for';
 export function installStaleTabReload(): void {
   const cycBuildStamp = typeof __CYC_BUILD__ !== 'undefined' ? __CYC_BUILD__ : '';
   cyclog('boot', {build: cycBuildStamp || 'dev'});
-  dropNetNavParam();
   bundleInfo.stamp = cycBuildStamp;
 
   // This boot is main actually starting: clear the index.html watchdog so it
@@ -48,11 +35,11 @@ export function installStaleTabReload(): void {
       gap: Date.now() - departed.at,
       from: departed.from,
       to: departed.to,
-      hidden: departed.hidden,
       build: cycBuildStamp || 'dev'
     });
 
   let bootStamp = '';
+  let reloading = false;
   const fetchStamp = () =>
     fetch('./build.txt', {cache: 'no-store'})
       .then((r) => (r.ok ? r.text() : ''))
@@ -74,66 +61,78 @@ export function installStaleTabReload(): void {
   });
   if (syncStatus() === 'live') void readBootStamp();
 
-  const composer = () => document.querySelector('.cyc-composer');
-  const recordingNow = () => {
-    const i = composer();
-    return (
-      pipeline.captureBusy ||
-      (!!i && (i.hasAttribute('data-cyc-recording') || i.classList.contains('cyc-pressing')))
-    );
-  };
-  const draftInBox = () =>
-    !!document.querySelector('.cyc-composer-input')?.textContent?.trim() ||
-    !!document.querySelector('.cyc-attach-chip') ||
-    !!document.querySelector('.cyc-block-voice');
-  const audioPlaying = () => {
+  const busy = () => {
+    const input = document.querySelector('.cyc-composer');
+    if (input?.hasAttribute('data-cyc-recording') || input?.classList.contains('cyc-pressing'))
+      return true;
+    const typed = document.querySelector('.cyc-composer-input')?.textContent?.trim();
+    if (typed) return true;
+
+    if (document.querySelector('.cyc-attach-chip')) return true;
+
+    if (document.querySelector('.cyc-block-voice')) return true;
     const audio = document.querySelector('audio');
-    return !!audio && !audio.paused && !audio.ended;
+    if (audio && !audio.paused && !audio.ended) return true;
+    if (unsentWork.busy()) return true;
+    return false;
+  };
+
+  const RELOAD_PATIENCE_MS = 45_000;
+  /* The hard ceiling on every hold except a live recording. vaultHolds and
+   * unsentWork used to defer FOREVER: one stuck hold (a failed transfer that
+   * never settled) meant the toast showed and the reload silently never came
+   * (2026-09-06 report). Unsent intents are durable (IndexedDB) and survive
+   * the reload, so past this ceiling waiting protects nothing. A recording in
+   * progress is the one hold that genuinely cannot be reloaded away. */
+  const RELOAD_CEILING_MS = 5 * 60_000;
+  const reloadSoon = (target: string) => {
+    if (reloading) return;
+    reloading = true;
+    const since = Date.now();
+    toast('New version, reloading…', 2500);
+    let lastLogged = 0;
+    const tick = () => {
+      const recording =
+        pipeline.captureBusy ||
+        (() => {
+          const i = document.querySelector('.cyc-composer');
+          return (
+            !!i && (i.hasAttribute('data-cyc-recording') || i.classList.contains('cyc-pressing'))
+          );
+        })();
+
+      const holds = {
+        recording,
+        vault: vaultHolds.writing > 0,
+        unsent: unsentWork.busy(),
+        busy: busy()
+      };
+      const waited = Date.now() - since;
+      const cannotLose = holds.recording || holds.vault || holds.unsent;
+      const defer = recording
+        ? true // a live recording waits as long as it runs
+        : (cannotLose && waited < RELOAD_CEILING_MS) ||
+          (holds.busy && waited < RELOAD_PATIENCE_MS);
+      if (defer) {
+        if (waited - lastLogged >= 15_000) {
+          lastLogged = waited;
+          cyclog('reload.deferred', {...holds, waited});
+        }
+        window.setTimeout(tick, 3000);
+        return;
+      }
+
+      cyclog('reload.go', {waited, from: cycBuildStamp || bootStamp, to: target});
+      const url = new URL(location.href);
+      url.searchParams.set('b', String(Date.now()));
+      markSelfReload();
+      markReloadDeparture(cycBuildStamp || bootStamp, target);
+      location.replace(url.toString());
+    };
+    window.setTimeout(tick, 1200);
   };
 
   const swSupported = typeof navigator !== 'undefined' && 'serviceWorker' in navigator;
-
-  // The update reload, through the one self-navigation gate, with its own hold
-  // on top: a recording, a vault write, an unsent send, a draft in the box
-  // (until it is emptied or the app goes to the background) or a playing clip
-  // (reloadHold).
-  const reloadSoon = (target: string) => {
-    // Announce only a reload that is about to happen; one held by a draft
-    // comes later, when the box is empty or the app is in the background.
-    if (!draftInBox()) toast('New version, reloading…', 2500);
-    let holds: ReloadHolds | null = null;
-    let lastLogged = 0;
-    navigateSelf({
-      why: 'update',
-      firstTickMs: 1200,
-      hold: (waited, hidden) => {
-        holds = {
-          recording: recordingNow(),
-          vault: vaultHolds.writing > 0,
-          unsent: unsentWork.busy(),
-          draft: draftInBox(),
-          audio: audioPlaying()
-        };
-        return reloadHold(holds, waited, hidden);
-      },
-      onHeld: (hold, waited, hidden) => {
-        if (waited - lastLogged < 15_000) return;
-        lastLogged = waited;
-        cyclog('reload.deferred', {...holds, hold, hidden, waited});
-      },
-      to: () => {
-        const url = new URL(location.href);
-        url.searchParams.set('b', String(Date.now()));
-        return url.toString();
-      },
-      before: ({waited, hidden}) => {
-        cyclog('reload.go', {waited, hidden, from: cycBuildStamp || bootStamp, to: target});
-        markSelfReload();
-        markReloadDeparture(cycBuildStamp || bootStamp, target, hidden);
-      }
-    });
-  };
-
   const controller = createStaleReloadController({
     ownStamp: () => cycBuildStamp || bootStamp,
     fetchServedStamp: fetchStamp,
@@ -180,8 +179,7 @@ export function installStaleTabReload(): void {
       }
     },
     schedule: (fn, ms) => void window.setTimeout(fn, ms),
-    reload: (target) => reloadSoon(target),
-    log: (event, fields) => cyclog(event, fields)
+    reload: (target) => reloadSoon(target)
   });
 
   // A stamp check is a fetch: only while the sync is live (offline design v2,

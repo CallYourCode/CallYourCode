@@ -174,11 +174,3 @@ export function resetCoverage(st: CursorState, tailPage: number, tailVersion: nu
   st.islands.clear();
   st.holes.clear();
 }
-
-// Forget everything the cursor knew (fix-log-epoch): the axis it described is
-// gone, so nothing on it is covered, pending, or owed. The next attach-ok seeds
-// it afresh on the new axis.
-export function resetCursor(st: CursorState): void {
-  resetCoverage(st, -1, 0);
-  st.demand.length = 0;
-}

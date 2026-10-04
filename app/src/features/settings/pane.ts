@@ -65,7 +65,6 @@ import {createEnginesSection} from '@/features/pairing/enginesSettings';
 import {fileReport, waitingReports, startReportOutbox} from '@/features/diagnostics/reporting';
 import {clearCachedData} from '@/features/settings/preferences';
 import {cyclog} from '@/shared/logging';
-import {navigateSelf} from '@/shared/selfReload';
 import {sessionState, dataState} from '@/sessionState';
 import {bundleInfo} from '@/bundleReload';
 import {active, activeEngineKey, visibleTabs} from '@/sessionSelectors';
@@ -280,11 +279,7 @@ export function createSettingsPane(deps: SettingsPaneDeps) {
         {
           text: 'Clear',
           danger: true,
-          // Through the self-navigation gate; no composer hold.
-          callback: () =>
-            void clearCachedData().then(() =>
-              navigateSelf({why: 'clear-data', notice: 'Reloading…'})
-            )
+          callback: () => void clearCachedData().then(() => location.reload())
         },
         {text: 'Cancel'}
       ]

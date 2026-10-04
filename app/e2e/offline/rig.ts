@@ -469,9 +469,6 @@ export type PinnedBoot = {
   voiceBases?: string[];
 
   logSends?: boolean;
-
-  // The app origin to boot (default PAGE, the suite's static server).
-  origin?: string;
 };
 
 export async function bootEngines(page: Page, ports: number[], o: PinnedBoot = {}): Promise<void> {
@@ -504,9 +501,7 @@ export async function bootEngines(page: Page, ports: number[], o: PinnedBoot = {
       engines.map((e) => ({userHost: e.userHost, keyB64: e.contentKeyB64}))
     );
   }
-  await page.goto(
-    `${o.origin ?? PAGE}/?testhooks=1${o.extra ?? ''}&v=${Date.now()}${o.hash ?? ''}`
-  );
+  await page.goto(`${PAGE}/?testhooks=1${o.extra ?? ''}&v=${Date.now()}${o.hash ?? ''}`);
   if (o.wait !== 'none') await waitForSessionRows(page);
 }
 

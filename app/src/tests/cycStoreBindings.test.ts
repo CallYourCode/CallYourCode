@@ -1,4 +1,4 @@
-import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
+import {beforeEach, describe, expect, test, vi} from 'vitest';
 type Handler = (...a: never[]) => void;
 const fake = vi.hoisted(() => ({
   handlers: {} as Record<string, Handler>,
@@ -8,9 +8,7 @@ const fake = vi.hoisted(() => ({
   // Default true: the steady-state open where the reply is genuinely unheard. A
   // test flips it to false to model a say for a row already at/behind the
   // read-through (a stranded growing clip's frame reaching an open chat).
-  mayAutoplay: true,
-  // what sessionSelectors.active() answers: the open chat, or null
-  active: null as unknown
+  mayAutoplay: true
 }));
 vi.mock('../engine/store', () => ({
   onReplayed: (fn: Handler) => {
@@ -77,7 +75,7 @@ vi.mock('../speakerEvents', () => ({installSpeakerEvents: vi.fn()}));
 vi.mock('../features/composer/voice/capture', () => ({installVoiceCapture: vi.fn()}));
 vi.mock('../features/chat/surface/audioPlayback', () => ({transcriptOf: (): null => null}));
 vi.mock('../sessionSelectors', () => ({
-  active: (): unknown => fake.active,
+  active: (): unknown => null,
   selectTabFor: () => 'e1#t1'
 }));
 vi.mock('../features/settings/preferences', () => ({
@@ -175,7 +173,6 @@ beforeEach(() => {
   fake.handlers = {};
   fake.sessions.clear();
   fake.mayAutoplay = true;
-  fake.active = null;
   dataState.mode = 'live';
   sessionState.activeId = null;
   localStorage.clear();
@@ -420,140 +417,5 @@ describe('conversation-list keyboard nav walks only the visible rows', () => {
     press('ArrowDown');
     press('ArrowUp');
     expect(cs.openChat).not.toHaveBeenCalled();
-  });
-});
-describe('the read sighting for a reply arriving in the open chat', () => {
-  // The owner, 2026-10-03: a reply landed in the open BZ Builder, visible, and
-  // the chat stayed unread until the owner went back to the list. The open window is
-  // capped at 300 rows, so the reply slid the oldest row out and the count never
-  // grew; the sighting was gated on the count growing.
-  const window = (from: number, n: number) =>
-    Array.from({length: n}, (_, i) => ({id: `m${from + i}`, mid: `m${from + i}`, ts: from + i}));
-  const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
-  test('a reply in a FULL window (the count does not grow) is still sighted', async () => {
-    const {deps} = mk();
-    sessionState.activeId = 's1';
-    fake.active = {id: 's1', messages: window(1, 300)};
-    (fake.handlers.store as Handler)(); // the baseline: what is already shown
-    await frame();
-    expect(deps.reportViewedThrough).not.toHaveBeenCalled();
-    fake.active = {id: 's1', messages: window(2, 300)}; // newest in, oldest out
-    (fake.handlers.store as Handler)();
-    await frame();
-    expect(deps.reportViewedThrough).toHaveBeenCalledWith('s1');
-  });
-  test('the sighting waits for the frame that follows the reply into view', async () => {
-    // The sighting asks what is ON SCREEN; before the follow the reply is under
-    // the fold, so a sighting made at notify time named the rows above it.
-    const {deps, cs} = mk();
-    sessionState.activeId = 's1';
-    fake.active = {id: 's1', messages: window(1, 299)};
-    (fake.handlers.store as Handler)();
-    await frame();
-    fake.active = {id: 's1', messages: window(1, 300)};
-    (fake.handlers.store as Handler)();
-    expect(deps.reportViewedThrough).not.toHaveBeenCalled();
-    await frame();
-    const follow = (cs.followArrival as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
-    const sight = (deps.reportViewedThrough as ReturnType<typeof vi.fn>).mock
-      .invocationCallOrder[0];
-    expect(follow).toBeLessThan(sight);
-  });
-  test('a repaint with nothing newer sights nothing', async () => {
-    const {deps} = mk();
-    sessionState.activeId = 's1';
-    fake.active = {id: 's1', messages: window(1, 300)};
-    (fake.handlers.store as Handler)();
-    fake.active = {id: 's1', messages: window(1, 300)};
-    (fake.handlers.store as Handler)();
-    await frame();
-    expect(deps.reportViewedThrough).not.toHaveBeenCalled();
-  });
-});
-describe('the new-below badge in a full window', () => {
-  // The same capped-window trap as the read sighting: a reply that slides the
-  // oldest row out leaves the count at 300, and the badge was gated on the count.
-  const window = (from: number, n: number) =>
-    Array.from({length: n}, (_, i) => ({id: `m${from + i}`, mid: `m${from + i}`, ts: from + i}));
-  test('a reply to a reader scrolled up raises the badge though the count does not grow', () => {
-    const {cs} = mk();
-    (cs as {nearBottom: () => boolean}).nearBottom = () => false;
-    sessionState.activeId = 's1';
-    fake.active = {id: 's1', messages: window(1, 300)};
-    (fake.handlers.store as Handler)();
-    fake.active = {id: 's1', messages: window(3, 300)}; // two in, two out
-    (fake.handlers.store as Handler)();
-    expect(cs.setNewBelow).toHaveBeenCalledWith(2);
-  });
-  test("your own message's echo is not a second arrival (L1)", async () => {
-    // The pending bubble shows at once under the device's clock; the engine's
-    // echo replaces it under a later instant. Same cid: the same message.
-    const {cs, deps} = mk();
-    (cs as {nearBottom: () => boolean}).nearBottom = () => false;
-    sessionState.activeId = 's1';
-    const base = window(1, 300);
-    fake.active = {id: 's1', messages: base};
-    (fake.handlers.store as Handler)();
-    fake.active = {
-      id: 's1',
-      messages: [...base.slice(1), {id: 'm:pending:c1', cid: 'c1', ts: 500, role: 'user'}]
-    };
-    (fake.handlers.store as Handler)(); // the bubble: one new row
-    expect(cs.setNewBelow).toHaveBeenCalledTimes(1);
-    await new Promise<void>((r) => requestAnimationFrame(() => r()));
-    const sightings = (deps.reportViewedThrough as ReturnType<typeof vi.fn>).mock.calls.length;
-    fake.active = {
-      id: 's1',
-      messages: [...base.slice(1), {id: 'x', mid: 'x', cid: 'c1', ts: 520, role: 'user'}]
-    };
-    (fake.handlers.store as Handler)(); // the echo settles it
-    await new Promise<void>((r) => requestAnimationFrame(() => r()));
-    expect(cs.setNewBelow).toHaveBeenCalledTimes(1);
-    expect(deps.reportViewedThrough).toHaveBeenCalledTimes(sightings);
-  });
-});
-
-describe('replies that arrived while the page was hidden', () => {
-  const window = (from: number, n: number) =>
-    Array.from({length: n}, (_, i) => ({id: `m${from + i}`, mid: `m${from + i}`, ts: from + i}));
-  const setHidden = (hidden: boolean) => {
-    Object.defineProperty(document, 'hidden', {configurable: true, get: () => hidden});
-    Object.defineProperty(document, 'visibilityState', {
-      configurable: true,
-      get: () => (hidden ? 'hidden' : 'visible')
-    });
-  };
-  const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
-  afterEach(() => setHidden(false));
-  async function arriveHidden(nearBottom: boolean) {
-    const made = mk();
-    (made.cs as {nearBottom: () => boolean}).nearBottom = () => nearBottom;
-    sessionState.activeId = 's1';
-    fake.active = {id: 's1', messages: window(1, 300)};
-    (fake.handlers.store as Handler)();
-    await frame();
-    setHidden(true);
-    fake.active = {id: 's1', messages: window(2, 300)};
-    (fake.handlers.store as Handler)();
-    await frame();
-    expect(made.deps.reportViewedThrough).not.toHaveBeenCalled(); // nobody was looking
-    setHidden(false);
-    document.dispatchEvent(new Event('visibilitychange'));
-    return made;
-  }
-  test('coming back to the open chat sights what is on screen, through the one rule', async () => {
-    const {deps} = await arriveHidden(true);
-    await frame();
-    await frame();
-    expect(deps.reportViewedThrough).toHaveBeenCalledWith('s1');
-  });
-  test('coming back scrolled up asks the same rule; it, not a bottom check here, decides', async () => {
-    // reportViewedThrough sights only the rows in the viewport (heardProgress,
-    // chatSurface.newestOnScreen), so the rows below a scrolled-up reader stay
-    // unread and keep the badge; there is no second "at the bottom" rule here.
-    const {deps} = await arriveHidden(false);
-    await frame();
-    await frame();
-    expect(deps.reportViewedThrough).toHaveBeenCalledWith('s1');
   });
 });

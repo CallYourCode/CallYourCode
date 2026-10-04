@@ -101,7 +101,6 @@ function mk(over: Partial<ChatSurfaceDeps> = {}) {
     heardTsOf: () => 0,
     readMarkerOf: () => undefined,
     reportViewedThrough: vi.fn(),
-    noteOnScreen: vi.fn(),
     play: vi.fn(),
     suppressAutoSpeak: () => false,
     clearSuppressAutoSpeak: vi.fn(),
@@ -130,7 +129,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 describe('openChat, fresh open', () => {
-  test('takes the landing, hands the draft over, attaches, keeps unread, takes the banner down', () => {
+  test('takes the landing, hands the draft over, attaches, zeroes unread, takes the banner down', () => {
     const s = mkSession('s1');
     const after = vi.fn();
     const {cs, deps} = mk();
@@ -141,8 +140,7 @@ describe('openChat, fresh open', () => {
     expect(deps.loadDraft).toHaveBeenCalledWith('s1');
     expect(cs.openPaintIsPending()).toBe(true);
     expect(cs.openPaintStartedAt()).toBeGreaterThan(0);
-    // opening is not seeing (B2): the count falls only as rows are seen
-    expect((s as {unread: number}).unread).toBe(3);
+    expect((s as {unread: number}).unread).toBe(0);
     expect(engine.attach).toHaveBeenCalledWith('s1');
     expect(sessionState.tabSelection.get('e1#t1')).toBe('s1');
     expect(localStorage.getItem('cyc-engaged')).toBe('s1');
@@ -427,76 +425,5 @@ describe('pinned to the bottom across late growth', () => {
     g.readerScrollTo(4250);
     fire();
     expect(g.top()).toBe(4350);
-  });
-});
-describe('what is on screen (the one read rule)', () => {
-  // A viewport 800 px tall at the top of the page; rows 300 px tall, by their top.
-  function rowsAt(cs: ReturnType<typeof mk>['cs'], tops: Record<string, number>) {
-    const scroll = cs.messageListScroll;
-    Object.defineProperty(scroll, 'clientHeight', {get: () => 800, configurable: true});
-    scroll.getBoundingClientRect = () => ({top: 0}) as DOMRect;
-    cs.messageListInner.dataset.cycChat = 's1';
-    for (const [mid, top] of Object.entries(tops)) {
-      const row = mkEl('cyc-message');
-      row.dataset.mid = mid;
-      row.getBoundingClientRect = () => ({top, bottom: top + 300}) as DOMRect;
-      cs.messageListInner.append(row);
-    }
-  }
-  test('only the rows overlapping the viewport, not those above it or below the fold', () => {
-    const {cs} = mk();
-    rowsAt(cs, {z: -600, y: -290, a: 100, b: 500, c: 795, d: 1400});
-    // z is a screen above, y shows 10 px, c peeks 5 px: none of those is seen
-    expect(cs.onScreenRows('s1')).toEqual(['a', 'b']);
-  });
-  test('another chat painted, or the page hidden: nothing is on screen', () => {
-    const {cs} = mk();
-    rowsAt(cs, {a: 100});
-    expect(cs.onScreenRows('s2')).toBeUndefined();
-    Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'hidden'});
-    try {
-      expect(cs.onScreenRows('s1')).toBeUndefined();
-    } finally {
-      Object.defineProperty(document, 'visibilityState', {
-        configurable: true,
-        get: () => 'visible'
-      });
-    }
-  });
-  test('a scroll is a read path: one sighting of the open chat once it pauses', () => {
-    vi.useFakeTimers();
-    try {
-      const {cs, deps} = mk();
-      sessionState.activeId = 's1';
-      cs.messageListScroll.dispatchEvent(new Event('scroll'));
-      cs.messageListScroll.dispatchEvent(new Event('scroll'));
-      expect(deps.reportViewedThrough).not.toHaveBeenCalled();
-      vi.advanceTimersByTime(200);
-      expect(deps.reportViewedThrough).toHaveBeenCalledTimes(1);
-      expect(deps.reportViewedThrough).toHaveBeenCalledWith('s1');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-  test("the reader's scroll is sampled as it moves; a machine write is not (B2)", () => {
-    // A landing or a re-window that jumps the view past unread rows must not
-    // count the rows it passed; the reader dragging through them does.
-    const {cs, deps} = mk();
-    sessionState.activeId = 's1';
-    const scroll = cs.messageListScroll;
-    let top = 0;
-    Object.defineProperty(scroll, 'scrollHeight', {get: () => 10_000, configurable: true});
-    Object.defineProperty(scroll, 'clientHeight', {get: () => 800, configurable: true});
-    Object.defineProperty(scroll, 'scrollTop', {
-      get: () => top,
-      set: (v: number) => (top = v),
-      configurable: true
-    });
-    cs.silentScrollTo(9200, 'rewindow.bottom');
-    scroll.dispatchEvent(new Event('scroll'));
-    expect(deps.noteOnScreen).not.toHaveBeenCalled();
-    top = 8000; // the reader drags up
-    scroll.dispatchEvent(new Event('scroll'));
-    expect(deps.noteOnScreen).toHaveBeenCalledWith('s1');
   });
 });

@@ -13,7 +13,7 @@
 
 import { safeCid } from "../../../shared/logbook.ts";
 import { stampTs, logChat, dedupeIndex, rememberKey, clearQueuedByReply } from "./chatlog.ts";
-import { markRead, markReadRow, markSpoken } from "../sessions/readstate.ts";
+import { markRead, markReadRow } from "../sessions/readstate.ts";
 import { growing } from "./clips.ts";
 import { speakClip } from "../voice/tts.ts";
 import { chunkText } from "../voice/tts-stream.ts";
@@ -331,12 +331,5 @@ export function onHeard(m: any) {
     if (row) { mid = row.mid; ts = row.ts; }
   }
   if (mid === undefined && ts === undefined) return;
-  /* SPOKEN, NOT SEEN: a clip played to the end (with every clip before it).
-   * It moves how far speech has got, never the read marker. */
-  if (m.spoken === true) {
-    const row = (mid && s.chat.find((c) => c.mid === mid)) || s.chat.find((c) => c.ts === ts);
-    if (row && markSpoken(s, row.ts)) d.broadcastSessions();
-    return;
-  }
   if (markReadRow(s, { mid, ts })) d.broadcastSessions();
 }

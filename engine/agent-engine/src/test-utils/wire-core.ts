@@ -68,8 +68,7 @@ import type { PluginSpec } from "../plugins/platform/spec.ts";
 
 import { clients, send, broadcast, resetForTest as resetWire } from "../transport/wire.ts";
 import { initReadState, resetForTest as resetReadState } from "../sessions/readstate.ts";
-import { initClips, resetForTest as resetClips } from "../chat/clips.ts";
-import { resetForTest as resetIntake } from "../chat/intake.ts";
+import { initClips } from "../chat/clips.ts";
 import { initContextCache, claudeTitleOf,
   resetForTest as resetContextCache } from "../sessions/context-cache.ts";
 import { initSubagentCount,
@@ -78,7 +77,7 @@ import { refreshPiSubagentCache, piSubagentRunsCached } from "../readers/pi-suba
 import { sessions, sessionByHandle, resolveSession, loadSessionState, sessionStateReady,
   agentMetas, blobOwner, restoredChats, chatStore, indexMsgBlobs, agentIdFor,
   chatRefFor, persistPatch, metaFor, scheduleAgentSave, scheduleHeardSave,
-  nameOverrideOf, voiceFor, docDirFor, adoptAgentId, axisOf,
+  nameOverrideOf, voiceFor, docDirFor, adoptAgentId,
   resetForTest as resetSessionState, type Session } from "../sessions/session-state.ts";
 import { initChatlog, logSession, sweepRestoredQueued, resetForTest as resetChatlog } from "../chat/chatlog.ts";
 import { initTts, sweepGrowingClips, resetForTest as resetTts } from "../voice/tts.ts";
@@ -104,8 +103,8 @@ import { initAttach } from "../chat/attach.ts";
 import { initSessionsFrame, broadcastSessions, sessionsFrame, sendHelloBurst,
   resetForTest as resetSessionsFrame } from "../sessions/sessions-frame.ts";
 import { initDeliver, injectUserMessage, inOrder, deliverToAgent,
-  resetForTest as resetDeliver, redriveTaken, failUndeliveredNote } from "../chat/deliver.ts";
-import { initTranscribe, redrivePendingNotes, resetPendingForTest } from "../voice/transcribe.ts";
+  resetForTest as resetDeliver } from "../chat/deliver.ts";
+import { initTranscribe } from "../voice/transcribe.ts";
 import { initShowHandler } from "../chat/show-handler.ts";
 import { initSessionVerbs, compactSession } from "../sessions/session-verbs.ts";
 import { initMcp } from "../runtime/mcp.ts";
@@ -312,20 +311,12 @@ export type WireCoreOpts = {
   engineUser?: string;
   /** VOICE_PUBLIC_URL, as it rides the sessions frame */
   voicePublicUrl?: string;
-  /** the voice engine transcribe.ts decodes against (delivery layer); a
-   *  refusing url by default. Given here rather than re-pointed after boot,
-   *  because a boot drives what a session is owed the moment its pane
-   *  reconciles, before a test could re-point anything. */
-  voiceUrl?: () => Promise<string>;
   /** ENGINE_TABS, as groupingFrom() reads it */
   tabs?: string;
 
   // ---- what to start -----------------------------------------------------
   /** start the adapter's own snapshot/subscribe loop (most tests want this) */
   start?: boolean;
-  /** reset() only: keep the SAME fake herdr (its panes, input boxes and record
-   *  of what was submitted), the way a real herdr outlives an engine restart */
-  keepHerdr?: boolean;
   /** start the push sink even without the notify layer (it opens a real port) */
   push?: boolean;
 };
@@ -407,8 +398,6 @@ function resetAllModules(): void {
   resetSessionState();
   resetChatlog();
   resetTts();
-  resetClips(); // the hot clip cache dies with the process; a restart reads the disk
-  resetIntake(); // the given-up list is this process's memory
   resetAsks();
   resetContextCache();
   resetSubagentCount();
@@ -419,7 +408,6 @@ function resetAllModules(): void {
   resetIngest();
   resetPaneDeliver();
   resetDeliver();
-  resetPendingForTest();
   resetReplyTrace();
   resetSessionsFrame();
   resetPresence();
@@ -493,7 +481,7 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
   let VOICE_PUBLIC_URL = "";
   let ENGINE_TABS: Grouping = groupingFrom(undefined);
   /** Everything this engine promises an app it can do (server.ts ENGINE_CAN). */
-  const ENGINE_CAN = ["words", "plugins", "note-words"];
+  const ENGINE_CAN = ["words", "plugins"];
 
   /* ---- the inline glue server.ts defines inside boot() -------------------
    *
@@ -538,8 +526,6 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
   /* ---- the mutable handles a re-wire replaces --------------------------- */
 
   let herdr!: FakeHerdr;
-  let herdrPath = "";
-  let keepingHerdr = false;
   let hooks!: Hooks;
   let mux!: HerdrClient;
   let adapter!: MuxAdapter;
@@ -584,23 +570,21 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
      * parallel workers cannot collide on a path nobody else knows. The socket
      * name carries a sequence number so a reset()'s fresh herdr does not have
      * to unlink the old one out from under a client that is still closing. */
-    if (!(o.keepHerdr && herdr)) {
-      herdrPath = sockPath(root, `herdr-${++sockSeq}.sock`);
-      submitted = [];
-      hooks = {};
-      herdr = fakeHerdr(
-        herdrPath, o.agentStatus, o.panes ?? [PANE], [], o.failKeys, submitted, hooks,
-        new Map(Object.entries(o.sessionIds ?? {})),
-        new Set(o.noSession ?? []),
-        new Map(Object.entries(o.agents ?? {})),
-      );
-      for (const [pane, screen] of Object.entries(o.screens ?? {})) herdr.screens.set(pane, screen);
-    }
+    const path = sockPath(root, `herdr-${++sockSeq}.sock`);
+    submitted = [];
+    hooks = {};
+    herdr = fakeHerdr(
+      path, o.agentStatus, o.panes ?? [PANE], [], o.failKeys, submitted, hooks,
+      new Map(Object.entries(o.sessionIds ?? {})),
+      new Set(o.noSession ?? []),
+      new Map(Object.entries(o.agents ?? {})),
+    );
+    for (const [pane, screen] of Object.entries(o.screens ?? {})) herdr.screens.set(pane, screen);
     /* The adapter seam, exactly as makeAdapter() builds it for herdr: a
      * MuxAdapter over its own HerdrClient. The client is held so stop() can
      * cancel its 15s resnapshot poll and close its event socket; MuxAdapter
      * itself has no stop(). */
-    mux = new HerdrClient(herdrPath);
+    mux = new HerdrClient(path);
     adapter = new MuxAdapter(mux, refusingDriver());
 
     /* 1. the data tree, made and permission-repaired before anything reads or
@@ -872,7 +856,6 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
         broadcastSessions: () => broadcastSessions(),
         scheduleHeardSave: (id) => scheduleHeardSave(id),
         log: (e, f) => log(e, f),
-        axisOf: (id) => axisOf(id),
       });
     }
 
@@ -1011,14 +994,13 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
     if (has("delivery")) {
       // 25. Transcription: transcribe.ts, over a voice engine that refuses.
       initTranscribe({
-        voiceUrl: o.voiceUrl ?? (() => refusingVoiceUrl()),
+        voiceUrl: () => refusingVoiceUrl(),
         log: (e, f) => log(e, f),
         broadcast: (m) => broadcast(m),
         inOrder: (id, f) => inOrder(id, f),
         deliver: (s, opts) => injectUserMessage(s as Session, opts),
         sessionOf: (id) => sessions.get(id),
-        failNote: (s, ts, tell) => failUndeliveredNote(s as Session, ts, tell),
-        clock,
+        restoredChats: () => restoredChats,
       });
 
       // 26. Delivery: deliver.ts. THE one way a message gets into a session.
@@ -1031,9 +1013,8 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
         noteDelivery: (id, how) => noteDelivery(id, how),
         forgetDelivery: (id, entry) => forgetDelivery(id, entry),
         writeHookState: () => writeHookState(),
-        bindOwnedUploads: (claimed, c, sid) => uploads!.bindOwnedUploads(claimed, c, sid),
+        bindOwnedUploads: (claimed, c) => uploads!.bindOwnedUploads(claimed, c),
         adoptStagedUploads: (id, ups) => uploads!.adoptStagedUploads(id, ups),
-        flushChat: (id) => { const r = chatRefFor(id); return chatStore.flushFile(r.aid, r.chatId); },
       });
     }
 
@@ -1087,11 +1068,6 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
       sweepTails: () => adapter.sweepTails(),
       broadcastSessions: () => broadcastSessions(),
       now: () => clock.now(),
-      // Mirrors server.ts: what a session is owed from before it came up live.
-      sessionLive: has("delivery") ? (s) => {
-        redrivePendingNotes(s);
-        void redriveTaken(s);
-      } : undefined,
     }));
     if (o.start !== false) adapter.start();
 
@@ -1106,7 +1082,7 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
     for (const c of made) c.close();
     made.length = 0;
     try { mux?.stop(); } catch { /* never started */ }
-    if (!keepingHerdr) { try { herdr?.stop(true); } catch { /* never listened */ } }
+    try { herdr?.stop(true); } catch { /* never listened */ }
     /* The app server goes with the wiring that dialled it: a re-wire that kept
      * the old sink would carry the previous wiring's pushes into the new one's
      * `hits`, and the port would leak one listener per reset. */
@@ -1147,12 +1123,9 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
     hello: (c) => sendHelloBurst(c.sock),
     registerInputTransform: (pluginId, hook) => inputTransforms.register(pluginId, hook),
     async reset(next) {
-      keepingHerdr = !!next?.keepHerdr;
       await teardown();
-      keepingHerdr = false;
       if (next) o = { ...o, ...next };
       await boot();
-      o = { ...o, keepHerdr: false };
     },
     async stop() {
       await teardown(); // which also stops the push sink

@@ -81,7 +81,7 @@ test("it boots with no engine process, no Bun.serve and no listening port", asyn
   expect(core!.pluginDecls.length).toBeGreaterThan(0);
   const c = core!.client();
   core!.hello(c);
-  expect(c.last("can")!.list).toEqual(["words", "plugins", "note-words"]);
+  expect(c.last("can")!.list).toEqual(["words", "plugins"]);
   expect(c.last("plugins")!.list).toHaveLength(core!.pluginDecls.length);
   expect(c.last("host")).toMatchObject({ user: "seam-user", host: "seam-host" });
   expect(c.last("sessions")!.list).toHaveLength(1);

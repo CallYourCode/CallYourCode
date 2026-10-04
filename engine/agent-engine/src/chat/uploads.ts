@@ -47,7 +47,7 @@ export type Uploads = {
   /** every uploadId this process minted or inherited from disk at boot */
   readonly minted: Set<string>;
   ownedUploadPath(uploadId: string): Promise<string | null>;
-  bindOwnedUploads(claimed: UploadRec[], cid?: string, sessionId?: string): Promise<{ ups: UploadRec[]; missing: string[] }>;
+  bindOwnedUploads(claimed: UploadRec[], cid?: string): Promise<{ ups: UploadRec[]; missing: string[] }>;
   adoptStagedUploads(sessionId: string, ups: UploadRec[]): Promise<void>;
   trimUploads(why: string): Promise<void>;
 };
@@ -66,20 +66,12 @@ export async function makeUploads(deps: UploadsDeps): Promise<Uploads> {
     if (id) minted.add(id);
   }
 
-  async function ownedUploadPath(uploadId: string, sessionId?: string): Promise<string | null> {
+  async function ownedUploadPath(uploadId: string): Promise<string | null> {
     if (!UPLOAD_ID_RE.test(uploadId)) return null;
     /* Staging first (the common just-posted case), then the owning agent's own
-     * uploads dir (the blob index knows which agent's message adopted it).
-     *
-     * An id the index does not know, for a message addressed to a session,
-     * is also looked for in THAT session's own dir: adoption moves the file
-     * there before the message's row is written (deliver.ts), and the index is
-     * rebuilt from rows at boot, so a crash in between left a file at home
-     * that no row names yet. The re-drive of that message (intake.ts) finds it
-     * here and the ownership is recorded again. Never another agent's dir. */
+     * uploads dir (the blob index knows which agent's message adopted it). */
     const dirs = [dir];
-    const owner = deps.blobOwner().get(uploadId);
-    const aid = owner ?? (sessionId ? deps.agentIdFor(sessionId) : undefined);
+    const aid = deps.blobOwner().get(uploadId);
     if (aid) dirs.push(agentUploadsDir(aid) + "/");
     for (const d of dirs) {
       let matches: string[] = [];
@@ -92,10 +84,7 @@ export async function makeUploads(deps: UploadsDeps): Promise<Uploads> {
       const stored = `${d}${matches[0]}`;
       const rootReal = await rootOf(d);
       // resolveInRoot realpaths both sides and refuses anything outside the root.
-      if (await resolveInRoot(rootReal, matches[0])) {
-        if (!owner && aid && d !== dir) deps.blobOwner().set(uploadId, aid);
-        return stored;
-      }
+      if (await resolveInRoot(rootReal, matches[0])) return stored;
     }
     return null;
   }
@@ -103,12 +92,12 @@ export async function makeUploads(deps: UploadsDeps): Promise<Uploads> {
   /** Client attachment records with `path` rebound from this engine's store.
    *  A forge (id this engine never had) is dropped. An id we minted whose file
    *  is gone is `missing`, and the caller refuses the whole message. */
-  async function bindOwnedUploads(claimed: UploadRec[], cid?: string, sessionId?: string):
+  async function bindOwnedUploads(claimed: UploadRec[], cid?: string):
     Promise<{ ups: UploadRec[]; missing: string[] }> {
     const ups: UploadRec[] = [];
     const missing: string[] = [];
     for (const u of claimed) {
-      const path = await ownedUploadPath(u.uploadId, sessionId);
+      const path = await ownedUploadPath(u.uploadId);
       if (path) {
         ups.push({ ...u, path });
         continue;

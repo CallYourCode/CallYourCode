@@ -21,8 +21,8 @@ import { recordVoiceOp } from "./voicelog.ts";
 import { newCid } from "../../../shared/logbook.ts";
 import { realClock, type Clock } from "../runtime/clock.ts";
 import { stampTs, logChat, type ChatSession } from "../chat/chatlog.ts";
-import type { ReadStateSession } from "../sessions/readstate.ts";
-import { admitPartial, noteDecodeStart, noteDecodeResult, wordsOf, release, reopen,
+import { markReadOnUtterance, type ReadStateSession } from "../sessions/readstate.ts";
+import { admitPartial, noteDecodeStart, noteDecodeResult, wordsOf, release,
   setTranscriptRecordLog, type DecodeMode } from "./transcript-record.ts";
 import type { ChatMsg, UploadRec } from "../chat/chatmsg.ts";
 
@@ -45,32 +45,6 @@ export const WORDS_TOKEN_RE = /\{\{cyc-words:([0-9a-fA-F-]{8,64})\}\}/g;
  *  string from the same uploadId. */
 export function wordsToken(uploadId: string): string {
   return `{{cyc-words:${uploadId}}}`;
-}
-
-/* What a voice note says when nobody could read its recording: the words the
- * agent and the bubble get instead of an empty line. */
-export const NOTE_UNREAD = "(voice note: transcription failed)";
-
-/* A VOICE NOTE'S OWN WORDS, PUT WHERE THE COMPOSER LEFT THEM ("note-words").
- *
- * A note sent as a quoted reply, or with typed words beside it, carries text
- * of its own; the body is that text with ONE marker naming the frame's cid
- * where the recording's words belong (the reply quote above it, the caption
- * below). The send did not wait for the words: this engine reads the note's
- * clip, exactly as it does for an empty-bodied note, and the words go into
- * that marker. The agent reads one message, quote and words together, in the
- * same shape a send that waited for the device used to produce. */
-export function fillNoteWords(into: string, cid: string, words: string): string {
-  return into.split(wordsToken(cid)).join(words).trim();
-}
-
-/* What a note's pending row SHOWS while its words are read: the quote and the
- * caption, with nothing where the words will go (never the marker, which is
- * this engine's bookkeeping). Another device, or this one after a reload, sees
- * what the note answers and what was typed beside it from the first frame;
- * the completion replaces it with the whole text. */
-export function noteWithoutWords(into: string, cid: string): string {
-  return fillNoteWords(into, cid, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /* How long a held message may wait for its transcripts before it goes anyway.
@@ -112,11 +86,8 @@ export const STT_BUSY_BACKOFF_MAX_MS = Number(process.env.STT_BUSY_BACKOFF_MAX_M
  * read the whole clip. */
 export type SettledPartial = { text: string; upToS: number };
 
-/** What a pending note needs, to be shown now and completed later. `into` is
- *  the body the words fill (a note with a reply quote or a caption beside it,
- *  fillNoteWords); absent, the words ARE the body. */
-export type PendingNote = { cid: string; how: string; extra: Partial<ChatMsg>; msgId: string; takenAt: number;
-  into?: string; redriven?: boolean };
+/** What a pending note needs, to be shown now and completed later. */
+export type PendingNote = { cid: string; how: string; extra: Partial<ChatMsg>; msgId: string; takenAt: number };
 
 export type TranscribeDeps = {
   voiceUrl(): Promise<string>;
@@ -126,11 +97,9 @@ export type TranscribeDeps = {
   inOrder<T>(sessionId: string, f: () => Promise<T>): Promise<T>;
   /** injectUserMessage, for completing a pending note into its row */
   deliver(s: NoteSession, opts: { cid: string; how: string; text: string;
-    extra: Partial<ChatMsg>; completesTs: number; takenAt: number }): Promise<{ ok: boolean; why?: string; tell?: string }>;
+    extra: Partial<ChatMsg>; completesTs: number; takenAt: number }): Promise<{ ok: boolean; why?: string }>;
   sessionOf(id: string): NoteSession | undefined;
-  /** give up on a pending note: its row stops being pending and is marked
-   *  undelivered with the reason (deliver.ts failUndeliveredNote) */
-  failNote?(s: NoteSession, ts: number, tell: string): void;
+  restoredChats(): Map<string, ChatMsg[]>;
   /* EVERY DEADLINE IN THIS FILE COMES FROM HERE. Defaults to the real timers,
    * so production is what it always was; a test passes manualClock() and the
    * four budgets above become arithmetic. That matters more here than almost
@@ -308,9 +277,7 @@ export async function transcribeStored(msgId: string, cid?: string,
   const tailOnly = !!settled && fromS > 0;
   /* The streamed-words floor lives in the record now: admit it here and read it
    * back through wordsOf, rather than keeping `settled` as a second copy of the
-   * same rule. This is a new read of the clip (a retry reads it again after the
-   * last read released it), so it owns a fresh record from here to its release. */
-  reopen(msgId);
+   * same rule. */
   admitPartial(msgId, partial);
   const clip = audio.get(msgId) ?? (await audioFromDisk(msgId));
   if (!clip) {
@@ -403,14 +370,10 @@ export async function transcribeStored(msgId: string, cid?: string,
 export function showPendingVoiceNote(s: NoteSession, d: PendingNote, rescue: Promise<string>): void {
   const dd = D();
   const ts = stampTs(s);
-  /* The body the words go into is kept ON THE ROW, so a restart that loses the
-   * in-flight decode still completes the note with its quote and caption
-   * (redrivePendingNotes). The app reads frames field by field and never
-   * sees it; what it shows meanwhile is the quote and caption alone. */
-  const msg: ChatMsg = { id: s.id, role: "user", text: d.into ? noteWithoutWords(d.into, d.cid) : "",
-    ts, cid: d.cid, ...d.extra, transcriptPending: true, ...(d.into ? { wordsInto: d.into } : {}) };
-  drivingNotes.add(`${s.id}|${d.cid}`);
+  const msg: ChatMsg = { id: s.id, role: "user", text: "", ts, cid: d.cid,
+    ...d.extra, transcriptPending: true };
   logChat(s, msg);
+  markReadOnUtterance(s, ts); // his own message reads everything above it (#452)
   dd.broadcast({ t: "chat", ...msg });
   dd.log("utterance.shown-pending", { cid: d.cid, session: s.id, msgId: d.msgId, ts,
     why: "the note is long; shown now with the audio safe and the transcript pending, " +
@@ -425,83 +388,47 @@ export async function completePendingVoiceNote(s: NoteSession, ts: number, d: Pe
   const dd = D();
   let words = "";
   try { words = await rescue; } catch { words = ""; }
-  const said = words || NOTE_UNREAD;
-  const text = d.into ? fillNoteWords(d.into, d.cid, said) : said;
+  const text = words || "(voice note: transcription failed)";
   if (!words) {
     dd.log("rescue.failed-late", { cid: d.cid, session: s.id, msgId: d.msgId, ts,
       why: "the pending note's decode returned nothing; completing it with the placeholder" });
   }
   await dd.inOrder(s.id, async () => {
-    /* The session as it is NOW: the row object is rebuilt on every mux poll,
-     * and the one this decode started with may be a dead pane's by now. */
-    const live = dd.sessionOf(s.id) ?? s;
-    const res = await dd.deliver(live, { cid: d.cid, how: d.how, text,
+    const res = await dd.deliver(s, { cid: d.cid, how: d.how, text,
       extra: d.extra, completesTs: ts, takenAt: d.takenAt });
     if (res.ok) {
       dd.log("rescue.completed", { cid: d.cid, session: s.id, msgId: d.msgId, ts, chars: text.length });
-    } else if (d.redriven && dd.failNote) {
-      /* A drive after a restart that was refused: what is in the box is not
-       * known, so the note is not owed again on its own (a later drive could
-       * deliver it twice); the row says so on every device. */
-      dd.failNote(live, ts, res.tell ?? "it could not be delivered");
-      dd.log("rescue.complete-failed", { cid: d.cid, session: s.id, msgId: d.msgId, ts,
-        why: res.why ?? "the session refused the completion driven after a restart" });
     } else {
-      /* Not delivered: the audio and the pending bubble stand, and the note
-       * is owed again the next time this session comes up live (or the next
-       * boot). Taking it off the driving set is what lets that happen. */
-      drivingNotes.delete(`${s.id}|${d.cid}`);
       dd.log("rescue.complete-undelivered", { cid: d.cid, session: s.id, msgId: d.msgId, ts,
         why: res.why ?? "the session did not take the completed note; the audio and pending " +
-          "bubble stand and it is driven again when the session is next picked up live" });
+          "bubble stand and a restart re-drives it" });
     }
   });
 }
 
-/* The pending notes this process is completing, by session and cid: the one
- * guard that keeps a note from being decoded and delivered twice when its
- * session is picked up again while the first completion is still running. */
-const drivingNotes = new Set<string>();
-
-/** TEST ONLY: a fresh process's memory. */
-export function resetPendingForTest(): void {
-  drivingNotes.clear();
-}
-
-/* NOTES SHOWN WITH THEIR WORDS STILL PENDING, driven to the agent for a session
- * that has just come up live (#458, B1 of the reply-words verification).
- *
- * The row is the durable record: it persisted with the audio's msgId, the
- * cid and, for a quoted or captioned note, the body its words fill
- * (wordsInto). What did not survive a restart is the in-flight decode, so it
- * is run again here and the completion fills that same row, ONCE.
- *
- * Called from the session's pickup (reconcile's sessionLive), never from a
- * timer over restoredChats: that map is emptied for a session the moment its
- * pane reconciles, about a second into a boot, so a sweep over it ten seconds
- * in found nothing and a pending note was never delivered. Every pickup of a
- * live session asks; the driving set answers "already owed by this process". */
-export function redrivePendingNotes(s: NoteSession): number {
+/* Notes shown with a transcript still pending when the engine went down: the
+ * row persisted, the audio was always on disk; what did not survive is the
+ * in-flight decode. Re-drive it at the boot delay, once the mux has reported,
+ * so the session exists to deliver to. */
+export async function sweepPendingTranscripts(): Promise<void> {
   const dd = D();
   let redriven = 0;
-  for (const m of s.chat) {
-    if (m.role !== "user" || !m.transcriptPending || m.kind !== "voice" || typeof m.msgId !== "string") continue;
-    const cid = m.cid || newCid("m");
-    const key = `${s.id}|${cid}`;
-    if (drivingNotes.has(key)) continue;
-    drivingNotes.add(key);
-    dd.log("rescue.redrive", { cid, session: s.id, msgId: m.msgId, ts: m.ts,
-      why: "a note was shown with its words pending and its decode did not survive (an engine " +
-        "restart, or a delivery the session did not take); it is completed now its session is live" });
-    const extra: Partial<ChatMsg> = { kind: "voice", msgId: m.msgId,
-      ...(Number.isFinite(m.durationS) ? { durationS: m.durationS } : {}) };
-    void completePendingVoiceNote(s, m.ts, { cid, how: "VOICE", extra, msgId: m.msgId, takenAt: Date.now(),
-      redriven: true, ...(m.wordsInto ? { into: m.wordsInto } : {}) },
-      transcribeStored(m.msgId, cid));
-    redriven++;
+  for (const [id, msgs] of dd.restoredChats()) {
+    const s = dd.sessionOf(id);
+    if (!s) continue;
+    for (const m of msgs) {
+      if (m.role !== "user" || !m.transcriptPending || m.kind !== "voice" || typeof m.msgId !== "string") continue;
+      const cid = m.cid || newCid("m");
+      dd.log("rescue.redrive", { cid, session: id, msgId: m.msgId, ts: m.ts,
+        why: "a long note was shown with its transcript pending and the engine restarted before the decode landed" });
+      const extra: Partial<ChatMsg> = { kind: "voice", msgId: m.msgId,
+        ...(Number.isFinite(m.durationS) ? { durationS: m.durationS } : {}) };
+      void completePendingVoiceNote(s, m.ts, { cid, how: "VOICE", extra, msgId: m.msgId, takenAt: m.ts },
+        transcribeStored(m.msgId, cid));
+      redriven++;
+    }
   }
-  if (redriven) console.log(`[rescue] re-drove ${redriven} pending transcript(s) for ${s.id}`);
-  return redriven;
+  if (redriven) console.log(`[rescue] re-drove ${redriven} pending transcript(s) after restart`);
 }
 
 /** POST the clip (whole, or the tail past `offsetS`) to the voice engine. A busy

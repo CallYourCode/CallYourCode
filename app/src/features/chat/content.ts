@@ -27,9 +27,9 @@ export function reachOf(
     dedupeKey?: string;
   }
 ): CycReach {
-  if (m.status === 'failed') return 'failed';
   if (m.dedupeKey || m.status === 'delivered') return 'session';
   if (m.queued) return 'app';
+  if (m.status === 'failed') return 'failed';
   if (m.status === 'sending') return 'app';
   return 'engine';
 }

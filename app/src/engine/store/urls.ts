@@ -31,6 +31,6 @@ export function sessionFromNotifyKey(key: string): string | null {
   return null;
 }
 
-export function setVisible(on: boolean, why?: string) {
-  for (const c of conns) c.client.setVisible(on, why);
+export function setVisible(on: boolean) {
+  for (const c of conns) c.client.setVisible(on);
 }

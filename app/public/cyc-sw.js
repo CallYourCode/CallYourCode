@@ -21,8 +21,8 @@
 // updates: the served cyc-sw.js bytes change every build, so a browser's SW
 // update check finds the script byte-different, re-installs (new stamp cache) and
 // re-activates (drops old caches + clients.claim). In app/public it stays the
-// literal placeholder. cyc-precache.json's version drives the cache name, and
-// install checks that it is this build's (cycPrecacheInstall).
+// literal placeholder; nothing at runtime reads CYC_BUILD, it exists only to make
+// the bytes unique. cyc-precache.json's version still drives the cache name.
 const CYC_BUILD = '__CYC_BUILD__';
 
 const CYC_CACHE_PREFIX = 'cyc-precache-';
@@ -38,70 +38,10 @@ async function cycReadManifest() {
   return {version, assets};
 }
 
-// Fills THIS build's bucket, or throws. The manifest must name this worker's own
-// build: a deploy landing between the worker fetch and the manifest fetch would
-// otherwise fill another build's bucket under this worker. (Unbaked, in
-// app/public and the unit tests, CYC_BUILD is the placeholder and is not
-// checked.) The whole build is fetched before anything is stored, so a failed
-// fetch (a dead radio, a 503) leaves no bucket at all, and the shell is stored
-// LAST, so a bucket that holds index.html holds every file it names: the
-// invariant cycServeShell and the page's readiness gate rely on. A store that
-// fails part way (quota) drops the half-filled bucket.
-// Every fetch SETTLES before the install fails. Cache.addAll (and Promise.all)
-// reject at the first failure with the rest still loading, the failed install
-// discards this worker with its own loads in flight, and in WebKit that took
-// the network process down (Playwright WebKit, 2026-10-03: 16 crashes in 190
-// failing update installs that way, 0 in 90 with every fetch settled first).
-// A network process crash costs the page its worker connection and its sockets.
-// The fetched shell must be THIS build's too: a deploy landing between the
-// manifest fetch and the shell fetch hands back the next build's index.html,
-// which names chunks this bucket does not hold, and the next offline launch is
-// blank (verifier, 2026-10-04). Every asset the shell names must be in this
-// manifest (the entry chunk's name changes every build, so a shell of another
-// build always names one that is not); otherwise the install fails and the
-// next update check retries (fetching the newer worker anyway).
-function cycShellForeignAsset(html, assets) {
-  const own = new Set(assets.map((a) => new URL(a, self.location.origin).pathname.slice(1)));
-  for (const m of html.matchAll(/(?:src|href)="\.?\/?((?:assets\/[^"]+)|boot-watchdog\.js)"/g))
-    if (!own.has(m[1])) return m[1];
-  return '';
-}
-
 async function cycPrecacheInstall() {
   const {version, assets} = await cycReadManifest();
-  if (/^\d+$/.test(CYC_BUILD) && version !== CYC_BUILD)
-    throw new Error('cyc-precache: manifest ' + version + ' is not this worker ' + CYC_BUILD);
-  const settled = await Promise.allSettled(
-    assets.map(async (a) => {
-      const req = new Request(a, {cache: 'reload'});
-      const res = await fetch(req);
-      if (!res || !res.ok) throw new Error('cyc-precache: ' + a + ' ' + (res && res.status));
-      return {req, res};
-    })
-  );
-  const failed = settled.find((r) => r.status === 'rejected');
-  if (failed) throw failed.reason;
-  const got = settled.map((r) => r.value);
-  const isShell = (req) => {
-    const p = new URL(req.url, self.location.origin).pathname;
-    return p === '/' || p === '/index.html';
-  };
-  if (/^\d+$/.test(CYC_BUILD))
-    for (const {req, res} of got) {
-      if (!isShell(req)) continue;
-      const foreign = cycShellForeignAsset(await res.clone().text(), assets);
-      if (foreign)
-        throw new Error('cyc-precache: the fetched shell is another build (' + foreign + ')');
-    }
-  const name = CYC_CACHE_PREFIX + version;
-  const cache = await caches.open(name);
-  try {
-    for (const {req, res} of got) if (!isShell(req)) await cache.put(req, res);
-    for (const {req, res} of got) if (isShell(req)) await cache.put(req, res);
-  } catch (e) {
-    await caches.delete(name);
-    throw e;
-  }
+  const cache = await caches.open(CYC_CACHE_PREFIX + version);
+  await cache.addAll(assets.map((a) => new Request(a, {cache: 'reload'})));
 }
 
 // The precache cache names, sorted. Build stamps are 10-digit epoch seconds, so
@@ -116,62 +56,11 @@ async function cycPrecacheActivate() {
   await Promise.all(names.filter((n) => !keep.has(n)).map((n) => caches.delete(n)));
 }
 
-// THE routing table, one copy driving both the fetch handler (cycRouteRequest)
-// and the browser's Static Routing rules (CYC_ROUTES, Chromium). Rows are
-// [pathname, route, query]: pathname exact or a prefix ending '/*'; query, when
-// given, must appear in the search; the first match wins.
-//  - 'shell' / 'asset': answered from the precache. The boot watchdog is a
-//    non-hashed shell file precached next to index.html (scripts/build-cyc.sh);
-//    the shell is stored last, so any bucket holding the shell holds it too.
-//  - 'network': straight to the network without waking this worker. In
-//    Chromium a request reaching the old worker while it is stopped for a new
-//    build's activation restarts it and parks the new build in "waiting", and a
-//    navigation into a parked activation hangs blank (2026-10-03,
-//    sw-activation-race.spec.ts). So: the app's own API, log and stamp traffic
-//    (sent all the time), and the escape hatch: any URL carrying cyc-net=1,
-//    where a self-navigation goes when a new worker is still waiting a few
-//    seconds after being asked to take over (shared/selfReload.ts): it loads
-//    from the network, never touching the stuck old worker.
-// Anything NOT named here still reaches the fetch handler (so a path the handler
-// learns to serve later works without touching this table), as does every
-// cross-origin request (a urlPattern dict cannot name "another origin"); the
-// handler sends what it does not serve to the network untouched.
-const CYC_ROUTE_TABLE = [
-  ['/*', 'network', 'cyc-net='],
-  ['/', 'shell'],
-  ['/index.html', 'shell'],
-  ['/assets/*', 'asset'],
-  ['/boot-watchdog.js', 'asset'],
-  ['/build.txt', 'network'],
-  ['/cyc-precache.json', 'network'],
-  ['/clientlog', 'network'],
-  ['/config', 'network'],
-  ['/settings', 'network'],
-  ['/report', 'network'],
-  ['/push/*', 'network']
-];
-
-function cycTableRoute(pathname, search) {
-  for (const [path, route, query] of CYC_ROUTE_TABLE) {
-    const hit = path.endsWith('/*') ? pathname.startsWith(path.slice(0, -1)) : pathname === path;
-    if (hit && (!query || String(search || '').includes(query))) return route;
-  }
-  return '';
-}
-
-// Only the network rows: everything else falls to the browser's default, the
-// fetch event.
-const CYC_ROUTES = CYC_ROUTE_TABLE.filter(([, route]) => route === 'network').map(
-  ([path, , query]) => ({
-    condition: {urlPattern: query ? {pathname: path, search: '*' + query + '*'} : {pathname: path}},
-    source: 'network'
-  })
-);
-
-// What the fetch handler does with a request. Only a same-origin GET for a
-// shell or asset row is answered from the precache; everything else (API,
-// websockets, sealed push, uploads, transfers, cross-origin) is 'network':
-// no respondWith, straight through. When in doubt, 'network'.
+// Which requests this worker may answer from the precache. Pulled out so it can
+// be unit-tested without a Cache. Anything that is not a same-origin GET for the
+// app shell or a hashed assets/ file is 'network': API routes, websockets,
+// sealed push, uploads, transfers and every cross-origin request fall straight
+// through untouched. When in doubt, 'network'.
 function cycRouteRequest(req) {
   if (!req || req.method !== 'GET') return 'network';
   let url;
@@ -181,18 +70,24 @@ function cycRouteRequest(req) {
     return 'network';
   }
   if (url.origin !== self.location.origin) return 'network';
-  const route = cycTableRoute(url.pathname, url.search);
-  return route === 'shell' || route === 'asset' ? route : 'network';
+  const p = url.pathname;
+  if (p === '/' || p === '/index.html') return 'shell';
+  // The boot watchdog is a non-hashed shell file (precached by name alongside
+  // index.html; see scripts/build-cyc.sh). addAll is all-or-nothing, so any
+  // bucket that holds the shell holds this too, and cycServeAsset's cross-
+  // bucket match keeps it present on an offline boot exactly like a chunk.
+  if (p.startsWith('/assets/') || p === '/boot-watchdog.js') return 'asset';
+  return 'network';
 }
 
 async function cycServeShell(req) {
   // Newest bucket FIRST, but only a bucket that actually HOLDS the shell. A
-  // bucket name appears when install starts storing, before the shell is in it
-  // (and a worker from before 2026-10-03 left empty ones behind when its
-  // precache failed); serving the network's new index.html past such a bucket
-  // points the page at a hashed entry chunk that is not cached either, and with
-  // no network it paints nothing (the black screen). The shell is stored last,
-  // so a bucket that has index.html has every chunk that shell names. Falling back to the newest FULLY-cached shell
+  // bucket name appears the instant install calls caches.open, before addAll
+  // stores anything and even if addAll later fails/hangs; serving the network's
+  // new index.html from that empty bucket points the page at a hashed entry
+  // chunk that is not cached either, and with no network it paints nothing (the
+  // black screen). addAll is all-or-nothing, so a bucket that has index.html has
+  // every chunk that shell names. Falling back to the newest FULLY-cached shell
   // keeps the page booting (stale but alive) until the new bucket really fills;
   // the reload flow re-fires once it does. Only when no bucket holds the shell
   // do we go to the network.
@@ -210,176 +105,17 @@ async function cycServeAsset(req) {
   return hit || fetch(req);
 }
 
-// An UPDATE whose precache fails must fail its install. The active worker then
-// stays, serving its own complete build, and because the registered script is
-// still byte-different from it, the browser re-runs this install on the next
-// update check (every navigation, and the page's registration.update() on each
-// foreground while build.txt says it is behind). Swallowing the failure instead
-// let a worker take control holding nothing of its own build: the shell serve
-// kept answering from the previous build's bucket, and with this worker's bytes
-// never changing again no update check ever re-ran the install, so the client
-// stayed on the old build until the next deploy (iPhone, 2026-10-03).
-// The FIRST install (no active worker) still takes over without a precache: it
-// displaces nothing, the shell then comes from the network, and the push worker
-// must not wait on a flaky radio.
 self.addEventListener('install', (event) => {
-  // Best effort: a browser without the API (WebKit) or a rule it rejects
-  // leaves every request to the fetch handler, which routes it the same way
-  // (both read CYC_ROUTE_TABLE).
-  if (typeof event.addRoutes === 'function')
-    event.waitUntil(Promise.resolve(event.addRoutes(CYC_ROUTES)).catch(() => {}));
-  event.waitUntil(
-    cycPrecacheInstall().catch((e) => {
-      if (self.registration.active) throw e;
-    })
-  );
+  // A precache miss must never keep the push worker from taking over.
+  event.waitUntil(cycPrecacheInstall().catch(() => {}));
   self.skipWaiting();
-});
-
-// A page that finds this worker installed but still WAITING asks it to take
-// over again. Chromium can park a skip-waiting worker: the old worker is
-// stopped to make way, a request then restarts it, and the activation is not
-// retried until the old worker idles (30 s with no events, 5 min at most). A
-// second skipWaiting() retries it. The page also holds its own navigations a
-// few seconds while a worker waits (shared/selfReload.ts navigateSelf): a
-// navigation that triggers the parked activation is dispatched to the old
-// worker as it is stopped, and never completes (the hung reload).
-self.addEventListener('message', (event) => {
-  // On a worker that is already active this is a no-op.
-  if (event.data && event.data.t === 'skip-waiting') self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(cycPrecacheActivate().then(() => self.clients.claim()));
 });
 
-// --- Streamed downloads (download-lane, 2026-10-03) --------------------------
-// A shown file the page pulls over the sealed tunnel, part by part, is handed
-// to the BROWSER's own download manager through this worker, so one tap saves
-// it straight to disk with the browser's own progress (laptop, Android) and
-// nothing is held whole in memory. The page opens a download here with a
-// MessagePort (cyc-dl-open), then points a hidden frame at /__cyc_dl/<id>/...;
-// this worker answers that request with an attachment whose body is a stream
-// the page feeds through the port: a 'pull' asks the page for the next part,
-// 'chunk' enqueues it, 'end' closes, 'abort' fails it. A cancel in the
-// browser's download UI tells the page to stop. Only an id the page opened is
-// answered, once; anything else under the prefix is a 404, never the network
-// (the app server would answer it with the shell).
-const CYC_DL_PREFIX = '/__cyc_dl/';
-const cycDownloads = new Map();
-
-// A stream whose page has said nothing (no part, no keepalive) for this long
-// lost its page (closed, crashed): fail it, so the browser never shows a
-// download in progress that nothing will finish.
-const CYC_DL_QUIET_MS = 45000;
-
-function cycDlOpen(d, port) {
-  const id = String(d.id || '');
-  if (!id) return;
-  let ctrl = null;
-  let over = false;
-  let heard = Date.now();
-  const watchdog = setInterval(() => {
-    if (over) return clearInterval(watchdog);
-    if (Date.now() - heard < CYC_DL_QUIET_MS) return;
-    over = true;
-    clearInterval(watchdog);
-    cycDownloads.delete(id);
-    try {
-      ctrl.error(new Error('the page feeding this download went away'));
-    } catch {
-      // the browser already dropped the stream
-    }
-  }, 5000);
-  const stream = new ReadableStream(
-    {
-      start(c) {
-        ctrl = c;
-      },
-      pull() {
-        port.postMessage({t: 'pull'});
-      },
-      cancel() {
-        over = true;
-        cycDownloads.delete(id);
-        port.postMessage({t: 'cancel'});
-      }
-    },
-    new CountQueuingStrategy({highWaterMark: Math.max(1, Number(d.credits) || 4)})
-  );
-  port.onmessage = (ev) => {
-    const m = ev.data || {};
-    heard = Date.now();
-    if (over) return;
-    try {
-      if (m.t === 'chunk') ctrl.enqueue(new Uint8Array(m.bytes));
-      else if (m.t === 'end') {
-        over = true;
-        cycDownloads.delete(id);
-        ctrl.close();
-      } else if (m.t === 'abort') {
-        over = true;
-        cycDownloads.delete(id);
-        ctrl.error(new Error(String(m.reason || 'download aborted')));
-      }
-    } catch {
-      // the browser already dropped the stream
-    }
-  };
-  cycDownloads.set(id, {
-    stream,
-    port,
-    name: String(d.name || 'download'),
-    size: Number(d.size) || 0,
-    served: false
-  });
-  port.postMessage({t: 'ready'});
-}
-
-function cycDlDisposition(name) {
-  const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\\r\n]/g, '_');
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
-}
-
-function cycServeDownload(req) {
-  const rest = new URL(req.url).pathname.slice(CYC_DL_PREFIX.length);
-  const id = rest.split('/')[0];
-  const dl = cycDownloads.get(id);
-  if (!dl || dl.served) return new Response('no such download', {status: 404});
-  dl.served = true;
-  dl.port.postMessage({t: 'started'});
-  const headers = {
-    'content-type': 'application/octet-stream',
-    'content-disposition': cycDlDisposition(dl.name),
-    'x-content-type-options': 'nosniff',
-    'cache-control': 'no-store'
-  };
-  if (dl.size > 0) headers['content-length'] = String(dl.size);
-  return new Response(dl.stream, {headers});
-}
-
-function cycIsDownload(req) {
-  try {
-    const url = new URL(req.url);
-    return (
-      req.method === 'GET' &&
-      url.origin === self.location.origin &&
-      url.pathname.startsWith(CYC_DL_PREFIX)
-    );
-  } catch {
-    return false;
-  }
-}
-
-self.addEventListener('message', (event) => {
-  const d = event.data;
-  // cyc-dl-keepalive needs no answer: the message itself keeps this worker up
-  // while the page feeds a download.
-  if (d && d.t === 'cyc-dl-open' && event.ports && event.ports[0]) cycDlOpen(d, event.ports[0]);
-});
-
 self.addEventListener('fetch', (event) => {
-  if (cycIsDownload(event.request)) return event.respondWith(cycServeDownload(event.request));
   const route = cycRouteRequest(event.request);
   if (route === 'network') return; // untouched: no respondWith, straight to network
   if (route === 'shell') return event.respondWith(cycServeShell(event.request));
@@ -977,9 +713,6 @@ self.CYC_BUILD = CYC_BUILD;
 self.cycRouteRequest = cycRouteRequest;
 self.cycReadManifest = cycReadManifest;
 self.cycPrecacheInstall = cycPrecacheInstall;
-self.cycShellForeignAsset = cycShellForeignAsset;
 self.cycPrecacheActivate = cycPrecacheActivate;
 self.cycServeShell = cycServeShell;
 self.cycServeAsset = cycServeAsset;
-self.CYC_ROUTES = CYC_ROUTES;
-self.CYC_ROUTE_TABLE = CYC_ROUTE_TABLE;

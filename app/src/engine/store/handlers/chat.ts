@@ -43,8 +43,6 @@ export function wireChat(conn: Conn, ctx: HandlerCtx): void {
     if (a.pointer !== undefined) s.pointer = a.pointer;
     if (a.pointerPage !== undefined) s.pointerPage = a.pointerPage;
     if (a.tailPage !== undefined) s.tailPage = a.tailPage;
-    // the log's axis epoch as the engine states it now (rows/repl.ts)
-    if (a.axis) s.axis = a.axis;
 
     // The delta's pages and its tail bookkeeping go to the replicator, the ONE
     // consumer of the wire: it appends the rows to the store (which repaints the
@@ -69,8 +67,7 @@ export function wireChat(conn: Conn, ctx: HandlerCtx): void {
       pointerPage: a.pointerPage,
       pages: a.pages ?? [],
       deltaBase: a.deltaBase,
-      fp: a.fp,
-      axis: a.axis
+      fp: a.fp
     }).then(() => {
       const st = sessions.get(s.id);
       if (!st) return;
@@ -189,7 +186,6 @@ export function wireChat(conn: Conn, ctx: HandlerCtx): void {
     if (m.wordsFailed) msg.wordsFailed = true;
 
     if (m.transcriptPending) msg.transcriptPending = true;
-    if (m.undelivered) msg.undelivered = m.undelivered;
 
     if (m.scheduled) msg.scheduled = m.scheduled;
     if (m.role === 'user') {

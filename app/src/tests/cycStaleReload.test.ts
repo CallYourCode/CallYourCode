@@ -5,9 +5,6 @@ import {
   newestBucketDeliversTarget,
   parseServedStamp,
   READY_POLL_TRIES,
-  RELOAD_CEILING_MS,
-  RELOAD_PATIENCE_MS,
-  reloadHold,
   staleTargetFor,
   type StaleReloadDeps
 } from '@/staleReload';
@@ -78,7 +75,6 @@ type Rig = {
     }>
   ) => void;
   reloadTargets: string[];
-  logs: [string, Record<string, unknown>][];
   controller: ReturnType<typeof createStaleReloadController>;
 };
 
@@ -110,7 +106,6 @@ function makeRig(init: {
     nudges: 0,
     mark,
     reloadTargets: [],
-    logs: [],
     scheduled: [],
     runScheduled: () => {
       const fns = rig.scheduled.splice(0);
@@ -136,8 +131,7 @@ function makeRig(init: {
       reload: (target) => {
         rig.reloads += 1;
         rig.reloadTargets.push(target);
-      },
-      log: (event, fields) => rig.logs.push([event, fields])
+      }
     },
     controller: undefined as unknown as ReturnType<typeof createStaleReloadController>
   };
@@ -254,19 +248,6 @@ describe('check, controlled page (cache-first shell)', () => {
     await settle();
     expect(rig.nudges).toBe(2);
     expect(rig.scheduled.length).toBe(1);
-  });
-
-  test('an edge during a poll still nudges the worker (a failed install retries)', async () => {
-    const rig = makeRig({controlled: true, names: [CACHE_PREFIX + '100']});
-    await rig.controller.check();
-    await settle();
-    expect(rig.nudges).toBe(1);
-    expect(rig.scheduled.length, 'the readiness poll is running').toBe(1);
-    await rig.controller.check();
-    await settle();
-    expect(rig.nudges, 'the second foreground did not ask for an update').toBe(2);
-    expect(rig.scheduled.length, 'a second poll was started').toBe(1);
-    expect(rig.logs.filter(([e]) => e === 'build.behind').length).toBe(1);
   });
 
   test('the mark also bounds the controlled path to one reload per stamp', async () => {
@@ -415,71 +396,5 @@ describe('onControllerChange (a new worker activated under the page)', () => {
     rig.controller.onControllerChange();
     await settle();
     expect(rig.reloads).toBe(1);
-  });
-});
-
-// The stuck iPhone (2026-10-03) logged boots of the old build and nothing else:
-// whether the page knew it was behind, and whether the new build ever became
-// loadable, could only be inferred. Every stale sighting now names itself.
-describe('diagnostics: a page behind the server says so', () => {
-  test('a stale check logs build.behind with both stamps; a fresh one logs nothing', async () => {
-    const rig = makeRig({controlled: true, names: [CACHE_PREFIX + '100']});
-    await rig.controller.check();
-    await settle();
-    expect(rig.logs[0]).toEqual(['build.behind', {own: '100', served: '200', controlled: true}]);
-
-    const fresh = makeRig({own: '200', controlled: true});
-    await fresh.controller.check();
-    await settle();
-    expect(fresh.logs).toEqual([]);
-  });
-
-  test('a sighting whose new build never becomes loadable logs build.not-ready', async () => {
-    const rig = makeRig({controlled: true, names: [CACHE_PREFIX + '100']});
-    await rig.controller.check();
-    await settle();
-    for (let i = 0; i < READY_POLL_TRIES + 5; i++) {
-      rig.runScheduled();
-      await settle();
-    }
-    expect(rig.logs.map(([e]) => e)).toEqual(['build.behind', 'build.not-ready']);
-    expect(rig.logs[1][1]).toMatchObject({target: '200'});
-  });
-
-  test('a controllerchange that cannot land the target logs build.not-ready', async () => {
-    const rig = makeRig({
-      controlled: true,
-      names: [CACHE_PREFIX + '100', CACHE_PREFIX + '200'],
-      shellCached: false
-    });
-    rig.controller.onControllerChange();
-    await settle();
-    expect(rig.reloads).toBe(0);
-    expect(rig.logs).toEqual([['build.not-ready', {target: '200', via: 'controllerchange'}]]);
-  });
-});
-
-describe('reloadHold: what holds an update reload back', () => {
-  const none = {recording: false, vault: false, unsent: false, draft: false, audio: false};
-  test('nothing held: go', () => {
-    expect(reloadHold(none, 0, false)).toBe('');
-  });
-  test('a draft holds the reload for as long as the app is in front: never mid-typing', () => {
-    expect(reloadHold({...none, draft: true}, 0, false)).toBe('draft');
-    expect(reloadHold({...none, draft: true}, RELOAD_PATIENCE_MS + 1, false)).toBe('draft');
-    expect(reloadHold({...none, draft: true}, RELOAD_CEILING_MS * 10, false)).toBe('draft');
-  });
-  test('a draft stops holding the moment the app goes to the background', () => {
-    expect(reloadHold({...none, draft: true}, 0, true)).toBe('');
-  });
-  test('a recording holds even in the background; durable holds up to the ceiling', () => {
-    expect(reloadHold({...none, recording: true}, RELOAD_CEILING_MS * 10, true)).toBe('recording');
-    expect(reloadHold({...none, vault: true}, RELOAD_CEILING_MS - 1, true)).toBe('vault');
-    expect(reloadHold({...none, vault: true}, RELOAD_CEILING_MS, true)).toBe('');
-    expect(reloadHold({...none, unsent: true}, 1000, false)).toBe('unsent');
-  });
-  test('a playing clip gets the patience window', () => {
-    expect(reloadHold({...none, audio: true}, RELOAD_PATIENCE_MS - 1, false)).toBe('audio');
-    expect(reloadHold({...none, audio: true}, RELOAD_PATIENCE_MS, false)).toBe('');
   });
 });

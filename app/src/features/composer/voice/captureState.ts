@@ -67,7 +67,7 @@ export interface VoiceCaptureDeps {
     setLivePartial(text: string, committed?: number): void;
     setLevel(db: number): void;
   };
-  releaseMicIfIdle(): void;
+  releaseMicIfIdle(grace?: boolean): void;
   scrollToBottom(): void;
   updateVoiceStrip(): void;
   putBlocksBack(sessionId: string, add: ComposerBlock[]): void;

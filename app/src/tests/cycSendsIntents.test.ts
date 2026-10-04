@@ -127,8 +127,9 @@ describe('sends as intents', () => {
     expect(quoteForWire('a\n\nb')).toBe('> a\n>\n> b');
   });
 
-  const readerFor = () =>
-    createReaderLanding({
+  test('sending sights the sent row so the divider never strands above it', () => {
+    s.heardTs = 10;
+    const reader = createReaderLanding({
       deps: {
         heardTsOf: (session) => effectiveMarkerOf(session as CycEngineSession)?.ts ?? 0,
         readMarkerOf: (session) => effectiveMarkerOf(session as CycEngineSession),
@@ -143,19 +144,17 @@ describe('sends as intents', () => {
       setOpenMarker: () => {}
     });
 
-  test('sending reads nothing: no marker moves and no heard intent (M2)', () => {
-    s.heardTs = 10;
-    const before = effectiveMarkerOf(s);
     sendText(s.id, 'hello there', {ts: 20});
+
+    // No local marker moved and no heard intent competes with the send: the
+    // press-time optimism is an in-memory overlay, and the divider resolves to
+    // the sent row through it. The durable sighting rides delivery (admit.ts).
     expect(intents.all().some((i) => i.kind === 'heard')).toBe(false);
-    expect(effectiveMarkerOf(s)).toEqual(before);
-    // and with nothing unread the divider has nothing to land on, his row least
-    expect(readerFor().firstUnheardId(s)).toBeUndefined();
+    expect(effectiveMarkerOf(s)?.ts).toBe(20);
+    expect(reader.firstUnheardId(s)).toBeUndefined();
   });
 
-  test('sending does NOT read an unseen remote row above it (M2)', () => {
-    // A hands-free send from a locked phone used to read every reply above it
-    // on every device. The reply is still unread; the divider sits on it.
+  test('sending reads through a remote row that arrived before the sent row', () => {
     s.heardTs = 10;
     s.messages.push({
       id: 'm1',
@@ -164,12 +163,25 @@ describe('sends as intents', () => {
       text: 'unseen',
       ts: 19
     } as CycEngineMessage);
-    s.unread = 1;
+    const reader = createReaderLanding({
+      deps: {
+        heardTsOf: (session) => effectiveMarkerOf(session as CycEngineSession)?.ts ?? 0,
+        readMarkerOf: (session) => effectiveMarkerOf(session as CycEngineSession),
+        play: () => {},
+        suppressAutoSpeak: () => false,
+        isChatViewOpen: () => true
+      },
+      messages: document.createElement('div'),
+      scroll: document.createElement('div'),
+      silentScrollTo: () => {},
+      openMarker: () => undefined,
+      setOpenMarker: () => {}
+    });
 
     sendText(s.id, 'hello there', {ts: 20});
 
-    expect(effectiveMarkerOf(s)?.ts ?? 0).toBeLessThan(19);
-    expect(readerFor().firstUnheardId(s)).toBe('m1');
+    expect(effectiveMarkerOf(s)?.ts).toBe(20);
+    expect(reader.firstUnheardId(s)).toBeUndefined();
   });
 
   test('offline: the bubble and the queued intent exist, nothing on the wire, no ack timer', () => {

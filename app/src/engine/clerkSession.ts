@@ -1,5 +1,3 @@
-import {navigateSelf} from '@/shared/selfReload';
-
 type ClerkSession = {getToken(): Promise<string | null>};
 type ClerkJS = {
   load(opts?: Record<string, unknown>): Promise<unknown>;
@@ -103,10 +101,7 @@ async function loadClerk(): Promise<ClerkJS | null> {
     // the running auto-load.
     if (!window.Clerk) {
       try {
-        await loadScript(
-          `${api}/npm/@clerk/clerk-js@${CLERK_JS_VERSION}/dist/clerk.browser.js`,
-          publishableKey
-        );
+        await loadScript(`${api}/npm/@clerk/clerk-js@${CLERK_JS_VERSION}/dist/clerk.browser.js`, publishableKey);
       } catch {
         // The script tag may still have constructed window.Clerk via the
         // data-attribute auto-load before the onerror fired; fall through and let
@@ -169,8 +164,7 @@ export async function clerkSignOut(): Promise<void> {
   try {
     await clerk?.signOut?.({});
   } catch {}
-  // Through the self-navigation gate; no composer hold.
-  navigateSelf({why: 'sign-out', notice: 'Signing out…', to: () => '/'});
+  location.replace('/');
 }
 
 // Redirect to Clerk's HOSTED sign-in. Clerk owns the whole flow on

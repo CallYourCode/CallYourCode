@@ -11,7 +11,6 @@ import type {ParkedClip} from '../../audio/clipVault';
 import {findLocal, notifyNow, sessions} from './registry';
 import {stampRowId} from './rows/core';
 import {discardSend, findByCid, quoteForWire, writeAndArm} from './sends';
-import {wordsMarker} from './attachSend';
 
 // The honest voice-note send, over the resumable transfer queue (Lane A).
 //
@@ -140,12 +139,6 @@ export type VoiceClipOpts = {
   // its committed cut), painted on the sent row at once and grown by the
   // capture's later partial events; the wire body stays `text`.
   display?: {text: string; committed: number};
-  // The body this note's words go into, for an engine that can 'note-words':
-  // the caption (and any other text composed beside the recording) with
-  // wordsMarker(cid) where the words belong. `cid` must be given and `text` is
-  // empty: the engine reads the clip into the marker, under the reply quote
-  // the wire adds, so nothing waits for the device's decoder.
-  into?: string;
 };
 
 // Send a recorded voice note. Returns the local message id (or '' if there is no
@@ -167,13 +160,7 @@ export function sendVoiceClip(sessionId: string, blob: Blob, opts: VoiceClipOpts
 
   const clean = (opts.text ?? '').trim();
   const excerpt = (opts.replyTo?.text ?? '').trim();
-  // A note with something beside its words is written around the marker the
-  // engine fills: the reply quote goes on top exactly as for a bodied note, so
-  // the agent reads the same message a send that waited for the words made.
-  const marker = opts.into ? wordsMarker(cid) : '';
-  const body = opts.into?.includes(marker) ? opts.into.trim() : clean;
-  const words = body !== clean ? [cid] : undefined;
-  const wire = body && excerpt ? quoteForWire(excerpt) + '\n\n' + body : body;
+  const wire = clean && excerpt ? quoteForWire(excerpt) + '\n\n' + clean : clean;
 
   const msg: CycEngineMessage = stampRowId({
     id: '',
@@ -195,14 +182,6 @@ export function sendVoiceClip(sessionId: string, blob: Blob, opts: VoiceClipOpts
   if (!clean && opts.display) {
     msg.text = opts.display.text;
     msg.draftCommitted = Math.max(0, Math.min(opts.display.committed, opts.display.text.length));
-    // The caption shows around the growing words from the first frame; the
-    // reply quote is the bubble's reply panel, as on any reply.
-    if (words) {
-      const at = body.indexOf(marker);
-      msg.wordsAround = {before: body.slice(0, at), after: body.slice(at + marker.length)};
-      msg.text = msg.wordsAround.before + msg.text + msg.wordsAround.after;
-      msg.draftCommitted += msg.wordsAround.before.length;
-    }
   }
   s.messages.push(msg);
   s.thinking = true;
@@ -241,7 +220,6 @@ export function sendVoiceClip(sessionId: string, blob: Blob, opts: VoiceClipOpts
         durationS: opts.durationS,
         replyTo: opts.replyTo,
         wire,
-        ...(words ? {words} : {}),
         clipKey: cid,
         transferKey: cid,
         // The device's settled streaming words, named by the frame's cid (a
@@ -363,37 +341,6 @@ export function retryVoiceClip(sessionId: string, localId: string): boolean {
         drain.requeue(key);
         return;
       }
-      // The engine took it (its ack named the clip, msgId) and then gave up on
-      // delivering it: the intent went with the ack, the clip is on the engine.
-      // The retry is the same wire again, rebuilt from the bubble, same cid.
-      const s = sessions.get(sessionId);
-      if (!intent && cur.msgId && s) {
-        const wire = cur.wireText ?? (cur.draftCommitted !== undefined ? '' : cur.text);
-        cyclog('voiceclip.retry.taken', {cid: key, session: sessionId, localId, msgId: cur.msgId});
-        delete cur.failReason;
-        notifyNow();
-        intents.put({
-          id: key,
-          engineKey: s.engineKey,
-          sessionId,
-          kind: 'send-text',
-          localId,
-          payload: {
-            cid: key,
-            sessionId,
-            ts: cur.ts,
-            text: cur.text,
-            kind: 'voice',
-            durationS: cur.durationS,
-            msgId: cur.msgId,
-            replyTo: cur.replyTo,
-            wire,
-            ...(wire.includes(wordsMarker(key)) ? {words: [key]} : {})
-          }
-        });
-        drain.kick(s.engineKey);
-        return;
-      }
       cyclog('voiceclip.retry.no-bytes', {
         cid: key,
         session: sessionId,
@@ -429,7 +376,6 @@ export function retryVoiceClip(sessionId: string, localId: string): boolean {
       durationS: cur.durationS,
       replyTo: cur.replyTo,
       wire: payload?.wire ?? cur.wireText ?? cur.text,
-      ...(payload?.words?.length ? {words: payload.words} : {}),
       ...(payload?.partials?.length ? {partials: payload.partials} : {}),
       clipKey: key,
       transferKey: key

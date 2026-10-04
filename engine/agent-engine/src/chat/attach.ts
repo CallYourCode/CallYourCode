@@ -48,9 +48,6 @@ export type AttachDeps = {
   broadcastSessions(): void;
   scheduleHeardSave(sessionId: string): void;
   log(event: string, fields: Record<string, unknown>): void;
-  /** The chat log's axis epoch (session-state.ts axisOf); absent in a wiring
-   *  that has none, which then states no epoch at all. */
-  axisOf?(sessionId: string): string | undefined;
 };
 
 let deps: AttachDeps | null = null;
@@ -206,20 +203,7 @@ export function onAttach(ws: Sock, m: any) {
       client: `c${ws.data.cid}`, session: id, frontier: F0, tailVersion, tail, total,
     });
   }
-  /* THE AXIS EPOCH (fix-log-epoch): the device names the epoch its rows were
-   * served under. Another epoch means the log was re-sequenced since (a carry
-   * absorb, a trim): every seq the device holds, its frontier included, is on
-   * an axis that no longer exists, so it attaches cold however plausible its
-   * frontier looks. The held-tail-above-axis test above catches only a device
-   * whose old axis was longer; a new axis that grew past the old one passed it
-   * and the engine served a delta onto the dead axis. */
-  const axis = d.axisOf?.(id);
-  const deviceAxis = typeof m.axis === "string" && m.axis ? m.axis : undefined;
-  const epochMismatch = axis !== undefined && deviceAxis !== undefined && deviceAxis !== axis;
-  if (epochMismatch) {
-    d.log("attach.axis-epoch", { client: `c${ws.data.cid}`, session: id, frontier: F0, held: deviceAxis, axis });
-  }
-  const F = axisMismatch || epochMismatch ? -1 : F0;
+  const F = axisMismatch ? -1 : F0;
   /* LEGACY (deprecated): an un-reloaded device bundle still sends `have`
    * {tailPage, tailVersion}. Match still skips, as before. New app sends
    * `frontier` and never `have`. This is THIS ROLLOUT'S bridge for
@@ -280,7 +264,6 @@ export function onAttach(ws: Sock, m: any) {
     tailVersion, frontier: F0 ?? undefined, deltaBase,
     have: have !== null || undefined, pagesSkipped: pagesSkipped || undefined,
     legacyHave: legacyHave || undefined, axisMismatch: axisMismatch || undefined,
-    epochMismatch: epochMismatch || undefined,
     verifyFrom: verifyFrom ?? undefined, fpPages: fp ? fp.n.length : undefined });
   /* THE QUEUED TRUTH RIDES ON EVERY ATTACH. A dequeue is a patch: it changes
    * a row without changing any seq, so the have/tailVersion check cannot see
@@ -291,8 +274,7 @@ export function onAttach(ws: Sock, m: any) {
   const queued = s.chat.filter((m) => m.role === "user" && m.queued).map((m) => m.ts);
   d.send(ws, { t: "attach-ok", id: s.id, known: true,
     pointer, pointerPage: ptrPage, tailPage: tail, tailVersion, pageSize: PAGE_SIZE, total, pages, queued,
-    ...(deltaBase !== undefined ? { deltaBase } : {}), ...(fp ? { fp } : {}),
-    ...(axis !== undefined ? { axis } : {}) });
+    ...(deltaBase !== undefined ? { deltaBase } : {}), ...(fp ? { fp } : {}) });
   const wasUnseen = s.seenDoneSeq < s.doneSeq;
   s.seenDoneSeq = s.doneSeq; // opening the chat clears the ACTIVITY dot only
   if (wasUnseen) { d.scheduleHeardSave(s.id); d.broadcastSessions(); }
@@ -320,7 +302,6 @@ export function onProgress(m: any) {
 export function setHeardBack(s: AttachSession, ts: number): boolean {
   if (ts >= s.heardTs) return false;
   s.heardTs = ts;
-  if ((s.spokenTs ?? 0) > ts) s.spokenTs = ts; // moved back on purpose: speak it again
   let lastClaude = 0;
   for (let i = s.chat.length - 1; i >= 0; i--) {
     if (s.chat[i].role === "claude") { lastClaude = s.chat[i].ts; break; }

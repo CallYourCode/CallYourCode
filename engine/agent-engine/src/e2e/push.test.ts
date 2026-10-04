@@ -286,35 +286,3 @@ test("a long reply is bounded inside enc, and a window the app server refuses is
   expect(e.sink.hits.some((h) => h.sessionId && h.at >= at2),
     "the re-queued banner never arrived: a capped 200 was treated as delivered").toBe(true);
 }, 90_000);
-
-/* THE OWNER, 2026-10-03, on a booted engine: "I had the phone app open, sent a
- * text, and got a notification for the reply." The phone said hidden for a
- * moment, the reply landed in that gap and was queued (correctly: "all say
- * backgrounded"), then the phone came back to that very chat before the window
- * closed, and the window sent the banner anyway. The visible frame now takes
- * the queued banner back, so the window carries nothing for that chat. */
-test.skipIf(!hasE2ETransport)("a phone back on the chat before the window closes gets no banner for the reply it is looking at", async () => {
-  /* CYC_MUX=herdr: the harness's terminal is a fake herdr, and the engine's
-   * default mux is tmux now, so without it the pane never becomes a session. */
-  engine = await startEngine({ env: { CYC_MUX: "herdr" } });
-  const e = engine;
-  const session = await e.session();
-  const phone = await e.client();
-
-  // a whole window ahead of the reply, so the frame can beat the boundary
-  await Bun.sleep(WINDOW - (Date.now() % WINDOW) + 100);
-  phone.background();
-  await Bun.sleep(150);
-  const at = reply(session, "the reply that landed while the phone was hidden");
-  await until(() => e.since(at).some((l) => l.includes("[notify] send")), 4_000, "the send decision");
-  expect(e.since(at).find((l) => l.includes("[notify] send"))).toContain("all say backgrounded");
-
-  phone.say({ t: "visible", on: true, why: "visibilitychange" });
-  const dropped = await until(() => e.since(at).find((l) => l.includes("[notify] dropped")), 4_000,
-    "the visible frame to take the queued banner back");
-  expect(dropped).toContain("said visible on this chat");
-  expect(e.since(at).some((l) => l.includes("[presence]") && l.includes("visible (frame visible on=true why=visibilitychange"))).toBe(true);
-
-  await Bun.sleep(WINDOW * 2);
-  expect(pushed(e, at), "the window sent a banner for a reply on screen").toHaveLength(0);
-}, 90_000);

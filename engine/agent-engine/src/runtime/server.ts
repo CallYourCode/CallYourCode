@@ -61,11 +61,9 @@ import { initShowHandler, deliverShow, type ShowSession } from "../chat/show-han
 import { sessions, sessionByHandle, resolveSession, loadSessionState, sessionStateReady, agentMetas,
   blobOwner, restoredChats, restoredLogs, chatStore, indexMsgBlobs, agentIdFor, chatRefFor, persistPatch, metaFor,
   scheduleAgentSave, scheduleHeardSave, nameOverrideOf, voiceOverrideOf, setVoiceOverride, adoptAgentId,
-  globalVoice, setDefaultVoice, voiceFor, docDirFor, axisOf, type Session } from "../sessions/session-state.ts";
+  globalVoice, setDefaultVoice, voiceFor, docDirFor, type Session } from "../sessions/session-state.ts";
 import { initPaneDeliver, onPaneKeyboard, deliverToPane } from "../chat/pane-deliver.ts";
-import { initDeliver, inOrder, injectUserMessage, deliverToAgent, redriveTaken, drainDeliveries,
-  failUndeliveredNote,
-  failOrphanedTaken } from "../chat/deliver.ts";
+import { initDeliver, inOrder, injectUserMessage, deliverToAgent } from "../chat/deliver.ts";
 import { initReply, deliverReply } from "../chat/reply.ts";
 import { initNotify, notifyUnlessWatched, notifyDevices, notifyEngineDevices, sendDismissal, flushUnread } from "../chat/notify.ts";
 import { initPresence } from "../sessions/presence.ts";
@@ -93,7 +91,7 @@ import { runBackfillSweep, resolveBackfillSources, type MetaLike } from "../chat
 import { initLineage, lineageOf } from "../sessions/lineage.ts";
 import { initAttach } from "../chat/attach.ts";
 import { voiceUrl, VOICE_URLS, listHostVoices } from "../voice/voice-proxy.ts";
-import { initTranscribe, redrivePendingNotes } from "../voice/transcribe.ts";
+import { initTranscribe, sweepPendingTranscripts } from "../voice/transcribe.ts";
 
 import { homedir, userInfo, hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -158,26 +156,15 @@ process.on("unhandledRejection", (reason: unknown) => {
  * is safe) and then exit with the signal's conventional 128+n code. Tiny and
  * synchronous on purpose: no async ceremony that could hang the shutdown. The
  * diagnostic uncaughtException/unhandledRejection handlers above are unchanged. */
-/* AND THE DELIVERIES IN FLIGHT FINISH FIRST (deliver.ts drainDeliveries): a
- * restart between a message's first keystroke and its row delivered it twice.
- * Bounded at 10 s; a second signal exits at once. */
-let stopping = false;
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, () => {
-    const code = sig === "SIGINT" ? 130 : 143;
-    if (stopping) process.exit(code);
-    stopping = true;
     try {
       const n = killAllTrackedBridgesSync();
       if (n > 0) console.log(`[terminal] killed ${n} bridge(s) on ${sig}`);
     } catch {
       // best-effort: a failure here must never stop the process from exiting
     }
-    void drainDeliveries(10_000).catch(() => 0).then(async (left) => {
-      LOG.line("shutdown.drained", { signal: sig, stillTyping: left });
-      await LOG.flush().catch(() => {});
-      process.exit(code);
-    });
+    process.exit(sig === "SIGINT" ? 130 : 143);
   });
 }
 
@@ -576,16 +563,15 @@ initPaneDeliver({
 });
 const CLAUDE_COMMAND = adapter.launchCommand("claude")!;
 
-/* A message taken for a session that never comes back live is never driven by
- * a pickup; ten minutes after boot it is failed visibly (deliver.ts). */
-setTimeout(() => { void failOrphanedTaken(); }, 10 * 60_000);
-
 /* SCHEDULES LIVE IN THE CRONS PLUGIN NOW (blueprint section 2). The store,
  * the cron math, the ticker, the fire wording and the seeding are all owned by
  * plugins/crons/, reached over the one /plugin/crons/rpc/<op> route; the
- * engine core keeps zero schedule knowledge. The pending-note re-drive that
- * used to ride a 10s boot timer here runs at each session's live pickup now
- * (reconcile sessionLive, below). */
+ * engine core keeps zero schedule knowledge. What used to ride the same 10s
+ * boot delay as the first schedule tick stays on it: herdr has reported by
+ * then, so the sessions a pending note must be delivered to exist (#458). */
+setTimeout(() => {
+  void sweepPendingTranscripts();
+}, 10_000);
 
 /* THE REPLY TRACE (#585 + blueprint row 26): the store is the plugin's own
  * (plugins/reply-dials/index.ts replyDialsStore); this engine keeps only the Stop
@@ -836,18 +822,13 @@ initAttach({
   broadcastSessions: () => broadcastSessions(),
   scheduleHeardSave: (id) => scheduleHeardSave(id),
   log: (e, f) => LOG.line(e, f),
-  axisOf: (id) => axisOf(id),
 });
 
 /** Everything this engine will promise an app it can do. See the `can` frame.
  *  "plugins" (#479) says this engine speaks the plugin protocol: it may send a
  *  `{t:"plugins"}` frame and answer /plugin/<id>/* routes. Additive, per the
- *  CONTRACT.md back-compat rule -- an old app ignores an unknown capability.
- *  "note-words" says a voice note's body may be a reply quote or a caption with
- *  a `{{cyc-words:<cid>}}` marker naming the frame's own cid, and this engine
- *  reads the note's clip into it (deliver.ts noteWords). An engine without it
- *  would hand that marker to the agent as text, so the app waits instead. */
-const ENGINE_CAN = ["words", "plugins", "note-words"];
+ *  CONTRACT.md back-compat rule -- an old app ignores an unknown capability. */
+const ENGINE_CAN = ["words", "plugins"];
 
 /* THE PLUGINS THIS ENGINE LOADED, and their wire declarations, computed once at
  * start-up from the same list in the same statement (the sessionsFrame rule:
@@ -1081,7 +1062,7 @@ initTranscribe({
   inOrder: (id, f) => inOrder(id, f),
   deliver: (s, opts) => injectUserMessage(s as Session, opts),
   sessionOf: (id) => sessions.get(id),
-  failNote: (s, ts, tell) => failUndeliveredNote(s as Session, ts, tell),
+  restoredChats: () => restoredChats,
 });
 
 // Delivery: deliver.ts.
@@ -1094,10 +1075,8 @@ initDeliver({
   noteDelivery: (id, how) => noteDelivery(id, how),
   forgetDelivery: (id, entry) => forgetDelivery(id, entry),
   writeHookState: () => writeHookState(),
-  bindOwnedUploads: (claimed, cid, sid) => uploads.bindOwnedUploads(claimed, cid, sid),
+  bindOwnedUploads: (claimed, cid) => uploads.bindOwnedUploads(claimed, cid),
   adoptStagedUploads: (id, ups) => uploads.adoptStagedUploads(id, ups),
-  flushChat: (id) => { const r = chatRefFor(id); return chatStore.flushFile(r.aid, r.chatId); },
-  flushLog: () => LOG.flush(),
 });
 
 // MCP show: show-handler.ts.
@@ -1524,15 +1503,6 @@ adapter.onAgents(makeReconcile({
   sweepTails: () => adapter.sweepTails(),
   broadcastSessions: () => broadcastSessions(),
   log: (e, f) => LOG.line(e, f),
-  /* What a session is owed from before it came up live: notes shown with their
-   * words pending (transcribe.ts) and messages taken but never delivered
-   * (deliver.ts intake). Here, at the pickup, not on a boot timer: the
-   * restored chat a timer would read is handed to the live row on the first
-   * poll and gone from where it looked. */
-  sessionLive: (s) => {
-    redrivePendingNotes(s);
-    void redriveTaken(s);
-  },
 }));
 adapter.start();
 

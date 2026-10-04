@@ -689,18 +689,6 @@ export function refusesDelivery(kind: BoxVerdict): boolean {
 const isBoxRule = (bareRow: string) => /^\s*─{4,}\s*$/.test(bareRow);
 
 export function classifyPaneBox(screen: string): PaneBox {
-  return readPaneBox(screen).box;
-}
-
-/** What is typed in the input box (the marker and the dim suggestion dropped),
- *  or null when the screen shows no input box: for the one caller that must
- *  know WHOSE text it is (a restart resuming a delivery, delivery-machine). */
-export function inputBoxText(screen: string): string | null {
-  const r = readPaneBox(screen);
-  return r.box.kind === "input" ? r.text : null;
-}
-
-function readPaneBox(screen: string): { box: PaneBox; text: string } {
   const all = screen.split("\n").map((r) => r.replace(/\r$/, ""));
   const bare = (r: string) => stripPaneControls(r);
   // trailing blank rows are padding, not distance from the box
@@ -770,11 +758,8 @@ function readPaneBox(screen: string): { box: PaneBox; text: string } {
    *     do you want one?
    *   ────────────────────────────    <- the box closes
    */
-  /* The box's own marker sits at column zero; a body row starting with ">" (a
-   * quoted line of a multi-line message) is drawn indented under it, so it is
-   * interior, not the marker. */
   const marked = (r: string | undefined) =>
-    r !== undefined && /^[❯>]/.test(nonDimText(r));
+    r !== undefined && /^[\s ]*[❯>]/.test(nonDimText(r));
   let bottom = last;
   while (bottom > 0 && isBoxRule(bare(rows[bottom - 1]))) bottom--;
   let open = -1;
@@ -819,15 +804,16 @@ function readPaneBox(screen: string): { box: PaneBox; text: string } {
    * safe. */
   const region = rules.length ? rows.slice(last + 1) : rows;
   const ask = parseAsk(region.map(bare).join("\n"));
-  if (ask) return { box: { kind: "chooser", ask }, text: "" };
+  if (ask) return { kind: "chooser", ask };
 
   if (inner.length) {
-    // strip the prompt marker (it is followed by a space or a non-breaking one)
-    const text = inner.map((r, i) => i ? nonDimText(r) : nonDimText(r).replace(/^[❯>][\s ]?/, "")).join("\n");
-    return { box: { kind: "input", hasContent: text.replace(/[\s ]/g, "").length > 0 }, text };
+    const hasContent = inner.some((r) =>
+      // strip the prompt marker (it is followed by a space or a non-breaking one)
+      nonDimText(r).replace(/^[\s ]*[❯>][\s ]?/, "").replace(/[\s ]/g, "").length > 0);
+    return { kind: "input", hasContent };
   }
 
-  return { box: { kind: "unknown" }, text: "" };
+  return { kind: "unknown" };
 }
 
 

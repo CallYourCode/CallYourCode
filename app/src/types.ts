@@ -77,22 +77,11 @@ export type CycMessage = {
 
   transcriptPending?: boolean;
 
-  // The engine gave up delivering this note, and why (the row's own field, so
-  // every device shows it failed after any reload or restart). The retry is a
-  // new send naming the same clip (retryUndelivered).
-  undelivered?: string;
-
   growing?: boolean;
 
   scheduled?: string;
 
   draftCommitted?: number;
-
-  // A sent voice note whose words the engine fills into a caption: the text
-  // painted before and after the still-growing words, so the caption stays on
-  // the bubble while the device's partials grow it (updateVoiceNote). Local to
-  // the pending bubble; it goes when the engine's row lands.
-  wordsAround?: {before: string; after: string};
 
   clipLost?: boolean;
 

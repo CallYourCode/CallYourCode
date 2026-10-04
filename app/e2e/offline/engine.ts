@@ -34,9 +34,6 @@ export type TunnelReply = {
   status?: number;
   headers?: Record<string, string>;
   body?: Uint8Array | string;
-  // A slow tunnel: each sealed frame of this reply (one per 256 KB CHUNK of
-  // body) waits this long before it goes on the pipe.
-  frameDelayMs?: number;
 };
 
 export type TestEngine = RegisteredEngine & {
@@ -196,7 +193,7 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
         : typeof reply.body === 'string'
           ? te.encode(reply.body)
           : reply.body;
-    sendRes(conn, done.id, reply.status ?? 200, reply.headers ?? {}, body, reply.frameDelayMs);
+    sendRes(conn, done.id, reply.status ?? 200, reply.headers ?? {}, body);
   }
 
   function serveViaHttp(done: ReqComplete): Promise<TunnelReply | undefined> {
@@ -259,21 +256,9 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
     id: string,
     status: number,
     headers: Record<string, string>,
-    body: Uint8Array | null,
-    frameDelayMs = 0
+    body: Uint8Array | null
   ) {
-    const frames = encodeRes(id, status, headers, body);
-    if (!(frameDelayMs > 0)) {
-      for (const f of frames) sendSealed(conn, f);
-      return;
-    }
-    // Paced per reply, not on the shared write queue: concurrent replies
-    // interleave frame by frame, as the engine's do (tunnel-glue reply()).
-    let paced = Promise.resolve();
-    for (const f of frames)
-      paced = paced
-        .then(() => new Promise<void>((r) => setTimeout(r, frameDelayMs)))
-        .then(() => sendSealed(conn, f));
+    for (const f of encodeRes(id, status, headers, body)) sendSealed(conn, f);
   }
 
   function wrapSend(conn: Conn) {

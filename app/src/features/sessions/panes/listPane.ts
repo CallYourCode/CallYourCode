@@ -94,7 +94,6 @@ export interface ListPaneDeps {
   loadDraft(id: string | null): void;
   releaseMicIfIdle(): void;
   rowAudioClick(id: string): void;
-  playerToggle(): void;
   openPlayingMessage(): void;
   restored(key: 'host' | 'chat' | 'list' | 'profile' | 'doc'): void;
   cancelPendingOpens(source: string): void;
@@ -1473,7 +1472,11 @@ export function createListPane(deps: ListPaneDeps) {
   leftContent.append(floatingAction);
 
   const playerBar = createAudioPlayerBar({
-    onToggle: () => deps.playerToggle(),
+    onToggle: () => {
+      const st = speaker.state;
+      if (st.state === 'speaking') speaker.pause();
+      else speaker.resume();
+    },
     onOpen: () => deps.openPlayingMessage(),
     onClose: () => speaker.stopAll()
   });

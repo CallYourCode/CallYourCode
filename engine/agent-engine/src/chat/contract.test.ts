@@ -187,9 +187,6 @@ test("E2 pages-cover-the-log: attach hands the pointer + tail pages, GET /page f
       .then((x) => x.json() as Promise<any>);
     expect(p1.sealed, "a page below the tail must be sealed").toBe(true);
     expect(p1.messages.length).toBe(100);
-    // cut from the same axis the attach named (fix-log-epoch)
-    expect(typeof p1.axis).toBe("string");
-    expect(p1.axis).toBe(ok.axis);
 
     // union of the two attach pages + the fetched middle covers the log exactly once
     const all = [...ok.pages.flatMap((p: any) => p.messages), ...p1.messages];

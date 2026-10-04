@@ -19,12 +19,11 @@ import { isControlAnswer } from "../chat/chatmsg.ts";
 import { askOf } from "../chat/asks.ts";
 import { contextPctOf, modelOf, claudeTitleOf } from "./context-cache.ts";
 import { subagentsRunningOf } from "./subagent-count.ts";
-import { sessions, getManualOrder, nameOverrideOf, settingsOf, photoOf, axisOf,
+import { sessions, getManualOrder, nameOverrideOf, settingsOf, photoOf,
   type Session } from "./session-state.ts";
 import { clients, send } from "../transport/wire.ts";
 import type { Sock } from "../transport/sock.ts";
 import type { PluginDecl } from "../plugins/platform/spec.ts";
-import { failedFrames } from "../chat/intake.ts";
 
 /* PER-CAPABILITY VOICE READINESS, carried on the same {t:"voice"} frame as the
  * unit health. `healthy` is the all-or-none unit (mic + call mode); `ready` is
@@ -147,13 +146,6 @@ export function sessionList(ordered: readonly Session[] = orderedSessions()) {
        * or null while its pane has not said. An attribute of the row: it
        * changes in place on /clear, fork and resume while `id` stays. */
       harnessSessionId: s.harnessSessionId,
-      /* THE CHAT LOG'S AXIS EPOCH (session-state.ts axisOf), on the roster so a
-       * device learns a re-sequenced log the moment it happens (the rewrite
-       * changes this row, so it ships as a one-row patch) or on its next hello,
-       * BEFORE it opens the chat: it drops the dead axis's rows then, instead
-       * of painting them and swapping them out under the reader. Absent while
-       * the agent has no chat file (no rows to stamp). */
-      axis: axisOf(s.id),
       /* THE STABLE AGENT ID. Since adapters lane 2 `id` above IS this value
        * (rows are keyed by agent, never by pane or harness session); the
        * field stays because that name already rides this row and a client
@@ -198,11 +190,6 @@ export function sessionList(ordered: readonly Session[] = orderedSessions()) {
        * this is the authority the current app reads. Null when nothing is
        * read yet. */
       readThrough: readThroughOf(s) ?? null,
-      /* HOW FAR SPEECH HAS GOT (readstate.markSpoken): a device skips every
-       * clip at or before it, so a clip heard to the end on one device, or
-       * before a reload, is never spoken again. Not read state: the count and
-       * the divider ignore it. */
-      spokenTs: s.spokenTs ?? 0,
       /* The title, ready to render (title.ts).
        *
        * `workspace` and `tab` deliberately do NOT go on the wire any more.
@@ -441,7 +428,4 @@ export function sendHelloBurst(ws: Sock) {
   }
   send(ws, { t: "host", user: C().engineUser, host: C().engineHost });
   sendFullSessions(ws);
-  // sends this process gave up on, so the sender's bubble fails even if it
-  // was not connected when it happened (chat/deliver.ts failTake)
-  for (const f of failedFrames()) send(ws, f);
 }

@@ -27,17 +27,10 @@ export function installSpeakerEvents(deps: SpeakerEventsDeps): void {
     updateVoiceStrip
   } = deps;
 
-  /* HEARD = PLAYED TO THE END, not started (owner, 2026-10-03): an auto-played
-   * reply he stops after a second is not heard, and a heard row counts as seen
-   * only through the same contiguous-run rule as a row on screen (heardProgress). */
-  onTeardown(
-    speaker.onEnded((item) => {
-      if (item.sessionId && item.msgId) markHeard(item.sessionId, item.msgId);
-    })
-  );
-
   onTeardown(
     speaker.onState((ev) => {
+      if (ev.state === 'speaking' && ev.sessionId && ev.msgId) markHeard(ev.sessionId, ev.msgId);
+
       if (ev.state === 'finished' && ev.msgId) {
         const el = messageListInner.querySelector<HTMLElement>(
           `.cyc-clip.cyc-voice[data-msg-id="${ev.msgId}"]`

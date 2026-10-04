@@ -156,30 +156,39 @@ describe('a queued own send stays read through its delivered identity', () => {
     seen.clear();
   });
 
-  // M2 (owner, 2026-10-03): a send reads nothing. Send at press ts T; the
-  // engine restamps the delivered row to T+X. The marker does not move for it
-  // (a hands-free send from a locked phone used to read every reply above it),
-  // and the divider still never anchors on the owner's own row: it only lands
-  // on agent rows.
-  test('the delivered restamp moves no marker, and the divider never anchors on the own row', async () => {
+  // Send at press ts T; the engine restamps the delivered row to T+X. No
+  // explicit read action. The delivered row is SIGHTED by its identity, so the
+  // marker resolves to the owner's own row wherever the restamp put it, and the
+  // divider does not anchor on it.
+  test('the delivered restamp keeps the own row read, by identity', async () => {
     settle();
     sendText(s.id, 'my reply while it was thinking', {ts: PRESS_TS});
     await tick();
     const m = s.messages[0] as CycEngineMessage;
     expect(m.status).toBe('sending');
-    expect(effectiveMarkerOf(s)).toBeUndefined();
+    // The optimistic press-time sighting was queued for the bubble already.
+    expect(effectiveMarkerOf(s)?.ts).toBe(PRESS_TS);
 
+    // The queued send is delivered later, its row restamped to the engine ts
+    // and carrying the engine's durable identity.
     expect(admitEngineMessage(s, deliveredRow({cid: m.cid}), false)).toBe(false);
     expect(m.status).toBe('delivered');
     expect(m.ts).toBe(DELIVERED_TS);
     expect(m.mid).toBe('mr-own42');
 
-    expect(effectiveMarkerOf(s)).toBeUndefined();
-    s.unread = 1; // even with something unread somewhere, never his own row
+    // The overlay now resolves to the delivered identity, wherever it sits.
+    const marker = effectiveMarkerOf(s)!;
+    expect(marker.mid).toBe('mr-own42');
+    expect(marker.ts).toBe(DELIVERED_TS);
+
+    // The unread divider does not anchor on the owner's own delivered row.
     expect(reader().firstUnheardId(s)).not.toBe(m.id);
+    expect(reader().firstUnheardId(s)).toBeUndefined();
   });
 
-  test('the delivered own row queues no heard sighting (M2)', async () => {
+  // The delivered row is reported as a SIGHTING (a durable heard intent) so the
+  // read-through reaches the engine, the one authority, not just this device.
+  test('the delivered restamp queues a heard sighting for the row identity', async () => {
     settle();
     sendText(s.id, 'my reply while it was thinking', {ts: PRESS_TS});
     await tick();
@@ -187,7 +196,11 @@ describe('a queued own send stays read through its delivered identity', () => {
 
     expect(admitEngineMessage(s, deliveredRow({cid: m.cid}), false)).toBe(false);
 
-    expect(intents.all().filter((i) => i.kind === 'heard')).toHaveLength(0);
+    const heard = intents.all().filter((i) => i.kind === 'heard' && i.sessionId === s.id);
+    expect(heard.length).toBe(1); // coalesced: one furthest-forward sighting
+    const payload = heard[0].payload as {mid?: string; ts: number};
+    expect(payload.mid).toBe('mr-own42');
+    expect(payload.ts).toBe(DELIVERED_TS);
   });
 
   // REGRESSION GUARD: a remote reply that arrives AFTER the sent row's

@@ -154,15 +154,7 @@ export function openMediaViewer(file: CycFileRef, url: string, kind: MediaKind |
       stage.append(a);
       return;
     }
-    const method = saveMethodFor(file.name, blob);
-    if (method === 'none') {
-      // iOS with a file the share sheet will not take: say so, never a link.
-      const line = h('div', 'cyc-mv-error text-[0.9375rem] opacity-90');
-      line.textContent = `This device cannot save ${file.name} from here`;
-      stage.append(line);
-      return;
-    }
-    if (method === 'share') {
+    if (saveMethodFor(file.name, blob) === 'share') {
       // The OS share sheet must run from a tap; the awaited fetch spent the
       // tap that opened this sheet, so this button carries a fresh one.
       const ico = h('div', 'cyc-mv-file-ico text-[2.5rem] opacity-80');
@@ -181,7 +173,7 @@ export function openMediaViewer(file: CycFileRef, url: string, kind: MediaKind |
 
   timer = setTimeout(() => controller.abort(), transferTimeoutMs(file.size));
 
-  void fetchBinary(url, {onProgress, signal: controller.signal, size: file.size}).then(
+  void fetchBinary(url, {onProgress, signal: controller.signal}).then(
     (b) => {
       if (closed) return;
       blob = b;

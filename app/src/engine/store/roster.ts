@@ -33,7 +33,6 @@ export const ROSTER_FIELDS = [
   'turnSince',
   'replyLevel',
   'claudeSessionId',
-  'axis',
   'settings',
   'muted',
   'ask',

@@ -1,5 +1,4 @@
-import {startDownload} from '../../engine/transfers/download';
-import {memorySink} from '@/features/media/downloadSinks';
+import {engineCapFetch, type EngineFetchInit} from '../../engine/contract';
 
 // A shown file the engine tags `binary` is only ever named, never typed, so its
 // extension is what says whether it is something the app can play. Video goes to
@@ -40,42 +39,36 @@ export function transferTimeoutMs(sizeBytes: number): number {
 }
 
 /** Fetch a shown binary over the sealed channel into one Blob, reporting bytes
- *  as they arrive. It rides the download lane (engine/transfers/download.ts):
- *  ranged parts on the engine's bulk lane, so the chat never waits behind it,
- *  each part with a deadline, resumed after a dropped pipe, and failed rather
- *  than hung when nothing moves. The blob keeps the engine's content-type so a
- *  saved or shared file carries its kind. `size` is the card's, when known. */
+ *  as they arrive. The response body is streamed when the browser exposes a
+ *  reader (so a slow large file shows real progress), else read whole with a
+ *  single terminal progress call. The blob keeps the response's content-type so
+ *  a saved or shared file carries its kind. */
 export async function fetchBinary(
   url: string,
-  opts: {
-    onProgress?: (received: number, total: number) => void;
-    signal?: AbortSignal;
-    size?: number;
-  } = {}
+  opts: {onProgress?: (received: number, total: number) => void; signal?: AbortSignal} = {}
 ): Promise<Blob> {
-  if (opts.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
-  const sink = memorySink('');
-  const dl = startDownload({
-    name: url.split('/').slice(-2, -1)[0] ?? url,
-    url,
-    size: opts.size ?? 0,
-    sink,
-    onProgress: (p) => {
-      if (p.received > 0 && p.phase === 'active') opts.onProgress?.(p.received, p.total);
-    }
-  });
-  const onAbort = () => dl.cancel();
-  opts.signal?.addEventListener('abort', onAbort, {once: true});
-  try {
-    const end = await dl.done;
-    if (end.phase === 'cancelled') {
-      throw new DOMException('The operation was aborted.', 'AbortError');
-    }
-    if (end.phase !== 'done') throw new Error(end.reason ?? 'download failed');
-    const blob = sink.blob()!;
-    const type = end.type || 'application/octet-stream';
-    return blob.type === type ? blob : new Blob([blob], {type});
-  } finally {
-    opts.signal?.removeEventListener('abort', onAbort);
+  const init: EngineFetchInit = {};
+  if (opts.signal) init.signal = opts.signal;
+  const res = await engineCapFetch(url, init);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const total = Number(res.headers.get('content-length')) || 0;
+  const type = res.headers.get('content-type') || 'application/octet-stream';
+  const body = res.body;
+  if (!body || typeof body.getReader !== 'function') {
+    const blob = await res.blob();
+    opts.onProgress?.(blob.size, total || blob.size);
+    return blob.type ? blob : new Blob([blob], {type});
   }
+  const reader = body.getReader();
+  const chunks: BlobPart[] = [];
+  let received = 0;
+  for (;;) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    chunks.push(value);
+    received += value.byteLength;
+    opts.onProgress?.(received, total);
+  }
+  return new Blob(chunks, {type});
 }

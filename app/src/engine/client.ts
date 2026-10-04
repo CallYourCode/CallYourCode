@@ -247,7 +247,7 @@ export class WsEngineClient implements EngineClient {
 
   // Visible again runs the liveness check at once (R4): a pipe that died while
   // the phone was in a pocket is found now, not on the next 5 s tick.
-  public setVisible(on: boolean, why?: string) {
+  public setVisible(on: boolean) {
     this.visible = on;
     // `desktop` rides the beat so the engine can tell a laptop apart from a
     // phone: only a laptop holds a push via recent use (owner, 2026-10-01). A
@@ -255,9 +255,7 @@ export class WsEngineClient implements EngineClient {
     // The beat rides the pipe sealed, so the idle probe cannot read it off the
     // wire; count it here the instant it actually leaves (a no-op unless the
     // probe is installed, i.e. under ?testhooks=1).
-    // `why` names the page event behind the claim, so the engine's presence log
-    // can say what took the phone hidden (owner report, 2026-10-03).
-    if (this.send({t: 'visible', on, desktop: desktopDevice, ...(why ? {why} : {})})) {
+    if (this.send({t: 'visible', on, desktop: desktopDevice})) {
       (
         window as unknown as {__cycIdle?: {notePresenceFrame?(): void}}
       ).__cycIdle?.notePresenceFrame?.();
@@ -284,14 +282,8 @@ export class WsEngineClient implements EngineClient {
   }
 
   // True when the frame was written to a sealed pipe (the drain's 'done').
-  public heard(
-    sessionId: string,
-    row: {mid?: string; msgId?: string; ts?: number},
-    spoken = false
-  ): boolean {
+  public heard(sessionId: string, row: {mid?: string; msgId?: string; ts?: number}): boolean {
     const m: Record<string, unknown> = {t: 'heard', id: sessionId};
-    // a clip played to the end: moves how far speech has got, never the marker
-    if (spoken) m.spoken = true;
     if (row.mid) m.mid = row.mid;
     if (row.msgId) m.msgId = row.msgId;
     if (typeof row.ts === 'number' && Number.isFinite(row.ts)) m.ts = row.ts;
@@ -304,19 +296,13 @@ export class WsEngineClient implements EngineClient {
   // store re-attaches again on the settled edge with the same frontier.
   // `verifyFrom` names the lowest page the open window shows; the attach-ok
   // then fingerprints the shown pages so the store can refetch any that differ.
-  // `axis` names the epoch the held rows were served under; an engine on
-  // another epoch answers cold whatever the frontier says.
-  public attach(sessionId: string, frontier = -1, verifyFrom?: number, axis?: string) {
+  public attach(sessionId: string, frontier = -1, verifyFrom?: number) {
     this.attachedId = sessionId;
     this.send({
       t: 'attach',
       id: sessionId,
       frontier,
-      ...(verifyFrom !== undefined && verifyFrom >= 0 ? {verifyFrom} : {}),
-      // Opening a chat on a page he can see takes its queued banner back on the
-      // engine, as a visible frame does; a page in the background never says so.
-      ...(document.hidden ? {} : {visible: true}),
-      ...(axis ? {axis} : {})
+      ...(verifyFrom !== undefined && verifyFrom >= 0 ? {verifyFrom} : {})
     });
 
     if (this.sealReady() && this.awaitingInboundBy === null) {
@@ -1432,11 +1418,8 @@ export class WsEngineClient implements EngineClient {
            * the accept below re-derives the channel and the post-accept
            * writes pin the NEW identity. Without this, a rebuilt engine sat
            * on "Pairing..." until a reload. */
-          cyclog('e2e.identity-repair', {
-            engine: this.url,
-            uh,
-            why: 'pin mismatch during an explicit pairing; pairing key is the fresh trust'
-          });
+          cyclog('e2e.identity-repair', {engine: this.url, uh,
+            why: 'pin mismatch during an explicit pairing; pairing key is the fresh trust'});
           chan = await SecureChannel.accept(offer, secFrame, null);
         } else {
           const err = new Error('sec: engine identity changed') as Error & {userHost?: string};

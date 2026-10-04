@@ -43,8 +43,8 @@ import * as drain from '../engine/sync/drain';
 import * as sync from '../engine/sync';
 import {conns, renderSubs, sessions, type Conn} from '../engine/store/registry';
 import {sendVoiceClip, retryVoiceClip} from '../engine/store/voiceUpload';
-import {commitVoiceNote, discardVoiceNote, updateVoiceNote} from '../engine/store/voiceNotes';
-import {hydrateSends, retrySend, settleSend, __resetForTest as resetSends} from '../engine/store/sends';
+import {commitVoiceNote, discardVoiceNote} from '../engine/store/voiceNotes';
+import {hydrateSends, retrySend, __resetForTest as resetSends} from '../engine/store/sends';
 import type {CycEngineMessage, CycEngineSession} from '../engine/store';
 import type {TransferRow} from '../engine/transfers/rows';
 
@@ -375,110 +375,6 @@ describe('honest voice-clip send over the transfer queue', () => {
     });
   });
 
-  // A quoted or captioned note on an engine that can 'note-words': it goes at
-  // once, its body written around the marker naming its own cid, the reply
-  // quote on top exactly as a bodied note's wire has it. The engine fills the
-  // words in; the agent reads quote, words and caption as one message.
-  const NOTE_CID = '0b5e7c1a-4f3d-4c2e-9a1b-7d6e5f4a3b2c';
-  const REPLY = {ts: 50, role: 'claude' as const, title: 'Claude', text: 'Done. Only remote roles.'};
-  const quotedNote = () =>
-    sendVoiceClip(s.id, clip(), {
-      durationS: 12,
-      text: '',
-      cid: NOTE_CID,
-      into: `{{cyc-words:${NOTE_CID}}}\n\nand a caption`,
-      replyTo: REPLY,
-      partial: {text: 'This is not', upToS: 2},
-      display: {text: 'This is not what', committed: 11}
-    });
-
-  test('a quoted, captioned note ships at once around its marker; the wire is quote, marker, caption', async () => {
-    vi.mocked(transfers.rowOf).mockImplementation((k) => queuedRow(k, s.id));
-    const id = quotedNote();
-    const m = s.messages.find((x) => x.id === id) as CycEngineMessage;
-    // The bubble: the growing words with the caption below them, the quote as
-    // its reply panel.
-    expect(m.cid).toBe(NOTE_CID);
-    expect(m.text).toBe('This is not what\n\nand a caption');
-    expect(m.draftCommitted).toBe(11);
-    expect(m.replyTo).toEqual(REPLY);
-    const wire = `> Done. Only remote roles.\n\n{{cyc-words:${NOTE_CID}}}\n\nand a caption`;
-    expect(payloadOf(NOTE_CID)).toMatchObject({
-      text: '',
-      wire,
-      words: [NOTE_CID],
-      partials: [{id: NOTE_CID, text: 'This is not', upToS: 2}]
-    });
-    await flush();
-    const row = doneRow(NOTE_CID, s.id, 'srv-quoted-1');
-    vi.mocked(transfers.rowOf).mockReturnValue(row);
-    registeredOnResult(row);
-    await flush();
-    expect(planted.sent).toHaveLength(1);
-    expect(planted.sent[0][1]).toBe(wire);
-    expect(planted.sent[0][2]).toMatchObject({
-      kind: 'voice',
-      msgId: 'srv-quoted-1',
-      cid: NOTE_CID,
-      words: [NOTE_CID],
-      partials: [{id: NOTE_CID, text: 'This is not', upToS: 2}]
-    });
-  });
-
-  test("the device's later words grow a quoted note's bubble above its caption", () => {
-    vi.mocked(transfers.rowOf).mockImplementation((k) => queuedRow(k, s.id));
-    const id = quotedNote();
-    updateVoiceNote(s.id, id, 'This is not what I requested', 20);
-    const m = s.messages.find((x) => x.id === id) as CycEngineMessage;
-    expect(m.text).toBe('This is not what I requested\n\nand a caption');
-    expect(m.draftCommitted).toBe(20);
-  });
-
-  test('retry of a quoted note resends its marker body and words list, never the display', async () => {
-    vi.mocked(transfers.rowOf).mockImplementation((k) => queuedRow(k, s.id));
-    const id = quotedNote();
-    const m = s.messages.find((x) => x.id === id) as CycEngineMessage;
-    await flush();
-    m.status = 'failed';
-    vi.mocked(clipVault.get).mockResolvedValue({
-      blob: clip(),
-      mime: 'audio/webm',
-      durationS: 12
-    } as never);
-    expect(retryVoiceClip(s.id, id)).toBe(true);
-    await flush();
-    expect(payloadOf(NOTE_CID)).toMatchObject({
-      text: '',
-      wire: `> Done. Only remote roles.\n\n{{cyc-words:${NOTE_CID}}}\n\nand a caption`,
-      words: [NOTE_CID]
-    });
-  });
-
-  test('a quoted note the engine took and then gave up on retries the same wire, same cid, from the bubble', async () => {
-    vi.mocked(transfers.rowOf).mockImplementation((k) => queuedRow(k, s.id));
-    const id = quotedNote();
-    const m = s.messages.find((x) => x.id === id) as CycEngineMessage;
-    await flush();
-    const row = doneRow(NOTE_CID, s.id, 'srv-given-up');
-    vi.mocked(transfers.rowOf).mockReturnValue(row);
-    registeredOnResult(row);
-    await flush();
-    // the engine acked it (the intent goes with the ack, the bytes are released)
-    m.msgId = 'srv-given-up';
-    settleSend(NOTE_CID);
-    vi.mocked(transfers.rowOf).mockReturnValue(undefined);
-    planted.sent.length = 0;
-    // ...and later gave up on delivering it: send-failed made the bubble failed
-    m.status = 'failed';
-    expect(retryVoiceClip(s.id, id)).toBe(true);
-    await flush();
-    await flush();
-    expect(planted.sent).toHaveLength(1);
-    expect(planted.sent[0][1]).toBe(`> Done. Only remote roles.\n\n{{cyc-words:${NOTE_CID}}}\n\nand a caption`);
-    expect(planted.sent[0][2]).toMatchObject({kind: 'voice', msgId: 'srv-given-up', cid: NOTE_CID, words: [NOTE_CID]});
-    expect(m.status).toBe('sending');
-  });
-
   test('a send made while disconnected still enqueues pending and moves no bytes', async () => {
     sync.noteDown(KEY);
     conns.splice(conns.indexOf(planted.conn), 1);
@@ -528,34 +424,6 @@ describe('honest voice-clip send over the transfer queue', () => {
     expect(m.status).toBe('sending');
     expect(m.clipLost).toBeUndefined();
     expect(intents.get(m.cid!)?.state).toBe('queued');
-  });
-
-  test('a note the engine gave up on (undelivered) retries as ONE new send naming its clip', async () => {
-    // the row as every device holds it: the engine's, no local bytes or intent
-    const failed = {
-      id: 'mr-1',
-      role: 'user',
-      kind: 'voice',
-      text: '> the agent asked\n\nmy caption',
-      ts: 50,
-      cid: 'c-old',
-      msgId: 'clip-1',
-      durationS: 9,
-      status: 'delivered',
-      undelivered: 'the engine restarted while delivering this'
-    } as unknown as CycEngineMessage;
-    s.messages.push(failed);
-    retrySend(s.id, 'mr-1');
-    retrySend(s.id, 'mr-1'); // a second tap is the same send
-    await flush();
-    expect(planted.sent.length, 'one frame for two taps').toBe(1);
-    const [, wire, opts] = planted.sent[0] as [string, string, Record<string, unknown>];
-    expect(wire, 'the engine puts the words into the kept quote and caption').toBe('');
-    expect(opts).toMatchObject({cid: 'c-old-r', kind: 'voice', msgId: 'clip-1', durationS: 9});
-    const fresh = s.messages.find((x) => (x as CycEngineMessage).cid === 'c-old-r') as CycEngineMessage;
-    expect(fresh).toMatchObject({status: 'sending', msgId: 'clip-1'});
-    expect(failed.undelivered, 'the failed row stays as it is').toBeTruthy();
-    expect(vi.mocked(transfers.enqueue)).not.toHaveBeenCalled();
   });
 
   test('the message menu "Try again" routes a failed voice note through the kept bytes', async () => {
@@ -661,63 +529,6 @@ describe('honest voice-clip send over the transfer queue', () => {
       await flush();
       expect(planted.sent).toHaveLength(1);
       expect(planted.sent[0][2]).toMatchObject({kind: 'voice', msgId: 'srv-msg-8'});
-    });
-
-    // An empty-bodied commit answering a quote (the handoff after a decoder
-    // that never settled): the engine fills the words, and the quote must
-    // still ride the wire on top of them.
-    const QUOTED = {ts: 40, role: 'claude' as const, title: 'Claude', text: 'Only remote roles.'};
-    const engineCan = (list: string[]) => {
-      (planted.conn.client as unknown as {can: (f: string) => boolean}).can = (f) =>
-        list.includes(f);
-    };
-
-    test('an empty-bodied quoted commit keeps the quote on the wire around its words marker', async () => {
-      engineCan(['words', 'note-words']);
-      const m = plantDraft('505');
-      commitVoiceNote(s.id, '505', '', {
-        msgId: 'srv-msg-9',
-        cid: 'c-505',
-        durationS: 4,
-        replyTo: QUOTED,
-        partial: {text: 'not what', upToS: 1.5}
-      });
-      const wire = '> Only remote roles.\n\n{{cyc-words:c-505}}';
-      expect(m.replyTo).toEqual(QUOTED);
-      expect(payloadOf('c-505')).toMatchObject({
-        text: '',
-        wire,
-        words: ['c-505'],
-        replyTo: QUOTED,
-        partials: [{id: 'c-505', text: 'not what', upToS: 1.5}]
-      });
-      await flush();
-      expect(planted.sent).toHaveLength(1);
-      expect(planted.sent[0][1]).toBe(wire);
-      expect(planted.sent[0][2]).toMatchObject({
-        kind: 'voice',
-        msgId: 'srv-msg-9',
-        cid: 'c-505',
-        words: ['c-505']
-      });
-    });
-
-    test('a bodied quoted commit is unchanged: the quote on top of the words, no marker', async () => {
-      engineCan(['words', 'note-words']);
-      plantDraft('506');
-      commitVoiceNote(s.id, '506', 'the words', {msgId: 'srv-msg-10', cid: 'c-506', replyTo: QUOTED});
-      expect(payloadOf('c-506')).toMatchObject({wire: '> Only remote roles.\n\nthe words'});
-      expect(payloadOf('c-506')?.words).toBeUndefined();
-    });
-
-    test('without note-words an empty quoted commit goes empty-bodied (the words still come) and keeps replyTo', async () => {
-      engineCan(['words']);
-      const m = plantDraft('507');
-      commitVoiceNote(s.id, '507', '', {msgId: 'srv-msg-11', cid: 'c-507', replyTo: QUOTED});
-      expect(m.replyTo).toEqual(QUOTED);
-      expect(payloadOf('c-507')).toMatchObject({wire: '', replyTo: QUOTED});
-      expect(payloadOf('c-507')?.words).toBeUndefined();
-      expect(logged.some((l) => l.event === 'commit.quote-unwired')).toBe(true);
     });
   });
 

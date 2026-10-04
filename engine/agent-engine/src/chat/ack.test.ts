@@ -71,16 +71,11 @@ test("the ack is written before any delivery work, on the sender's socket, with 
   const c = await boot();
   const page = c.client();
   const other = c.client();
-  /* Every herdr call slowed, so the delivery takes far longer than the ack. */
-  c.herdr.slow.ms = 400;
   await dispatchClientFrame(page.sock, { t: "utterance", id: wireId(PANE), text: "hello there", cid: "c-first" });
-  /* The receipt waits only for the frame to be on this engine's disk
-   * (intake.ts), never for the delivery: nothing has been typed at the pane
-   * yet when it is there. */
-  await until(() => page.last("ack") !== undefined, { what: "the ack" });
+  /* Synchronous with the frame: the receipt is there before the dispatcher
+   * has yielded once, while nothing has been typed at the pane yet. */
   expect(page.last("ack")).toEqual({ t: "ack", id: wireId(PANE), cid: "c-first", dup: false });
   expect(c.submitted.length, "the ack must not wait on delivery").toBe(0);
-  c.herdr.slow.ms = 0;
   expect(other.last("ack"), "the receipt is the sender's, not a broadcast").toBeUndefined();
 
   await until(() => c.submitted.length === 1, { what: "the message to reach the pane" });
@@ -99,7 +94,7 @@ test("a rewritten frame (same cid) is acked as a dup and delivered once", async 
   await until(() => page.of("chat").length === 1, { what: "the user echo" });
 
   await dispatchClientFrame(page.sock, { t: "utterance", id: wireId(PANE), text: "only once", cid: "c-twice" });
-  await until(() => page.of("ack").length === 2, { what: "the dup's ack" });
+  expect(page.of("ack").length).toBe(2);
   expect(page.of("ack")[1]).toEqual({ t: "ack", id: wireId(PANE), cid: "c-twice", dup: true });
   await new Promise((r) => setTimeout(r, 50));
   expect(c.submitted.length, "the dup must not reach the pane").toBe(1);
@@ -112,7 +107,6 @@ test("a rewritten frame (same cid) is acked as a dup and delivered once", async 
   delete s.recentCids;
   expect(recentCids(s).has("c-twice")).toBe(true);
   await dispatchClientFrame(page.sock, { t: "utterance", id: wireId(PANE), text: "only once", cid: "c-twice" });
-  await until(() => page.of("ack").length === 3, { what: "the dup's ack" });
   expect(page.last("ack")!.dup).toBe(true);
   await new Promise((r) => setTimeout(r, 50));
   expect(c.submitted.length).toBe(1);
@@ -120,10 +114,6 @@ test("a rewritten frame (same cid) is acked as a dup and delivered once", async 
   // A rewrite that lands while the first copy is still being delivered is a dup too.
   await dispatchClientFrame(page.sock, { t: "utterance", id: wireId(PANE), text: "twin", cid: "c-race" });
   await dispatchClientFrame(page.sock, { t: "utterance", id: wireId(PANE), text: "twin", cid: "c-race" });
-  await until(() => page.of("ack").filter((a) => a.cid === "c-race").length === 2,
-    { what: "both acks" });
-  /* In frame order: the dup's ack does not overtake the first copy's, which
-   * waits for its disk write. */
   const acks = page.of("ack").filter((a) => a.cid === "c-race");
   expect(acks.map((a) => a.dup)).toEqual([false, true]);
   await until(() => c.submitted.length === 2, { what: "the second message to land" });
@@ -194,7 +184,6 @@ test("a session this engine does not have is nacked, not acked, and nothing is d
     .toEqual([expect.stringContaining("no session with that id")]);
   // A session it does have is acked clean, no err.
   await dispatchClientFrame(page.sock, { t: "utterance", id: wireId(PANE), text: "hello", cid: "c-real" });
-  await until(() => page.last("ack")?.cid === "c-real", { what: "the real ack" });
   expect(page.last("ack")).toEqual({ t: "ack", id: wireId(PANE), cid: "c-real", dup: false });
   await until(() => c.submitted.length === 1, { what: "the real message to land" });
 });

@@ -54,13 +54,6 @@ export type TransferEngine = {
   // a file ref of fileKind image goes out on the pipe (and into history when
   // serveUploads), and GET /doc/<id>/raw serves the bytes. Returns the docId.
   showImage(name: string, bytes: Uint8Array, mime: string): string;
-  // The agent shows a file (fileKind binary): a download card. GET /doc/<id>/raw
-  // answers a Range with a 206 part, as the real engine does. Returns the docId.
-  showBinary(name: string, bytes: Uint8Array, mime: string): string;
-  // drop every socket when the app asks for the bytes the (n+1)th time, once
-  dropDocAfter(parts: number): void;
-  // stop answering requests for the bytes (a stalled engine), or answer again
-  holdDocParts(on: boolean): void;
   // every GET /doc/<id>/raw the app made through the tunnel, oldest first
   docGets(): string[];
   // the engine URL the app resolves a shown image's raw bytes to
@@ -112,9 +105,6 @@ export async function startTransferEngine(
   const docBytes = new Map<string, {bytes: Uint8Array; mime: string}>();
   const docGets: string[] = [];
   let docN = 0;
-  let docParts = 0;
-  let dropDocAt = -1;
-  let holdParts = false;
   const echoed: Record<string, unknown>[] = [];
   const utterances: Utterance[] = [];
   let finishes = 0;
@@ -175,29 +165,6 @@ export async function startTransferEngine(
       docGets.push(id);
       const d = docBytes.get(id);
       if (!d) return jsonReply(404, {error: 'no such doc'});
-      // the knobs apply to every request for the bytes, whole or ranged
-      if (dropDocAt >= 0 && docParts >= dropDocAt) {
-        dropDocAt = -1;
-        dropCount++;
-        eng.dropSockets();
-        return undefined;
-      }
-      if (holdParts) return new Promise<undefined>(() => {});
-      docParts++;
-      const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers['range'] ?? '');
-      if (range) {
-        const start = Number(range[1]);
-        const end = Math.min(range[2] ? Number(range[2]) : d.bytes.length - 1, d.bytes.length - 1);
-        return {
-          status: 206,
-          headers: {
-            'content-type': d.mime,
-            'content-range': `bytes ${start}-${end}/${d.bytes.length}`,
-            ...CORS
-          },
-          body: d.bytes.slice(start, end + 1)
-        };
-      }
       return {status: 200, headers: {'content-type': d.mime, ...CORS}, body: d.bytes};
     }
 
@@ -399,25 +366,6 @@ export async function startTransferEngine(
       if (opts.serveUploads) echoed.push(frame);
       eng.send(frame);
       return docId;
-    },
-    showBinary: (name: string, bytes: Uint8Array, mime: string) => {
-      const docId = `srv-bin-${++docN}`;
-      docBytes.set(docId, {bytes, mime});
-      eng.send({
-        t: 'chat',
-        id: CHAT,
-        role: 'claude',
-        text: name,
-        ts: Date.now(),
-        file: {docId, name, fileKind: 'binary', size: bytes.length}
-      });
-      return docId;
-    },
-    dropDocAfter: (parts: number) => {
-      dropDocAt = docParts + parts;
-    },
-    holdDocParts: (on: boolean) => {
-      holdParts = on;
     },
     docGets: () => [...docGets],
     docRawUrl: (docId: string) =>

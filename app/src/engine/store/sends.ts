@@ -6,9 +6,10 @@ import * as sync from '../sync';
 import {cyclog} from '@/shared/logging';
 import type {CycMessage, CycReplyTo} from '../../types';
 import type {CycUpload} from '../contract';
-import type {CycEngineMessage, CycEngineSession} from './types';
+import type {CycEngineMessage} from './types';
 import {connOf, findLocal, notifyNow, sessions} from './registry';
 import {stampRowId} from './rows/core';
+import {sightLocalRow} from './readState';
 import {retryVoiceClip} from './voiceUpload';
 import {retryAttachConversion} from './attachSend';
 import * as transfers from '../transfers/worker';
@@ -99,8 +100,7 @@ export function __resetForTest(): void {
 }
 
 export function isLocalOnly(m: CycMessage): boolean {
-  // a note the engine gave up on is its row, failed, not a local send
-  return (m.status === 'sending' || m.status === 'failed') && !m.undelivered;
+  return m.status === 'sending' || m.status === 'failed';
 }
 
 // Place a painted bubble in ts order (a resurrected old send sits behind every
@@ -373,39 +373,8 @@ export function paintPendingSends(sessionId: string) {
   }
 }
 
-// A note the engine gave up delivering (its row's `undelivered`). The clip is
-// on the engine and the failed row keeps its quote and caption, so the retry
-// is a NEW send naming the clip with no body; the engine puts the words into
-// that quote and caption. Its cid is derived from the failed one, so a second
-// tap, or a tap on another device, is the same send and is delivered once. The
-// failed row stays as it is. clipKey: a failed retry of it is the wire again.
-function retryUndelivered(s: CycEngineSession, m: CycEngineMessage): void {
-  const cid = `${m.cid}-r`;
-  if (findByCid(s.id, cid)) return; // retried already
-  cyclog('voiceclip.retry.undelivered', {cid, of: m.cid, session: s.id, msgId: m.msgId});
-  const ts = Date.now();
-  const payload = {
-    cid,
-    sessionId: s.id,
-    ts,
-    text: '',
-    kind: 'voice' as const,
-    wire: '',
-    msgId: m.msgId,
-    durationS: m.durationS,
-    replyTo: m.replyTo,
-    clipKey: cid
-  };
-  paintSend(
-    intents.put({id: cid, engineKey: s.engineKey, sessionId: s.id, kind: 'send-text', payload})
-  );
-  drain.kick(s.engineKey);
-}
-
 export function retrySend(sessionId: string, localId: string) {
   const m = findLocal(sessionId, localId);
-  const s = sessions.get(sessionId);
-  if (m?.undelivered && m.cid && m.msgId && s) return retryUndelivered(s, m);
   // A voice note carries its payload as a recording kept in the clipVault, not as
   // a replayable wire body: re-send it from those bytes over the transfer
   // contract rather than replaying an empty wire.
@@ -583,9 +552,13 @@ export function sendText(
   if (opts.wire?.words.length) msg.wordsPending = true;
 
   s.messages.push(msg);
-  // No read on send (owner, 2026-10-03): the press-time optimistic mark that
-  // stood here moved this device's marker past every reply above his row, seen
-  // or not. The divider only lands on agent rows, so it cannot strand on his.
+  // Optimism (fix-unread): the moment his own row is on screen, mark it read in
+  // memory so the unread divider never strands above his own message while the
+  // send is in flight. This is NOT a wire sighting -- the row has no engine
+  // identity yet and its durable sighting is queued on delivery (admit.ts), so
+  // nothing here competes with the send in the drain. No timestamp math: the
+  // engine stays the authority and this overlay collapses to its marker.
+  sightLocalRow(sessionId, {ts: msg.ts});
   s.thinking = true;
   notifyNow();
 

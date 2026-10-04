@@ -21,7 +21,6 @@ async function dist(): Promise<string> {
   await writeFile(join(d, "index.html"), "<html></html>");
   await writeFile(join(d, "cyc-sw.js"), "// sw");
   await writeFile(join(d, "boot-watchdog.js"), "// watchdog");
-  await writeFile(join(d, "cyc-precache.json"), '{"version":"1","assets":[]}');
   await writeFile(join(d, "app-Ab12Cd34Ef.js"), "// hashed");
   await writeFile(join(d, "plain.js"), "// not hashed");
   await writeFile(join(d, SANDBOX_SHELL), "<html></html>");
@@ -64,15 +63,6 @@ test("the boot watchdog is a non-hashed shell script: no-cache, baseline headers
   expect(r.headers.get("cache-control")).not.toContain("immutable");
   expect(r.headers.get("content-security-policy")).toBeNull();
   expect(r.headers.get("x-content-type-options")).toBe("nosniff");
-});
-
-test("the precache manifest names one build: no-cache, never immutable", async () => {
-  // '-precache.json' matches the hashed-asset pattern, but every build rewrites
-  // the file under the same name; it must never ride a year-long cache.
-  const d = await dist();
-  const r = await serveStatic(d, "/cyc-precache.json");
-  expect(r.headers.get("cache-control")).toContain("no-store");
-  expect(r.headers.get("cache-control")).not.toContain("immutable");
 });
 
 test("un-hashed assets get neither cache directive", async () => {

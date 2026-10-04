@@ -49,39 +49,6 @@ export function newestBucketDeliversTarget(names: string[], target: string): boo
   return buckets[buckets.length - 1] >= CACHE_PREFIX + target;
 }
 
-// What may hold an update reload back, sampled by the page on every tick.
-export type ReloadHolds = {
-  recording: boolean; // a live recording
-  vault: boolean; // a composition/clip vault write in flight
-  unsent: boolean; // a send the engine has not taken yet
-  draft: boolean; // anything in the composer: typed text, an attachment, a voice block
-  audio: boolean; // a clip playing
-};
-
-export const RELOAD_PATIENCE_MS = 45_000;
-/* The hard ceiling on the durable holds. vaultHolds and unsentWork used to
- * defer FOREVER: one stuck hold (a failed transfer that never settled) meant
- * the toast showed and the reload silently never came (2026-09-06 report).
- * Unsent intents are durable (IndexedDB) and survive the reload, so past this
- * ceiling waiting protects nothing. */
-export const RELOAD_CEILING_MS = 5 * 60_000;
-
-// The hold that defers an update reload right now, or '' to go. A recording
-// waits as long as it runs. A composer with anything in it is never reloaded
-// under the user: the reload waits until the box is empty (sent or cleared) or
-// the app goes to the background, whichever comes first; the draft is on disk
-// either way, so a reload in the background or the next launch restores it.
-// (The old 45 s patience reloaded mid-typing.) A playing clip gets the
-// patience; the durable holds get the ceiling.
-export function reloadHold(h: ReloadHolds, waited: number, hidden: boolean): string {
-  if (h.recording) return 'recording';
-  if (h.vault && waited < RELOAD_CEILING_MS) return 'vault';
-  if (h.unsent && waited < RELOAD_CEILING_MS) return 'unsent';
-  if (h.draft && !hidden) return 'draft';
-  if (h.audio && waited < RELOAD_PATIENCE_MS) return 'audio';
-  return '';
-}
-
 export const READY_POLL_MS = 500;
 export const READY_POLL_TRIES = 30; // 15s per stale sighting; the next edge re-arms
 
@@ -115,11 +82,6 @@ export type StaleReloadDeps = {
   // Given the target stamp so the departure breadcrumb can name the build it
   // crossed to.
   reload: (target: string) => void;
-  // app.log seam. build.behind names every edge on which this page learned it
-  // runs an older build than the server; build.not-ready names a sighting whose
-  // new build never became loadable (its worker install failed or is still
-  // retrying), so a client stuck behind a deploy is never a silent hole.
-  log?: (event: string, fields: Record<string, unknown>) => void;
 };
 
 export function createStaleReloadController(deps: StaleReloadDeps): {
@@ -134,8 +96,7 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
     try {
       if (!newestBucketDeliversTarget(await deps.cacheNames(), target)) return false;
       // The bucket NAME is newest, but a reload only lands non-blank once that
-      // bucket really holds the shell (and so, atomically, every chunk). A new
-      // worker still waiting is the self-navigation gate's business.
+      // bucket really holds the shell (and so, atomically, every chunk).
       return await deps.shellCached();
     } catch {
       return true;
@@ -188,20 +149,11 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
   // Ridden by the page's visibility/live edges (the caller keeps its own
   // "only while the sync is live" gate around this).
   const check = async (): Promise<void> => {
-    if (fired) return;
-    if (polling) {
-      // A poll is already waiting on a known stale target, but the install it
-      // waits on may have failed since (a dropped radio); a failed install is
-      // retried only by another update check, so this edge still asks for one.
-      deps.nudgeWorker();
-      return;
-    }
+    if (fired || polling) return;
     const target = staleTargetFor(deps.ownStamp(), await deps.fetchServedStamp());
     if (!target || fired || polling) return;
-    const controlled = deps.isControlled();
-    deps.log?.('build.behind', {own: deps.ownStamp(), served: target, controlled});
 
-    if (!controlled) {
+    if (!deps.isControlled()) {
       // No worker in the way: a reload is served by the network, so it lands
       // fresh. The once-per-stamp mark is the loop guard for the pathological
       // half-swapped dist where build.txt and the served bundle disagree.
@@ -232,7 +184,6 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
         tries -= 1;
         if (tries <= 0) {
           polling = false; // give up; the next visibility/live edge re-enters
-          deps.log?.('build.not-ready', {target, waited: READY_POLL_TRIES * READY_POLL_MS});
           return;
         }
         deps.schedule(poll, READY_POLL_MS);
@@ -254,10 +205,7 @@ export function createStaleReloadController(deps: StaleReloadDeps): {
     void (async () => {
       const target = staleTargetFor(deps.ownStamp(), await deps.fetchServedStamp());
       if (!target || controllerReloadUsed || fired) return;
-      if (!(await ready(target))) {
-        deps.log?.('build.not-ready', {target, via: 'controllerchange'});
-        return;
-      }
+      if (!(await ready(target))) return;
       controllerReloadUsed = true;
       fire(target);
     })();

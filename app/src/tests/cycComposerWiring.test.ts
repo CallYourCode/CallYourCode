@@ -91,18 +91,18 @@ const pipelineMock = vi.hoisted(() => ({
   capturesInFlight: [] as number[],
   pressCaptureId: 0,
   cidOf: () => '',
-  holdForPress: vi.fn(),
   startPTT: vi.fn(),
-  refusePress: vi.fn(),
   endPTT: vi.fn(),
   cancelCapture: vi.fn(),
   forceEnd: vi.fn()
 }));
 vi.mock('../audio/pipeline', () => ({pipeline: pipelineMock}));
 const micMock = vi.hoisted(() => ({ready: null as Promise<void> | null}));
+const hiddenSilencesMock = vi.hoisted(() => ({value: false}));
 vi.mock('../speechGate', () => ({
   ensureMic: vi.fn(async () => {}),
-  mic: micMock
+  mic: micMock,
+  hiddenSilences: () => hiddenSilencesMock.value
 }));
 vi.mock('../audio/clipVault', () => ({release: vi.fn(async () => {})}));
 vi.mock('../sessionSelectors', () => ({
@@ -150,6 +150,7 @@ beforeEach(() => {
   pipelineMock.handsFreeSessionId = '';
   pipelineMock.captureBusy = false;
   micMock.ready = null;
+  hiddenSilencesMock.value = false;
   vi.clearAllMocks();
   vi.mocked(engine.engineCan).mockReturnValue(false);
 });
@@ -205,60 +206,67 @@ describe('releaseMicIfIdle', () => {
     expect(micMock.ready).not.toBeNull();
   });
 });
-// The mic is held only while used. A take releases it as soon as its capture
-// settles, on every platform: no grace window keeps it (and the iPhone's
-// play-and-record session and mic indicator) between takes. The phone has
-// always behaved this way (app.log since 2026-08-24).
-describe('mic release after a take', () => {
-  test('a PTT release disposes the mic at once; nothing holds it for later', async () => {
+// Bug 2: keep a granted mic stream alive across back-to-back push-to-talk
+// recordings (a grace window) so getUserMedia is not re-run -- and, on iOS, not
+// re-prompted -- per recording. Hard-release triggers still dispose at once.
+describe('mic keep-alive (Bug 2)', () => {
+  test('G6: a PTT release keeps the stream for the grace window, then disposes', async () => {
     vi.useFakeTimers();
     try {
       mk();
       micMock.ready = Promise.resolve();
       (composerOpts.onVoiceEnd as (how: string) => void)('release');
       await vi.advanceTimersByTimeAsync(50);
-      expect(pipelineMock.dispose).toHaveBeenCalledTimes(1);
-      expect(micMock.ready).toBeNull();
-      // No timer is left to dispose anything later.
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-  test('the next press opens the mic afresh', async () => {
-    vi.useFakeTimers();
-    try {
-      mk();
-      micMock.ready = Promise.resolve();
-      (composerOpts.onVoiceEnd as (how: string) => void)('release');
-      await vi.advanceTimersByTimeAsync(50);
-      expect(micMock.ready).toBeNull();
-      micMock.ready = Promise.resolve();
-      (composerOpts.onVoiceEnd as (how: string) => void)('release');
-      await vi.advanceTimersByTimeAsync(50);
-      expect(pipelineMock.dispose).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-  test('a capture still settling keeps the mic until it settles', async () => {
-    vi.useFakeTimers();
-    try {
-      mk();
-      micMock.ready = Promise.resolve();
-      pipelineMock.captureBusy = true;
-      (composerOpts.onVoiceEnd as (how: string) => void)('release');
-      await vi.advanceTimersByTimeAsync(500);
+      // Not disposed on release: the stream is held for the window.
       expect(pipelineMock.dispose).not.toHaveBeenCalled();
-      pipelineMock.captureBusy = false;
-      await vi.advanceTimersByTimeAsync(500);
+      expect(micMock.ready).not.toBeNull();
+      // The window elapses with nothing recorded: it disposes now.
+      await vi.advanceTimersByTimeAsync(90_000);
+      await vi.advanceTimersByTimeAsync(50);
       expect(pipelineMock.dispose).toHaveBeenCalledTimes(1);
+      expect(micMock.ready).toBeNull();
     } finally {
-      pipelineMock.captureBusy = false;
       vi.useRealTimers();
     }
   });
-  test('teardown releases the mic', () => {
+  test('G6: two recordings inside the window keep one stream; getUserMedia is not re-run', async () => {
+    vi.useFakeTimers();
+    try {
+      mk();
+      micMock.ready = Promise.resolve();
+      (composerOpts.onVoiceEnd as (how: string) => void)('release');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(pipelineMock.dispose).not.toHaveBeenCalled();
+      // A second recording starts within the window: it reuses the live stream
+      // (mic.ready never went null, so ensureMic re-inits nothing) and cancels
+      // the pending grace dispose.
+      (composerOpts.onVoiceStart as () => void)();
+      expect(micMock.ready).not.toBeNull();
+      (composerOpts.onVoiceEnd as (how: string) => void)('release');
+      await vi.advanceTimersByTimeAsync(80_000);
+      // 80s after the SECOND release: the window (reset by it) has not elapsed.
+      expect(pipelineMock.dispose).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(pipelineMock.dispose).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  test('G6: backgrounding on a touch device is a hard release: dispose at once', async () => {
+    vi.useFakeTimers();
+    try {
+      mk();
+      micMock.ready = Promise.resolve();
+      hiddenSilencesMock.value = true;
+      (composerOpts.onVoiceEnd as (how: string) => void)('release');
+      await vi.advanceTimersByTimeAsync(50);
+      expect(pipelineMock.dispose).toHaveBeenCalledTimes(1);
+      expect(micMock.ready).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  test('G6: teardown is a hard release: a grace-held stream is disposed', () => {
     const disposers: (() => void)[] = [];
     mk({onTeardown: (d) => disposers.push(d)});
     micMock.ready = Promise.resolve();
@@ -270,9 +278,8 @@ describe('mic release after a take', () => {
 // Bug 1: a lone voice note must not wait on the on-device decoder before the
 // bubble and the composer clear. On an engine that advertises words it ships at
 // once with an empty body and the engine transcribes the uploaded clip
-// server-side (task 292). A caption or reply excerpt rides the wire around a
-// marker the engine fills ('note-words'), still without waiting; only an engine
-// that cannot fill it keeps the wait, and the card says so.
+// server-side (task 292); a caption or reply excerpt rides the wire beside the
+// best words the card holds now, still without waiting.
 describe('lone voice note send (Bug 1)', () => {
   type VStaged = {
     file: File;
@@ -290,31 +297,24 @@ describe('lone voice note send (Bug 1)', () => {
     ];
     // The held card the recording lives in until Enter; the lone path finds it
     // by file identity. Its presence means the on-device decode has not settled.
-    const card = {
+    api.cap.heldClips.set(1, {
       file: () => file,
       update: vi.fn(),
       attach: vi.fn(),
       remove: vi.fn()
-    };
-    api.cap.heldClips.set(1, card as never);
+    } as never);
     const compose = (pending?: (st: VStaged) => string | undefined) => {
-      // What the send puts in the recording's slot stands in for its words, as
-      // in sendLayout: '' suppresses them (the caption alone), a marker or a
-      // settled transcript replaces them. Otherwise the card's words are read
-      // live from `over` so a test can model the on-device decoder settling
-      // (the card's words growing) while the send waits.
+      // The recording's own words are suppressed when a pending returns '' for
+      // the clip: that is how the fix separates a caption from the recording.
+      // Read live from `over` so a test can model the on-device decoder
+      // settling (the card's words growing) while the send waits.
       const rec = pending ? pending(staged[0]) : undefined;
-      const words = rec !== undefined ? rec : (over.partial ?? '');
+      const words = rec === '' ? '' : (over.partial ?? '');
       const text = [words, over.caption ?? ''].filter(Boolean).join('\n\n');
       return {text, anchors: [{at: 0, textLen: text.length}]};
     };
-    return {api, file, staged, compose, over, card};
+    return {api, file, staged, compose, over};
   };
-  // An engine with server words but no 'note-words': it fills only an empty
-  // body, so a caption or a quote waits for the device.
-  const wordsOnly = () =>
-    vi.mocked(engine.engineCan).mockImplementation((_id, feature) => feature === 'words');
-  const REPLY = {ts: 50, role: 'claude', title: 'Claude', text: 'Done. Only remote roles.'};
   const onAttach = (staged: unknown, compose: unknown, replyTo?: unknown) =>
     (composerOpts.onAttach as (f: unknown, c: unknown, r?: unknown) => Promise<unknown>)(
       staged,
@@ -424,22 +424,17 @@ describe('lone voice note send (Bug 1)', () => {
     await p;
   });
 
-  test('#3: on an engine without note-words a caption note waits for the decoder, then ships the full transcript beside the caption', async () => {
+  test('#3: a caption note waits for the decoder, then ships the full transcript beside the caption', async () => {
     vi.useFakeTimers();
     try {
-      wordsOnly();
-      const {api, staged, compose, over, card} = setup({
-        partial: 'spoken',
-        caption: 'and a caption'
-      });
+      vi.mocked(engine.engineCan).mockReturnValue(true);
+      const {api, staged, compose, over} = setup({partial: 'spoken', caption: 'and a caption'});
       const p = onAttach(staged, compose);
       await Promise.resolve();
       // A caption must ride the wire, so the engine will not server-fill this
       // note; the send waits for the on-device decoder rather than shipping the
-      // caption with only the fragment the card holds so far, and the card
-      // says the message is waiting for its words (no silent press).
+      // caption with only the fragment the card holds so far.
       expect(engine.sendVoiceClip).not.toHaveBeenCalled();
-      expect(card.update).toHaveBeenCalledWith({wordsWait: true});
       // The decoder settles: the card's words grow to the full transcript and
       // the held clip is released.
       over.partial = 'spoken bit in full';
@@ -451,16 +446,15 @@ describe('lone voice note send (Bug 1)', () => {
       // and the caption kept -- never transcript-only, never caption-only.
       expect(opts.text).toContain('and a caption');
       expect(opts.text).toContain('spoken bit in full');
-      expect(card.update).toHaveBeenLastCalledWith({wordsWait: false});
     } finally {
       vi.useRealTimers();
     }
   });
 
-  test('#4: words without note-words + caption + unsettled decoder never ships caption-only; it waits for the transcript', async () => {
+  test('#4: canWords + caption + unsettled decoder never ships caption-only; it waits for the transcript', async () => {
     vi.useFakeTimers();
     try {
-      wordsOnly();
+      vi.mocked(engine.engineCan).mockReturnValue(true);
       // Unsettled: the card holds no words yet, only the typed caption. A bodied
       // note is left alone by the engine, so the device is the only transcript
       // source and the recording's words would be lost if it shipped now.
@@ -483,93 +477,6 @@ describe('lone voice note send (Bug 1)', () => {
       expect(opts.text).toContain('call me back tomorrow morning');
       expect(opts.text).toContain('meeting at five');
       expect(opts.text).not.toBe('meeting at five');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  test('note-words: a captioned note ships in the same turn around its marker, no decode wait', async () => {
-    vi.mocked(engine.engineCan).mockReturnValue(true);
-    const {api, staged, compose} = setup({caption: 'and a caption'});
-    api.cap.partialByCapture.set(1, {text: 'spoken so far and more', committed: 14, committedS: 1.5});
-    const p = onAttach(staged, compose);
-    // Synchronous: no wait on the device's decoder for a caption any more.
-    expect(engine.sendVoiceClip).toHaveBeenCalledTimes(1);
-    const opts = vi.mocked(engine.sendVoiceClip).mock.calls[0][2] as {
-      text: string;
-      cid: string;
-      into: string;
-      partial?: {text: string; upToS: number};
-      display?: unknown;
-    };
-    // The body is the caption around the marker naming this send's cid; the
-    // wire body proper is empty, the engine fills the words.
-    expect(opts.text).toBe('');
-    expect(opts.cid).toMatch(/^[0-9a-f-]{36}$/);
-    expect(opts.into).toBe(`{{cyc-words:${opts.cid}}}\n\nand a caption`);
-    expect(opts.partial).toEqual({text: 'spoken so far', upToS: 1.5});
-    expect(opts.display).toBeDefined();
-    // Its later decoder events grow the sent row, never a twin send.
-    expect(api.cap.sentByCapture.get(1)).toEqual({sessionId: 's1', localId: 7});
-    await p;
-  });
-
-  test('note-words: a quoted reply ships in the same turn with the reply beside the marker', async () => {
-    vi.mocked(engine.engineCan).mockReturnValue(true);
-    const {staged, compose} = setup({partial: 'not what I asked'});
-    const p = onAttach(staged, compose, REPLY);
-    expect(engine.sendVoiceClip).toHaveBeenCalledTimes(1);
-    const opts = vi.mocked(engine.sendVoiceClip).mock.calls[0][2] as {
-      text: string;
-      cid: string;
-      into: string;
-      replyTo?: unknown;
-    };
-    expect(opts.text).toBe('');
-    // Only the marker: the quote goes on top on the wire (sendVoiceClip).
-    expect(opts.into).toBe(`{{cyc-words:${opts.cid}}}`);
-    expect(opts.replyTo).toMatchObject({text: 'Done. Only remote roles.'});
-    await p;
-  });
-
-  test('note-words: a fully settled transcript ships as the body beside the caption, no marker', async () => {
-    vi.mocked(engine.engineCan).mockReturnValue(true);
-    const {api, staged, compose} = setup({caption: 'and a caption'});
-    api.cap.partialByCapture.set(1, {text: 'all of it settled', committed: 17, committedS: 2.8});
-    const p = onAttach(staged, compose);
-    const opts = vi.mocked(engine.sendVoiceClip).mock.calls[0][2] as {
-      text: string;
-      into?: string;
-    };
-    expect(opts.text).toBe('all of it settled\n\nand a caption');
-    expect(opts.into).toBeUndefined();
-    await p;
-  });
-
-  test('words without note-words: a quoted reply waits, and the card says it is waiting', async () => {
-    vi.useFakeTimers();
-    try {
-      wordsOnly();
-      const {api, staged, compose, over, card} = setup({partial: 'not what'});
-      const p = onAttach(staged, compose, REPLY);
-      await Promise.resolve();
-      expect(engine.sendVoiceClip).not.toHaveBeenCalled();
-      expect(card.update).toHaveBeenCalledWith({wordsWait: true});
-      over.partial = 'not what I asked';
-      api.cap.heldClips.delete(1);
-      await vi.advanceTimersByTimeAsync(400);
-      await p;
-      const opts = vi.mocked(engine.sendVoiceClip).mock.calls[0][2] as {
-        text: string;
-        into?: string;
-        replyTo?: unknown;
-      };
-      // The device's full transcript is baked in; no marker goes to an engine
-      // that would hand it to the agent as text.
-      expect(opts.text).toBe('not what I asked');
-      expect(opts.into).toBeUndefined();
-      expect(opts.replyTo).toMatchObject({text: 'Done. Only remote roles.'});
-      expect(card.update).toHaveBeenLastCalledWith({wordsWait: false});
     } finally {
       vi.useRealTimers();
     }

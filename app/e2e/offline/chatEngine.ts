@@ -64,9 +64,6 @@ export type ChatOptions = {
   // A `heard` frame moves the read marker (the engine's behaviour). Off for a
   // test that pins the unread marker.
   trackHeard?: boolean;
-  // Tunnel routes this chat does not own (a test's /audio/<id>.mp3), tried
-  // after its own.
-  route?: (req: ReqComplete) => TunnelReply | undefined | Promise<TunnelReply | undefined>;
 };
 
 export type ChatEngine = TestEngine & {
@@ -440,7 +437,7 @@ export async function startChatEngine(o: ChatOptions): Promise<ChatEngine> {
         return json({ok: true, unread: unreadOf(s)});
       }
     }
-    return o.route?.(req);
+    return undefined;
   }
 
   const base = await startEngine({

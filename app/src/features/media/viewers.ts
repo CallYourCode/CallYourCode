@@ -2,9 +2,8 @@ import type {CycFileRef, CycMediaItem, CycMessage, CycSession} from '../../types
 import {cyclog} from '@/shared/logging';
 import {sessionMedia, shownKey} from '@/features/chat/content';
 import {localUploadUrl} from '@/features/composer/localUploadUrls';
-import {iosLike} from '@/features/media/downloads';
-import {mediaKindOf} from '@/features/media/binary';
-import {tapDownloadCard} from '@/features/media/downloadCards';
+import {iosLike, shareOrSaveBlob} from '@/features/media/downloads';
+import {fetchBinary, mediaKindOf, transferTimeoutMs} from '@/features/media/binary';
 import {openMediaViewer} from '@/features/media/mediaViewer';
 import {toast} from '../../components/widgets';
 import {openImageViewer, type ViewerItem} from './imageViewer';
@@ -233,8 +232,8 @@ export function createMediaViewers(deps: MediaViewersDeps) {
     (window as any).__cycOpenUploadDoc = (name: string, url: string, mime?: string) =>
       openDocAttachment(name, url, mime);
 
-    (window as any).__cycDownloadShownBinary = (file: CycFileRef, url: string) =>
-      tapDownloadCard(file, url);
+    (window as any).__cycDownloadShownBinary = (name: string, url: string) =>
+      downloadShownBinary(name, url);
   }
 
   function onOpenFileCard(m: CycMessage) {
@@ -252,18 +251,18 @@ export function createMediaViewers(deps: MediaViewersDeps) {
         why: kind
           ? 'a shown video or audio file opens in the inline player'
           : iosLike()
-            ? 'a shown file downloads with progress on its card, then opens the iOS save sheet'
-            : "a shown file downloads straight into the browser's own downloads"
+            ? 'a shown file opens in the save sheet, which offers the iOS share sheet'
+            : 'a shown file downloads straight to disk'
       });
       if (!raw) {
         toast('No engine to download from');
         return;
       }
-      // A playable file opens the inline player; anything else is one tap on
-      // its card: the browser's own download (laptop, Android) or the save sheet
-      // (iOS), with the progress on the card. Never a viewer, never a page.
-      if (kind) openMediaViewer(m.file, raw, kind);
-      else tapDownloadCard(m.file, raw);
+      // A playable file (any device) or a device that can only save through the
+      // OS share sheet (iOS) goes through the viewer; a plain desktop download
+      // stays a one-tap fetch-and-save.
+      if (kind || iosLike()) openMediaViewer(m.file, raw, kind);
+      else void downloadShownBinary(m.file.name, raw, m.file.size);
       return;
     }
 
@@ -315,6 +314,25 @@ export function createMediaViewers(deps: MediaViewersDeps) {
     }
     const url = dataState.mode === 'live' && s ? engine.docUrl(s.id, m.file.docId) : undefined;
     openShownDoc(m.file, url, s?.id ?? null);
+  }
+
+  async function downloadShownBinary(name: string, url: string, size = 0) {
+    if (!url) {
+      toast('No engine to download from');
+      return;
+    }
+    const started = Date.now();
+    const notice = toast(`Downloading ${name}\u2026`, 600_000);
+    try {
+      const blob = await fetchBinary(url, {signal: AbortSignal.timeout(transferTimeoutMs(size))});
+      notice.dismiss();
+      cyclog('download.done', {name, bytes: blob.size, ms: Date.now() - started, via: 'download'});
+      void shareOrSaveBlob(name, blob);
+    } catch (err) {
+      notice.dismiss();
+      cyclog('download.failed', {name, ms: Date.now() - started, err});
+      toast('Download failed');
+    }
   }
 
   function openShownDoc(file: CycFileRef, url: string | undefined, owner: string | null) {

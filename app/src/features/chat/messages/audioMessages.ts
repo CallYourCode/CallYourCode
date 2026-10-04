@@ -37,44 +37,38 @@ export function audioMessage(
   const transcript = h('div', 'cyc-transcript' + (out ? '' : ' cyc-karaoke'));
 
   if (awaitingWords(m) || m.transcriptPending) {
-    const dots = (() => {
-      const d = h('span', 'cyc-transcript-dots relative');
-      const bg = h('span', 'opacity-0 [.cyc-karaoke_&]:opacity-40!');
-      bg.textContent = '...';
-      d.append(bg, transcriptDotWave());
-      return d;
-    })();
-    if (m.draftCommitted === undefined && m.transcriptPending && m.text) {
-      // The engine's pending row of a quoted or captioned note: its text is
-      // the quote and caption (formatted like any message), and the dots say
-      // the words are still being read.
-      setFormatted(transcript, m.text);
-      transcript.append(dots);
-    } else {
-      const cut = Math.max(0, Math.min(m.draftCommitted ?? m.text.length, m.text.length));
-      const done = h('span', 'cyc-vb-done');
-      done.textContent = m.text.slice(0, cut);
-      const tail = h('span', 'cyc-vb-tail opacity-50');
-      tail.textContent = m.text.slice(cut);
-      transcript.append(done, tail, dots);
-    }
+    const cut = Math.max(0, Math.min(m.draftCommitted ?? m.text.length, m.text.length));
+    const done = h('span', 'cyc-vb-done');
+    done.textContent = m.text.slice(0, cut);
+    const tail = h('span', 'cyc-vb-tail opacity-50');
+    tail.textContent = m.text.slice(cut);
+
+    transcript.append(
+      done,
+      tail,
+      (() => {
+        const dots = h('span', 'cyc-transcript-dots relative');
+        const bg = h('span', 'opacity-0 [.cyc-karaoke_&]:opacity-40!');
+        bg.textContent = '...';
+        dots.append(bg, transcriptDotWave());
+        return dots;
+      })()
+    );
   } else {
     setFormatted(transcript, m.text);
   }
   docWrapper.append(transcript);
 
-  // A failed send whose recording is still on this device (clipKey kept), or
-  // on the engine (msgId, not clipLost), can be resent: say so, rather than the
+  // A failed send whose recording is still on this device (clipKey kept, not
+  // clipLost) can be resent from the original bytes: say so, rather than the
   // "recording was not saved" copy that only fits a note whose clip is gone.
   // A refusal with a reason (the engine's size cap) names the reason instead.
-  const failed = m.status === 'failed';
-  const onEngine = !!(m as CycMessage & {msgId?: string}).msgId;
-  const keptForRetry = failed && !m.clipLost && (!!m.clipKey || onEngine);
+  const keptForRetry = m.status === 'failed' && !!m.clipKey && !m.clipLost;
   const failedCopy = m.failReason
     ? `not sent: ${m.failReason}`
     : 'not sent, and the recording was not saved';
-  if (failed || !hasRecording(m)) {
-    if (failed) {
+  if (m.status === 'failed' || !hasRecording(m)) {
+    if (m.status === 'failed') {
       messageNode.classList.add('cyc-msg-failed');
     }
     // Kept for retry: the note is the tap, delegated the way the text
@@ -92,10 +86,8 @@ export function audioMessage(
     note.append(
       makeIcon('deliveryFailed'),
       keptForRetry
-        ? m.failReason
-          ? `Not sent: ${m.failReason} Tap to try again`
-          : 'Not sent: tap to try again'
-        : failed
+        ? 'Not sent: tap to try again'
+        : m.status === 'failed'
           ? failedCopy
           : 'sent as text, the recording was not saved'
     );

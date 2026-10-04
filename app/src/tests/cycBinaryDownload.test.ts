@@ -2,7 +2,6 @@ import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 
 const engineCapFetch = vi.fn();
 vi.mock('../engine/contract', () => ({
-  EngineOffline: class EngineOffline extends Error {},
   engineCapFetch: (...a: unknown[]) => engineCapFetch(...a),
   engineObjectUrl: vi.fn((u: string) => Promise.resolve(u)),
   whenEngineReady: vi.fn(() => Promise.resolve(true)),
@@ -14,7 +13,7 @@ import {openMediaViewer} from '../features/media/mediaViewer';
 import type {CycFileRef} from '../types';
 
 const flush = async () => {
-  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+  for (let i = 0; i < 8; i++) await Promise.resolve();
 };
 
 type FakeRes = {
@@ -22,7 +21,6 @@ type FakeRes = {
   status?: number;
   headers?: Record<string, string>;
   blob?: Blob;
-  bytes?: Uint8Array;
   chunks?: Uint8Array[];
 };
 function res(opts: FakeRes) {
@@ -43,31 +41,9 @@ function res(opts: FakeRes) {
           }
         }
       : null,
-    blob: async () => opts.blob ?? new Blob([]),
-    // jsdom's Blob has no arrayBuffer(): a part carries its bytes directly
-    arrayBuffer: async () => (opts.bytes ?? new Uint8Array(0)).slice().buffer
+    blob: async () => opts.blob ?? new Blob([])
   };
 }
-
-// The engine's answer to one ranged part of `body`, as /doc/<id>/raw gives it.
-function part(body: Uint8Array, range: string, type = 'application/octet-stream') {
-  const m = /^bytes=(\d+)-(\d+)$/.exec(range)!;
-  const start = Number(m[1]);
-  const end = Math.min(Number(m[2]), body.length - 1);
-  return res({
-    status: 206,
-    headers: {'content-range': `bytes ${start}-${end}/${body.length}`, 'content-type': type},
-    bytes: body.slice(start, end + 1)
-  });
-}
-const blobBytes = (b: Blob) =>
-  new Promise<Uint8Array>((resolve) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(new Uint8Array(fr.result as ArrayBuffer));
-    fr.readAsArrayBuffer(b);
-  });
-const rangeOf = (init: unknown) =>
-  (init as {headers?: Record<string, string>} | undefined)?.headers?.range ?? '';
 
 describe('mediaKindOf: extension picks the playable kind', () => {
   test('video extensions', () => {
@@ -98,38 +74,10 @@ describe('transferTimeoutMs: no longer a flat 30 s', () => {
   });
 });
 
-describe('fetchBinary: ranged parts over the download lane', () => {
-  beforeEach(() => {
-    engineCapFetch.mockReset();
-  });
-  afterEach(() => {
-    delete (window as {__cycDownloadStallMs?: number}).__cycDownloadStallMs;
-  });
+describe('fetchBinary: streams progress and keeps the content-type', () => {
+  beforeEach(() => engineCapFetch.mockReset());
 
-  test('asks for the file in tunnel-chunk parts, in order, and keeps the type', async () => {
-    const body = new Uint8Array(600_000).map((_, i) => i % 251);
-    engineCapFetch.mockImplementation(async (_u: string, init: unknown) =>
-      part(body, rangeOf(init), 'video/mp4')
-    );
-    const seen: Array<[number, number]> = [];
-    const blob = await fetchBinary('doc://d/raw', {onProgress: (r, t) => seen.push([r, t])});
-    expect(engineCapFetch.mock.calls.map((c) => rangeOf(c[1]))).toEqual([
-      'bytes=0-262143',
-      'bytes=262144-524287',
-      // the first part told the size: the last one asks for exactly the rest
-      'bytes=524288-599999'
-    ]);
-    expect(seen).toEqual([
-      [262144, 600000],
-      [524288, 600000],
-      [600000, 600000]
-    ]);
-    expect(blob.size).toBe(600_000);
-    expect(blob.type).toBe('video/mp4');
-    expect([...(await blobBytes(blob))]).toEqual([...body]);
-  });
-
-  test('an engine that ignores Range (200) is read as one body', async () => {
+  test('a readable body reports cumulative bytes and returns a typed blob', async () => {
     engineCapFetch.mockResolvedValue(
       res({
         headers: {'content-length': '10', 'content-type': 'video/mp4'},
@@ -144,29 +92,20 @@ describe('fetchBinary: ranged parts over the download lane', () => {
     ]);
     expect(blob.size).toBe(10);
     expect(blob.type).toBe('video/mp4');
-    // asked once: a second pipelined Range would have been a second whole file
-    expect(engineCapFetch).toHaveBeenCalledTimes(1);
   });
 
-  test('a file the engine does not have fails at once', async () => {
-    engineCapFetch.mockResolvedValue(res({ok: false, status: 404}));
-    await expect(fetchBinary('doc://d/raw')).rejects.toThrow('HTTP 404');
-    // one request: nothing is pipelined before the engine has answered a part
-    expect(engineCapFetch).toHaveBeenCalledTimes(1);
+  test('no readable body falls back to a single .blob() read', async () => {
+    const only = new Blob(['abcd'], {type: 'application/pdf'});
+    engineCapFetch.mockResolvedValue(res({blob: only}));
+    const seen: Array<[number, number]> = [];
+    const blob = await fetchBinary('doc://d/raw', {onProgress: (r, t) => seen.push([r, t])});
+    expect(blob).toBe(only);
+    expect(seen).toEqual([[4, 4]]);
   });
 
-  test('a failing engine is retried, then fails within the stall bound instead of hanging', async () => {
-    (window as {__cycDownloadStallMs?: number}).__cycDownloadStallMs = 50;
+  test('a non-ok response throws', async () => {
     engineCapFetch.mockResolvedValue(res({ok: false, status: 500}));
-    await expect(fetchBinary('doc://d/raw')).rejects.toThrow(/no progress/);
-  });
-
-  test('an abort cancels the download', async () => {
-    engineCapFetch.mockReturnValue(new Promise(() => {}));
-    const ctl = new AbortController();
-    const p = fetchBinary('doc://d/raw', {signal: ctl.signal});
-    ctl.abort();
-    await expect(p).rejects.toThrow(/aborted/);
+    await expect(fetchBinary('doc://d/raw')).rejects.toThrow('HTTP 500');
   });
 });
 
@@ -246,7 +185,7 @@ describe('openMediaViewer: progress, playback, save-path and error states', () =
   });
 
   test('a failed fetch shows an error with a Retry button', async () => {
-    engineCapFetch.mockResolvedValue(res({ok: false, status: 404}));
+    engineCapFetch.mockResolvedValue(res({ok: false, status: 500}));
     openMediaViewer(file('clip.mp4'), 'doc://d/raw', 'video');
     await flush();
     expect(document.querySelector('.cyc-mv-error')).not.toBeNull();

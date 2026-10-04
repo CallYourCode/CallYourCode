@@ -6,30 +6,7 @@ const CtxCtor: typeof AudioContext | undefined =
   window.AudioContext ||
   (window as unknown as {webkitAudioContext?: typeof AudioContext}).webkitAudioContext;
 
-// The playback context exists only while a clip sounds through it. It is made
-// by the play that needs it and closed once nothing has sounded for
-// PLAYBACK_IDLE_MS. WebKit renders a page's AudioContexts of one format through
-// one shared output (SharedAudioDestination), and a context that sat idle for
-// the page's life held that output through every background: after an iPhone
-// came back, every new microphone context joined it and rendered nothing
-// (2026-10-03). Closed, not suspended: suspend() keeps the platform output
-// open (WebKit GTK: sink READY), close() releases it (sink NULL).
 let ctx: AudioContext | null = null;
-// Bumped each time a playback context is made, so a clip holding nodes from a
-// released context builds fresh ones on the new one.
-let ctxGen = 0;
-let unbindKick: (() => void) | null = null;
-// Clips sounding through the playback context right now; it is never released
-// under one of them.
-const sounding = new Set<WebAudioClip>();
-// Long enough that a reply queue playing clip after clip, or a seek (stop and
-// restart), keeps the one context.
-const PLAYBACK_IDLE_MS = 1_000;
-let idleTimer: ReturnType<typeof setTimeout> | null = null;
-
-// Decoding needs no output: an offline context decodes without holding one.
-let decoder: OfflineAudioContext | null = null;
-const decodeContext = (): OfflineAudioContext => (decoder ??= new OfflineAudioContext(1, 1, 48000));
 
 let workletReady = false;
 let workletModulePromise: Promise<boolean> | null = null;
@@ -40,27 +17,29 @@ function ensureWorkletModule(ac: AudioContext): Promise<boolean> {
 
   const t0 = performance.now();
 
-  const pending = ac.audioWorklet
+  workletModulePromise = ac.audioWorklet
     .addModule(new URL('cyc-wsola.js', document.baseURI).href)
     .catch(() => {
       const url = URL.createObjectURL(new Blob([WSOLA_WORKLET_JS], {type: 'text/javascript'}));
       return ac.audioWorklet.addModule(url).finally(() => URL.revokeObjectURL(url));
     })
     .then(() => {
-      // Loaded into a context released meanwhile: the current one has no module.
-      if (workletModulePromise !== pending) return false;
       workletReady = true;
       cyclog('worklet.compile', {ms: Math.round(performance.now() - t0)});
       return true;
     })
     .catch(() => false);
-  workletModulePromise = pending;
-  return pending;
+  return workletModulePromise;
+}
+
+export function warmClipPlayback(): void {
+  try {
+    void ensureWorkletModule(playbackContext());
+  } catch {}
 }
 
 export async function stretchProbe(): Promise<{worklet: boolean; stretched: number}> {
   const worklet = await ensureWorkletModule(playbackContext());
-  armIdleRelease();
   const tone = new Float32Array(4800);
   for (let i = 0; i < tone.length; i++) tone[i] = Math.sin((2 * Math.PI * 220 * i) / 48000);
   const out = wsolaStretch([tone], 48000, 2);
@@ -68,83 +47,34 @@ export async function stretchProbe(): Promise<{worklet: boolean; stretched: numb
 }
 
 function playbackContext(): AudioContext {
-  if (idleTimer) {
-    clearTimeout(idleTimer);
-    idleTimer = null;
-  }
   if (ctx) return ctx;
-  const ac = new CtxCtor!();
-  ctx = ac;
-  ctxGen++;
+  ctx = new CtxCtor!();
 
   const kick = () => {
-    if (ac.state !== 'running' && document.visibilityState === 'visible') {
-      void ac.resume().catch(() => {});
+    if (ctx!.state !== 'running' && document.visibilityState === 'visible') {
+      void ctx!.resume().catch(() => {});
     }
   };
   document.addEventListener('visibilitychange', kick);
-  ac.addEventListener('statechange', kick);
-  unbindKick = () => {
-    document.removeEventListener('visibilitychange', kick);
-    ac.removeEventListener('statechange', kick);
-  };
-  return ac;
+  ctx.addEventListener('statechange', kick);
+  return ctx;
 }
 
-function startSounding(clip: WebAudioClip): void {
-  sounding.add(clip);
-  if (idleTimer) {
-    clearTimeout(idleTimer);
-    idleTimer = null;
-  }
-}
-
-function stopSounding(clip: WebAudioClip): void {
-  if (sounding.delete(clip)) armIdleRelease();
-}
-
-function armIdleRelease(): void {
-  if (!ctx || sounding.size) return;
-  if (idleTimer) clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => {
-    idleTimer = null;
-    void releasePlaybackContext();
-  }, PLAYBACK_IDLE_MS);
-}
-
-export function playbackContextOpen(): boolean {
-  return !!ctx;
-}
-
-// Close the playback context now if nothing sounds through it; the next play
-// makes a fresh one. The idle timer does this on its own; the microphone calls
-// it too when its graph has stopped delivering audio, so a rebuilt graph never
-// joins an output this context holds. Resolves once the context is closed;
-// null when a clip is sounding and the context was kept.
-export function releasePlaybackContext(): Promise<void> | null {
-  if (!ctx) return Promise.resolve();
-  if (sounding.size) return null;
-  if (idleTimer) {
-    clearTimeout(idleTimer);
-    idleTimer = null;
-  }
-  const ac = ctx;
-  ctx = null;
-  unbindKick?.();
-  unbindKick = null;
-  // The stretch module is loaded per context.
-  workletReady = false;
-  workletModulePromise = null;
-  return ac.close().catch(() => {});
-}
-
-// A user gesture: resume the playback context if one is open. None is made
-// here; a context made now would sit idle until the next clip.
 export async function unlockPlayback(): Promise<void> {
-  const ac = ctx;
-  if (!ac) return;
+  const ac = playbackContext();
   try {
     await Promise.race([ac.resume(), new Promise((resolve) => setTimeout(resolve, 1000))]);
+  } catch {}
+  try {
+    const src = ac.createBufferSource();
+    src.buffer = ac.createBuffer(1, 1, ac.sampleRate);
+    src.connect(ac.destination);
+    src.start(0);
+    src.onended = () => {
+      try {
+        src.disconnect();
+      } catch {}
+    };
   } catch {}
 }
 
@@ -175,8 +105,6 @@ export class WebAudioClip {
   private worklet: AudioWorkletNode | null = null;
   private workletBuf: AudioBuffer | null = null;
   private workletChannels = 0;
-  // The playback context generation `gain` and `worklet` belong to.
-  private nodesGen = 0;
 
   private playingNode: 'buffer' | 'worklet' | null = null;
 
@@ -223,9 +151,6 @@ export class WebAudioClip {
 
     el.preservesPitch = true;
     (el as HTMLAudioElement & {webkitPreservesPitch?: boolean}).webkitPreservesPitch = true;
-    // ManagedMediaSource (how an iPhone streams a reply, audioCache) plays only
-    // on an element that opts out of AirPlay.
-    el.disableRemotePlayback = true;
     el.addEventListener('ended', () => {
       if (this.elMode && el.src !== SILENT_WAV) this.fire('ended');
     });
@@ -277,6 +202,7 @@ export class WebAudioClip {
       return;
     }
 
+    void ensureWorkletModule(playbackContext());
     const p = this.fetchDecode(url, gen);
     p.catch(() => {});
     this.decodeP = p;
@@ -289,7 +215,7 @@ export class WebAudioClip {
         : await fetch(url, {signal: AbortSignal.timeout(20_000)});
       if (!res.ok) throw new Error(`audio ${res.status}`);
       const bytes = await res.arrayBuffer();
-      const buf = await decodeContext().decodeAudioData(bytes);
+      const buf = await playbackContext().decodeAudioData(bytes);
       if (gen === this.decodeGen) {
         this.buffer = buf;
 
@@ -340,7 +266,7 @@ export class WebAudioClip {
 
     if (!this.playingNode || this._paused || !this.audioStarted) return this.offset;
 
-    const t = this.offset + ((ctx?.currentTime ?? this.startedAt) - this.startedAt) * this._rate;
+    const t = this.offset + (playbackContext().currentTime - this.startedAt) * this._rate;
     return this.buffer ? Math.min(t, this.buffer.duration) : t;
   }
   set currentTime(t: number) {
@@ -368,6 +294,7 @@ export class WebAudioClip {
       } catch {}
       return;
     }
+    if (rate !== 1) void ensureWorkletModule(playbackContext());
     const playing = this.playingNode && !this._paused;
 
     const at = playing ? this.currentTime : this.offset;
@@ -376,8 +303,8 @@ export class WebAudioClip {
     if (playing && this.buffer) {
       this.offset = at;
       this.startAt(at);
-    } else if (rate !== 1 && this.buffer && ctx) {
-      void ensureWorkletModule(ctx).then((ok) => {
+    } else if (rate !== 1 && this.buffer) {
+      void ensureWorkletModule(playbackContext()).then((ok) => {
         if (ok && this._rate === rate && !(this.playingNode && !this._paused))
           this.prewarmWorklet();
       });
@@ -436,8 +363,6 @@ export class WebAudioClip {
       this.startAt(this.offset);
     } catch (err) {
       if (token === this.playToken) this._paused = true;
-      // The context this play made has nothing sounding through it.
-      armIdleRelease();
       throw err;
     }
   }
@@ -495,20 +420,8 @@ export class WebAudioClip {
     else if (ev === 'timeupdate') this.ontimeupdate?.();
   }
 
-  // Nodes made on a released context cannot connect to the current one.
-  private nodesFor(ac: AudioContext): AudioContext {
-    if (this.nodesGen !== ctxGen) {
-      this.gain = null;
-      if (this.worklet) this.worklet.port.onmessage = null;
-      this.worklet = null;
-      this.workletBuf = null;
-      this.nodesGen = ctxGen;
-    }
-    return ac;
-  }
-
   private startAt(offset: number): void {
-    const ac = this.nodesFor(playbackContext());
+    const ac = playbackContext();
     this.stopSource();
     const buf = this.buffer!;
     const at = Math.min(Math.max(0, offset), Math.max(0, buf.duration - 0.001));
@@ -536,7 +449,6 @@ export class WebAudioClip {
     src.start(0, at);
     this.source = src;
     this.playingNode = 'buffer';
-    startSounding(this);
     this.offset = at;
     this.startedAt = ac.currentTime;
 
@@ -552,9 +464,8 @@ export class WebAudioClip {
   }
 
   private prewarmWorklet(): void {
-    // Only onto an open context: one made here would sit idle until a play.
-    if (this.elMode || this._rate === 1 || !this.buffer || !workletReady || !ctx) return;
-    const ac = this.nodesFor(ctx);
+    if (this.elMode || this._rate === 1 || !this.buffer || !workletReady) return;
+    const ac = playbackContext();
     const node = this.ensureWorkletNode(ac, this.buffer);
     node.port.postMessage({type: 'prewarm', tempo: this._rate});
   }
@@ -568,7 +479,6 @@ export class WebAudioClip {
     node.connect(this.gain!);
     node.port.postMessage({type: 'start', offset: at, tempo: this._rate, gen});
     this.playingNode = 'worklet';
-    startSounding(this);
     this.offset = at;
 
     this.audioStarted = false;
@@ -598,7 +508,7 @@ export class WebAudioClip {
         const m = e.data as {type?: string; gen?: number};
         if (!m || m.gen !== this.nodeGen || this.playingNode !== 'worklet') return;
         if (m.type === 'started') {
-          this.startedAt = ctx?.currentTime ?? 0;
+          this.startedAt = playbackContext().currentTime;
           this.audioStarted = true;
           if (this.playIntentAt) {
             this._firstAudioMs = Math.round(performance.now() - this.playIntentAt);
@@ -622,7 +532,6 @@ export class WebAudioClip {
   private endReached(): void {
     this.playingNode = null;
     this.source = null;
-    stopSounding(this);
     this.offset = this.buffer ? this.buffer.duration : this.offset;
     this._paused = true;
     this._ended = true;
@@ -645,7 +554,6 @@ export class WebAudioClip {
     const src = this.source;
     this.source = null;
     this.playingNode = null;
-    stopSounding(this);
     if (src) {
       try {
         src.stop();

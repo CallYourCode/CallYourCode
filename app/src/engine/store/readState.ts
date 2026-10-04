@@ -24,16 +24,28 @@ export type ReadMarker = {mid?: string; ts: number};
  * is at most one (heard intents coalesce per session, keeping the furthest ts),
  * so the overlay is read straight off the intent rather than mirrored in a
  * second store that could drift from it. */
-const isSpoken = (i: Intent) => (i.payload as HeardPayload).spoken === true;
-
 function pendingOf(sessionId: string): ReadMarker | undefined {
-  const i = intents
-    .all()
-    .find((x) => x.kind === 'heard' && x.sessionId === sessionId && !isSpoken(x));
+  const i = intents.all().find((x) => x.kind === 'heard' && x.sessionId === sessionId);
   if (!i) return undefined;
   const p = i.payload as HeardPayload;
   if (!Number.isFinite(p.ts)) return undefined;
   return p.mid ? {mid: p.mid, ts: p.ts} : {ts: p.ts};
+}
+
+/* A PRESS-TIME optimistic mark for this device's OWN row, held in memory only.
+ * A just-sent row has no engine identity yet and its durable sighting is queued
+ * on delivery (admit.ts); until then this keeps the unread divider from
+ * stranding above his own message without putting a heard intent in the drain
+ * to compete with the send it belongs to (reads drain ahead of sends). It is
+ * forward-only and superseded the moment the durable sighting or the broadcast
+ * reaches the same row (effectiveMarkerOf takes the furthest). */
+const localMarks = new Map<string, ReadMarker>();
+
+export function sightLocalRow(sessionId: string, marker: ReadMarker): void {
+  const s = sessions.get(sessionId);
+  const msgs = (s?.messages ?? []) as CycEngineMessage[];
+  const cur = localMarks.get(sessionId);
+  localMarks.set(sessionId, furthest(msgs, cur, marker) ?? marker);
 }
 
 /* The store index of a marker's row, resolved by durable IDENTITY ALONE: the
@@ -73,7 +85,8 @@ function furthest(
  * read here. The divider, landing and speech all anchor on THIS. */
 export function effectiveMarkerOf(s: CycEngineSession): ReadMarker | undefined {
   const msgs = s.messages as CycEngineMessage[];
-  return furthest(msgs, s.readThrough ?? undefined, pendingOf(s.id));
+  const broadcastPlusDurable = furthest(msgs, s.readThrough ?? undefined, pendingOf(s.id));
+  return furthest(msgs, broadcastPlusDurable, localMarks.get(s.id));
 }
 
 /* MAY A CLIP AUTOPLAY AS A LIVE ARRIVAL? The SAME truth the unread count and the
@@ -197,46 +210,9 @@ export function __resetReadStateFreshForTest(): void {
  * cannot immediately re-mark the chat read while the engine moves its marker
  * back. The engine stays the authority; this only clears the local overlay. */
 export function forgetSighting(sessionId: string): void {
-  // the engine moves speech back with the marker, so a queued spoken mark goes too
-  for (const i of intents.all()) {
-    if (i.kind === 'heard' && i.sessionId === sessionId) intents.remove(i.id);
-  }
-}
-
-/* HOW FAR SPEECH HAS GOT for a session: the engine's broadcast, or this
- * device's own queued report if that is further (it survives a reload with the
- * intent). 0 when nothing is known spoken. */
-export function spokenTsOf(s: CycEngineSession): number {
-  const i = intents.all().find((x) => x.kind === 'heard' && x.sessionId === s.id && isSpoken(x));
-  const queued = i ? (i.payload as HeardPayload).ts : 0;
-  return Math.max(s.spokenTs ?? 0, Number.isFinite(queued) ? queued : 0);
-}
-
-/* REPORT HOW FAR SPEECH HAS GOT: a clip played to the end, with every clip
- * before it (heardProgress decides the run). The same durable heard intent as a
- * sighting, under its own coalesce key and flagged `spoken`, so the engine
- * records it on its second fact and never on the read marker. Forward only. */
-export function reportSpoken(
-  sessionId: string,
-  row: {mid?: string; msgId?: string; ts: number}
-): void {
-  const s = sessions.get(sessionId);
-  if (!s || !Number.isFinite(row.ts) || row.ts <= spokenTsOf(s)) return;
-  intents.put({
-    id: 'spoken:' + sessionId + ':' + (crypto.randomUUID?.() ?? Date.now().toString(36)),
-    engineKey: s.engineKey,
-    sessionId,
-    kind: 'heard',
-    coalesceKey: 'spoken:' + sessionId,
-    payload: {
-      paneId: s.paneId,
-      mid: row.mid,
-      msgId: row.msgId,
-      ts: row.ts,
-      spoken: true
-    } satisfies HeardPayload
-  });
-  drain.kick(s.engineKey);
+  const i = intents.all().find((x) => x.kind === 'heard' && x.sessionId === sessionId);
+  if (i) intents.remove(i.id);
+  localMarks.delete(sessionId);
 }
 
 export function reportSighting(
@@ -269,7 +245,7 @@ drain.registerExecutor('heard', (intent: Intent): DrainOutcome => {
   const p = intent.payload as HeardPayload;
   const owner = connOf(intent.engineKey);
   if (!owner) return 'transient';
-  return owner.client.heard(p.paneId, {mid: p.mid, msgId: p.msgId, ts: p.ts}, p.spoken === true)
+  return owner.client.heard(p.paneId, {mid: p.mid, msgId: p.msgId, ts: p.ts})
     ? 'done'
     : 'transient';
 });

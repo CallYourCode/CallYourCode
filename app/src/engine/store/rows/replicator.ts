@@ -105,8 +105,6 @@ export type AttachOkLite = {
   deltaBase?: number;
   // the shown pages' fingerprints (repl.ts verifyPages reads them)
   fp?: EnginePagePrints;
-  // the chat log's axis epoch the answer belongs to (repl.ts settleAttachAxis)
-  axis?: string;
 };
 
 export function rowsFromPage(sessionId: string, page: EnginePage): StoreRow[] {

@@ -19,19 +19,7 @@ function msg(over: Omit<Partial<Msg>, 'id'> & {id?: number}): Msg {
 // SIGHTINGS and RENDERS the marker. The store is faked: `broadcast` stands in
 // for the engine's readThrough, `sightings` records what this device reported,
 // and effectiveMarkerOf overlays the newest sighting on the broadcast.
-// `onScreen` is the surface's answer to "what is on screen now" (row ids in the
-// viewport); by default the whole log is in view. `older`: history exists below
-// the loaded window.
-function makeWorld(
-  over: {
-    messages?: Msg[];
-    broadcast?: ReadMarker;
-    onScreen?: string[] | null;
-    older?: boolean;
-    // the engine's spoken mark as broadcast (another device, or before a reload)
-    spokenTs?: number;
-  } = {}
-) {
+function makeWorld(over: {messages?: Msg[]; broadcast?: ReadMarker} = {}) {
   const session = {
     id: 's1',
     name: 's1',
@@ -41,21 +29,14 @@ function makeWorld(
     messages: over.messages ?? []
   } as unknown as CycSession & {messages: CycMessage[]};
   const sightings: {mid?: string; msgId?: string; ts: number}[] = [];
-  const spoken: {mid?: string; msgId?: string; ts: number}[] = [];
   let overlay: ReadMarker | undefined;
   const store: HeardStore = {
-    reportSpoken: (_sid, row) => spoken.push(row),
-    spokenTsOf: () => Math.max(over.spokenTs ?? 0, ...spoken.map((r) => r.ts)),
     get: (id) => (id === 's1' ? session : undefined),
     reportSighting: (_sid, row) => {
       sightings.push(row);
       overlay = row.mid ? {mid: row.mid, ts: row.ts} : {ts: row.ts};
     },
-    // `back`: the marker was moved back (mark unread): the overlay is dropped
-    effectiveMarkerOf: () => {
-      if ((session as unknown as {back?: boolean}).back) overlay = undefined;
-      return overlay ?? over.broadcast;
-    }
+    effectiveMarkerOf: () => overlay ?? over.broadcast
   };
   const heardMarked: [string, ReadMarker][] = [];
   const hp = createHeardProgress({
@@ -63,15 +44,9 @@ function makeWorld(
     isLive: () => true,
     activeId: () => 's1',
     isChatViewOpen: () => true,
-    onScreenRows: () =>
-      over.onScreen === null ? undefined : (over.onScreen ?? session.messages.map((m) => m.id)),
-    historyBelowWindow: () => over.older ?? false,
     onHeardMarked: (sid, marker) => heardMarked.push([sid, marker])
   });
-  const view = (ids: string[] | null) => {
-    over.onScreen = ids;
-  };
-  return {session, hp, sightings, heardMarked, view, spoken};
+  return {session, hp, sightings, heardMarked};
 }
 
 beforeEach(() => {
@@ -108,14 +83,7 @@ describe('markSeen', () => {
       messages: [
         msg({id: 1, ts: 150, mid: 'mr-1'}),
         msg({id: 2, ts: 200, mid: 'mr-2'}),
-        msg({
-          id: 3,
-          ts: 201,
-          kind: 'status',
-          text: 'status: done',
-          mid: undefined,
-          role: undefined as never
-        })
+        msg({id: 3, ts: 201, kind: 'status', text: 'status: done', mid: undefined, role: undefined as never})
       ]
     });
     hp.markSeen('s1');
@@ -123,16 +91,7 @@ describe('markSeen', () => {
   });
   test('a log of records only has nothing to sight', () => {
     const {hp, sightings} = makeWorld({
-      messages: [
-        msg({
-          id: 1,
-          ts: 10,
-          kind: 'status',
-          text: 'status: idle',
-          mid: undefined,
-          role: undefined as never
-        })
-      ]
+      messages: [msg({id: 1, ts: 10, kind: 'status', text: 'status: idle', mid: undefined, role: undefined as never})]
     });
     hp.markSeen('s1');
     expect(sightings).toEqual([]);
@@ -141,192 +100,6 @@ describe('markSeen', () => {
     const {hp, sightings} = makeWorld({messages: []});
     hp.markSeen('s1');
     expect(sightings).toEqual([]);
-  });
-});
-
-describe('the one rule: read only what has been on screen (owner, 2026-10-03)', () => {
-  const log = () => [
-    msg({id: 1, ts: 100, mid: 'mr-1'}),
-    msg({id: 2, ts: 200, mid: 'mr-2'}),
-    msg({id: 3, ts: 300, mid: 'mr-3'})
-  ];
-  test('a reader scrolled up sights only the rows in view, not the reply below', () => {
-    // The verifier's B1: the arrival raised "1 new below" AND marked the chat
-    // read on every device, because the sighting named the newest row.
-    const {hp, sightings} = makeWorld({messages: log(), onScreen: ['1', '2']});
-    hp.reportViewedThrough('s1');
-    expect(sightings).toEqual([{mid: 'mr-2', msgId: undefined, ts: 200}]);
-  });
-  test('leaving the chat sights what is on screen as it goes, no further', () => {
-    const {hp, sightings} = makeWorld({messages: log(), onScreen: ['1']});
-    hp.markSeen('s1');
-    expect(sightings).toEqual([{mid: 'mr-1', msgId: undefined, ts: 100}]);
-  });
-  test('nothing on screen (another chat painted, the page hidden): nothing is read', () => {
-    const {hp, sightings} = makeWorld({messages: log(), onScreen: null});
-    hp.reportViewedThrough('s1');
-    hp.markSeen('s1');
-    expect(sightings).toEqual([]);
-  });
-  test('a pending own bubble on screen: the newest agent row with an identity is sighted', () => {
-    const {hp, sightings} = makeWorld({
-      messages: [...log(), msg({id: 4, ts: 400, mid: undefined, role: 'user'})]
-    });
-    hp.reportViewedThrough('s1');
-    expect(sightings).toEqual([{mid: 'mr-3', msgId: undefined, ts: 300}]);
-  });
-});
-
-describe('B2: the marker only moves through a contiguous run of rows that were on screen', () => {
-  const log = () => [1, 2, 3, 4, 5].map((n) => msg({id: n, ts: n * 100, mid: `mr-${n}`}));
-  test('a view the app jumped to the bottom reads none of the rows it skipped', () => {
-    // The landing/re-open/deep landing ends at the bottom: rows 4-5 on screen,
-    // 2-3 never were. The old rule read through 5 (and so 2-3 with it).
-    const {hp, sightings} = makeWorld({
-      messages: log(),
-      broadcast: {mid: 'mr-1', ts: 100},
-      onScreen: ['4', '5']
-    });
-    hp.reportViewedThrough('s1');
-    expect(sightings).toEqual([]);
-  });
-  test('scrolling up through the skipped rows then completes the run', () => {
-    const {hp, sightings, view} = makeWorld({
-      messages: log(),
-      broadcast: {mid: 'mr-1', ts: 100},
-      onScreen: ['4', '5']
-    });
-    hp.reportViewedThrough('s1'); // the landing: nothing
-    view(['3']);
-    hp.noteOnScreen('s1'); // the reader drags up through 3...
-    view(['2']);
-    hp.reportViewedThrough('s1'); // ...and pauses on 2: 2-5 all seen
-    expect(sightings).toEqual([{mid: 'mr-5', msgId: undefined, ts: 500}]);
-  });
-  test('a gap stops the run at the last row before it', () => {
-    const {hp, sightings, view} = makeWorld({
-      messages: log(),
-      broadcast: {mid: 'mr-1', ts: 100},
-      onScreen: ['2']
-    });
-    hp.noteOnScreen('s1');
-    view(['4', '5']);
-    hp.reportViewedThrough('s1');
-    expect(sightings).toEqual([{mid: 'mr-2', msgId: undefined, ts: 200}]);
-  });
-  test('his own rows and the activity records do not have to be seen', () => {
-    const {hp, sightings} = makeWorld({
-      messages: [
-        msg({id: 1, ts: 100, mid: 'mr-1'}),
-        msg({id: 2, ts: 200, mid: 'mr-2', role: 'user'}),
-        msg({
-          id: 3,
-          ts: 250,
-          kind: 'status' as never,
-          text: 'status: done',
-          mid: undefined,
-          role: undefined as never
-        }),
-        msg({id: 4, ts: 300, mid: 'mr-4'})
-      ],
-      broadcast: {mid: 'mr-1', ts: 100},
-      onScreen: ['4']
-    });
-    hp.reportViewedThrough('s1');
-    expect(sightings).toEqual([{mid: 'mr-4', msgId: undefined, ts: 300}]);
-  });
-  test('a marker below the loaded window, with older history unloaded, cannot be jumped', () => {
-    const {hp, sightings} = makeWorld({
-      messages: log(),
-      broadcast: {mid: 'mr-0', ts: 50},
-      older: true
-    });
-    hp.reportViewedThrough('s1');
-    expect(sightings).toEqual([]);
-  });
-  test('the whole history loaded and all of it seen: read from the start', () => {
-    const {hp, sightings} = makeWorld({messages: log(), broadcast: {mid: 'mr-0', ts: 50}});
-    hp.reportViewedThrough('s1');
-    expect(sightings).toEqual([{mid: 'mr-5', msgId: undefined, ts: 500}]);
-  });
-  test('a marker moved back (marked unread) needs the rows seen again', () => {
-    const {hp, sightings, view, session} = makeWorld({
-      messages: log(),
-      broadcast: {mid: 'mr-1', ts: 100},
-      onScreen: ['2', '3']
-    });
-    hp.reportViewedThrough('s1');
-    expect(sightings.at(-1)).toEqual({mid: 'mr-3', msgId: undefined, ts: 300});
-    view(['4']);
-    hp.noteOnScreen('s1'); // 4 seen, not yet reported
-    // marked unread elsewhere: the effective marker goes back to row 1
-    (session as unknown as {back: boolean}).back = true;
-    sightings.length = 0;
-    view(['5']);
-    hp.reportViewedThrough('s1');
-    expect(sightings).toEqual([]);
-  });
-});
-
-describe('heardOrSeen: what speech must not pick again (release-1 B1)', () => {
-  test('a clip heard to the end after an unseen row is heard, though the marker stays', () => {
-    const {hp, sightings} = makeWorld({
-      messages: [
-        msg({id: 1, ts: 100, mid: 'mr-1'}),
-        msg({id: 2, ts: 200, mid: 'mr-2', msgId: 'b'}),
-        msg({id: 3, ts: 300, mid: 'mr-3', msgId: 'c'})
-      ],
-      broadcast: {mid: 'mr-1', ts: 100},
-      onScreen: []
-    });
-    hp.markHeard('s1', 'c');
-    expect(sightings).toEqual([]); // mr-2 unseen: the marker does not move
-    expect(hp.heardOrSeen('s1', '3')).toBe(true);
-    expect(hp.heardOrSeen('s1', '2')).toBe(false);
-  });
-});
-
-describe('spoken: how far speech has got is reported to the engine (release-1 re-gate B2)', () => {
-  const clips = () => [
-    msg({id: 1, ts: 100, mid: 'mr-1'}),
-    msg({id: 2, ts: 200, mid: 'mr-2', msgId: 'b'}),
-    msg({id: 3, ts: 300, mid: 'mr-3', msgId: 'c'}),
-    msg({id: 4, ts: 400, mid: 'mr-4', msgId: 'd'})
-  ];
-  test('two clips heard to the end above unseen rows: spoken reported, read marker untouched', () => {
-    // The re-gate: nothing reached the engine, so a reload replayed both.
-    const {hp, sightings, spoken} = makeWorld({
-      messages: [msg({id: 0, ts: 50, mid: 'mr-0'}), ...clips()],
-      broadcast: {mid: 'mr-0', ts: 50},
-      onScreen: []
-    });
-    hp.markHeard('s1', 'b');
-    hp.markHeard('s1', 'c');
-    expect(sightings).toEqual([]); // mr-1 never on screen: still unread
-    expect(spoken.map((r) => r.mid)).toEqual(['mr-2', 'mr-3']);
-  });
-  test('a clip heard out of order (a tap past an unheard one) is not covered yet', () => {
-    const {hp, spoken} = makeWorld({
-      messages: [msg({id: 0, ts: 50, mid: 'mr-0'}), ...clips()],
-      broadcast: {mid: 'mr-0', ts: 50}, // mr-1 unseen: the read marker stays put
-      onScreen: []
-    });
-    hp.markHeard('s1', 'c'); // b unheard: the high-water mark may not jump it
-    expect(spoken).toEqual([]);
-    hp.markHeard('s1', 'b'); // now the run b, c is complete
-    expect(spoken.map((r) => r.mid)).toEqual(['mr-3']);
-  });
-  test('after a reload or on another device the engine mark alone keeps heard clips silent', () => {
-    // a fresh page: empty seen set, nothing heard here; the broadcast says 300
-    const {hp} = makeWorld({
-      messages: clips(),
-      broadcast: {mid: 'mr-1', ts: 100},
-      spokenTs: 300,
-      onScreen: []
-    });
-    expect(hp.heardOrSeen('s1', '2')).toBe(true);
-    expect(hp.heardOrSeen('s1', '3')).toBe(true);
-    expect(hp.heardOrSeen('s1', '4')).toBe(false);
   });
 });
 
@@ -367,17 +140,13 @@ describe('reportViewedThrough', () => {
     const store: HeardStore = {
       get: () => ({id: 's1', messages: [msg({id: 1, ts: 1, mid: 'mr-1'})]}) as never,
       reportSighting: (_sid, row) => sightings.push(row),
-      effectiveMarkerOf: () => undefined,
-      reportSpoken: () => {},
-      spokenTsOf: () => 0
+      effectiveMarkerOf: () => undefined
     };
     const hp = createHeardProgress({
       store,
       isLive: () => true,
       activeId: () => 'other',
       isChatViewOpen: () => true,
-      onScreenRows: () => ['1'],
-      historyBelowWindow: () => false,
       onHeardMarked: () => {}
     });
     hp.reportViewedThrough('s1');
@@ -388,17 +157,13 @@ describe('reportViewedThrough', () => {
     const store: HeardStore = {
       get: () => ({id: 's1', messages: [msg({id: 1, ts: 5, mid: 'mr-5'})]}) as never,
       reportSighting: (_sid, row) => sightings.push(row),
-      effectiveMarkerOf: () => undefined,
-      reportSpoken: () => {},
-      spokenTsOf: () => 0
+      effectiveMarkerOf: () => undefined
     };
     const hp = createHeardProgress({
       store,
       isLive: () => false,
       activeId: () => 's1',
       isChatViewOpen: () => true,
-      onScreenRows: () => ['1'],
-      historyBelowWindow: () => false,
       onHeardMarked: () => {}
     });
     hp.reportViewedThrough('s1');

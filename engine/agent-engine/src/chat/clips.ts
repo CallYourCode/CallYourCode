@@ -153,25 +153,6 @@ export async function adoptStagedClip(sessionId: string, msgId: string): Promise
   }
 }
 
-/* A CLIP THIS SESSION ALREADY ADOPTED, for a message whose row was never
- * written. Adoption moves the clip into the agent's own dir before the row is
- * written (deliver.ts), and the blob index is rebuilt from rows at boot, so a
- * crash in between left the clip at home with no owner on record and every
- * reader looking only in staging. The re-drive of that message (intake.ts)
- * names the session it was sent to; a clip of that msgId in THAT session's
- * own dir is its, and the ownership is recorded again. Never another agent's
- * dir, and nothing for a msgId the index already places. */
-export async function reclaimAdoptedClip(sessionId: string, msgId: string): Promise<void> {
-  if (!safeCid(msgId) || deps.blobOwner().has(msgId)) return;
-  const aid = deps.agentIdFor(sessionId);
-  for (const ext of Object.keys(EXT_MIME)) {
-    if (await Bun.file(`${agentAudioDir(aid)}/${msgId}.${ext}`).exists().catch(() => false)) {
-      deps.blobOwner().set(msgId, aid);
-      return;
-    }
-  }
-}
-
 /* Does this engine hold the recording behind this msgId, anywhere. NOT
  * `audio.has(msgId)` alone: the hot cache is capped and restarts empty it,
  * while the clip itself is on disk from the moment /user-audio answers. */

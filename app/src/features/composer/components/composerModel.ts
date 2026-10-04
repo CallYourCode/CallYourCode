@@ -42,10 +42,6 @@ export type VoiceClip = {
 
   waiting?: boolean;
 
-  // The send was pressed and waits for these words: the connected engine
-  // cannot fill a voice note's words beside a quote or caption.
-  wordsWait?: boolean;
-
   restored?: boolean;
 };
 

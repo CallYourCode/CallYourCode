@@ -34,8 +34,9 @@ export function installPipelineUiBindings({
       );
       updateVoiceStrip();
       if (state === 'idle' && cap.voiceDraft) scheduleIdleDraftSweep(cap);
-      // The last capture settled: release the mic (see composer wiring).
-      if (state === 'idle') releaseMicIfIdle();
+      // A recording just ended: keep the granted stream for the grace window so
+      // a follow-up recording reuses it (no per-recording getUserMedia prompt).
+      if (state === 'idle') releaseMicIfIdle(true);
     })
   );
   onTeardown(
