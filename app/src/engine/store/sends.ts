@@ -186,6 +186,7 @@ export function writeSend(payload: SendPayload): boolean {
       : {}),
     ...(payload.words?.length ? {words: payload.words} : {}),
     ...(payload.partials?.length ? {partials: payload.partials} : {}),
+    ...(payload.around ? {around: payload.around} : {}),
     cid: payload.cid
   });
 }

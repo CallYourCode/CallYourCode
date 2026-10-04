@@ -435,6 +435,7 @@ export class WsEngineClient implements EngineClient {
       cid?: string;
       words?: string[];
       partials?: {id: string; text: string; upToS: number}[];
+      around?: {before: string; after: string};
     } = {}
   ): boolean {
     cyclog('send.utterance', {

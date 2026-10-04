@@ -3,7 +3,7 @@ import {markGrowing} from '../../audio/audioCache';
 import type {CycMessage} from '../../types';
 import {capSeen, seen} from './registry';
 import {stampRowId} from './rows/core';
-import {settleSend} from './sends';
+import {quoteForWire, settleSend} from './sends';
 import {reportSighting} from './readState';
 import {noteClip} from './voiceNotes';
 import {prefetchShownDoc} from './shownPrefetch';
@@ -114,9 +114,12 @@ export function adoptEngineRow(
   // holds a PARTIAL: the engine's delivered text is the settled superset
   // (device words plus the decoded tail) and replaces it whole, one repaint,
   // no duplicate. A bubble with no text at all takes the engine's words as
-  // before.
+  // before. The reply excerpt's quote the engine put before the words is
+  // the reply panel's, not the bubble text's, as for a bodied send.
   if (displayText && (local.draftCommitted !== undefined || !local.text)) {
-    local.text = displayText;
+    const quoted = local.replyTo?.text?.trim() ? quoteForWire(local.replyTo.text) + '\n\n' : '';
+    local.text =
+      quoted && displayText.startsWith(quoted) ? displayText.slice(quoted.length) : displayText;
   }
 
   if (local.wordsPending) {

@@ -21,7 +21,7 @@ import { audio, clipOnDisk, haveClip, adoptStagedClip } from "./clips.ts";
 import { attachmentsOf, attachmentFields, uploadIds, type ChatMsg, type UploadRec } from "./chatmsg.ts";
 import { persistPatch, type Session } from "../sessions/session-state.ts";
 import { transcribeStored, showPendingVoiceNote, readWords, fillWords,
-  raceInlineRescue, WORDS_TOKEN_RE, type SettledPartial } from "../voice/transcribe.ts";
+  raceInlineRescue, aroundWords, WORDS_TOKEN_RE, type SettledPartial } from "../voice/transcribe.ts";
 import { admitPartial, wordsOf, keptPrefix, release } from "../voice/transcript-record.ts";
 import type { ReplyDelivery } from "./reply-trace.ts";
 import type { OutgoingInput } from "../plugins/platform/core.ts";
@@ -485,6 +485,11 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
         }
       }
     }
+    /* The reply quote and caption the app sent beside the empty body
+     * (`words-around`): the words go between them. */
+    const around = m.around && typeof m.around.before === "string" &&
+      typeof m.around.after === "string" ?
+      { before: m.around.before, after: m.around.after } : undefined;
     const rescue = transcribeStored(voice.msgId, cid, notePartial);
     /* The race is transcribe.ts's now, unchanged in what it decides: the
      * deadline and the decode it bounds are one decision, measured on the one
@@ -497,9 +502,10 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
           why: "the engine could not read its own copy either; delivering a placeholder" });
         text = "(voice note: transcription failed)";
       }
+      text = aroundWords(text, around);
     } else {
       showPendingVoiceNote(s, { cid, how: m.kind === "voice" ? "VOICE" : "TEXT",
-        extra: voice, msgId: voice.msgId, takenAt }, rescue);
+        extra: voice, msgId: voice.msgId, takenAt, around }, rescue);
       return;
     }
   }

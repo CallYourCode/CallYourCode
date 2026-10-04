@@ -375,6 +375,39 @@ describe('honest voice-clip send over the transfer queue', () => {
     });
   });
 
+  test('a quoted, captioned empty-body note: the wire carries the quote and caption around the words', async () => {
+    vi.mocked(transfers.rowOf).mockImplementation((k) => queuedRow(k, s.id));
+    const replyTo = {ts: 5, role: 'claude' as const, title: 'Claude', text: 'line one\nline two'};
+    const id = sendVoiceClip(s.id, clip(), {
+      durationS: 8,
+      text: '',
+      replyTo,
+      around: {before: '', after: 'and a caption'}
+    });
+    const m = s.messages.find((x) => x.id === id) as CycEngineMessage;
+    // The quote is the one a bodied note puts before its words.
+    const around = {before: '> line one\n> line two', after: 'and a caption'};
+    expect(payloadOf(m.cid!)).toMatchObject({text: '', wire: '', around});
+    await flush();
+    const row = doneRow(m.cid!, s.id, 'srv-around-1');
+    vi.mocked(transfers.rowOf).mockReturnValue(row);
+    registeredOnResult(row);
+    await flush();
+    expect(planted.sent).toHaveLength(1);
+    expect(planted.sent[0][1]).toBe('');
+    expect(planted.sent[0][2]).toMatchObject({kind: 'voice', msgId: 'srv-around-1', around});
+    // A retry resends the same quote and caption.
+    m.status = 'failed';
+    vi.mocked(clipVault.get).mockResolvedValue({
+      blob: clip(),
+      mime: 'audio/webm',
+      durationS: 8
+    } as never);
+    expect(retryVoiceClip(s.id, id)).toBe(true);
+    await flush();
+    expect(payloadOf(m.cid!)).toMatchObject({text: '', wire: '', around});
+  });
+
   test('a send made while disconnected still enqueues pending and moves no bytes', async () => {
     sync.noteDown(KEY);
     conns.splice(conns.indexOf(planted.conn), 1);

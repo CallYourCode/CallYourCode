@@ -139,6 +139,10 @@ export type VoiceClipOpts = {
   // its committed cut), painted on the sent row at once and grown by the
   // capture's later partial events; the wire body stays `text`.
   display?: {text: string; committed: number};
+  // For an empty-body note the engine fills: the caption/quote composed
+  // before and after the recording's words. The reply excerpt's quote is
+  // added here, as for a bodied note.
+  around?: {before: string; after: string};
 };
 
 // Send a recorded voice note. Returns the local message id (or '' if there is no
@@ -161,6 +165,15 @@ export function sendVoiceClip(sessionId: string, blob: Blob, opts: VoiceClipOpts
   const clean = (opts.text ?? '').trim();
   const excerpt = (opts.replyTo?.text ?? '').trim();
   const wire = clean && excerpt ? quoteForWire(excerpt) + '\n\n' + clean : clean;
+  const around =
+    !clean && opts.around
+      ? {
+          before: [excerpt ? quoteForWire(excerpt) : '', opts.around.before]
+            .filter(Boolean)
+            .join('\n\n'),
+          after: opts.around.after
+        }
+      : undefined;
 
   const msg: CycEngineMessage = stampRowId({
     id: '',
@@ -225,7 +238,8 @@ export function sendVoiceClip(sessionId: string, blob: Blob, opts: VoiceClipOpts
         // The device's settled streaming words, named by the frame's cid (a
         // voice note has no uploadId to hang them on): the engine reads only
         // the clip's tail past upToS and prepends these.
-        ...(opts.partial ? {partials: [{id: cid, ...opts.partial}]} : {})
+        ...(opts.partial ? {partials: [{id: cid, ...opts.partial}]} : {}),
+        ...(around ? {around} : {})
       } satisfies SendPayload
     },
     {after: transfers.enqueued(cid), alongside: opts.alongside}
@@ -377,6 +391,7 @@ export function retryVoiceClip(sessionId: string, localId: string): boolean {
       replyTo: cur.replyTo,
       wire: payload?.wire ?? cur.wireText ?? cur.text,
       ...(payload?.partials?.length ? {partials: payload.partials} : {}),
+      ...(payload?.around ? {around: payload.around} : {}),
       clipKey: key,
       transferKey: key
     };

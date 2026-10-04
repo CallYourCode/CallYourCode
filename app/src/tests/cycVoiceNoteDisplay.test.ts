@@ -73,6 +73,15 @@ describe('adoptEngineRow on a streaming voice display', () => {
     expect(local.text).toBe('server words');
   });
 
+  test('a quoted note takes the engine words without the quote its reply panel already shows', () => {
+    const replyTo = {ts: 5, role: 'claude' as const, title: 'Claude', text: 'the quoted line'};
+    const local = mkLocal({text: 'half heard', draftCommitted: 4, replyTo});
+    const s = mkSession(local);
+    const full = '> the quoted line\n\nhalf heard and the rest\n\nand a caption';
+    adoptEngineRow(s, local, engineRow({text: full}), full, 'k5');
+    expect(local.text).toBe('half heard and the rest\n\nand a caption');
+  });
+
   test('a PENDING echo keeps the device stream open: display stands, draftCommitted kept', () => {
     const local = mkLocal({text: 'growing device words', draftCommitted: 20});
     const s = mkSession(local);

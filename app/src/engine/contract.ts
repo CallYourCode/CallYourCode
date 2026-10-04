@@ -434,6 +434,7 @@ export interface EngineClient {
       cid?: string;
       words?: string[];
       partials?: {id: string; text: string; upToS: number}[];
+      around?: {before: string; after: string};
     }
   ): boolean;
 

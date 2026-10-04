@@ -360,9 +360,11 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       // wait; the composer clears synchronously.
       //
       // The engine only fills a voice note whose body is empty (a non-empty
-      // body is the device's own words and is left alone), so when the user
-      // typed a caption or is answering with a reply excerpt -- text that MUST
-      // ride the wire -- the engine will NOT server-fill this note. In that
+      // body is the device's own words and is left alone). A caption or a
+      // reply excerpt rides beside that empty body as `around` on an engine
+      // that advertises `words-around`: it puts the words between them, the
+      // same text a bodied note carries. On an older engine that text MUST
+      // ride the body, so the engine will NOT server-fill this note. In that
       // case, and on an engine without server words at all, the on-device
       // decoder is the only transcript source, so we bound-wait
       // (`settleHeldWords`, up to 10s) for it to settle before reading the
@@ -371,14 +373,23 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       // `words` markers do not apply here: they fill uploads listed on a text
       // message, not a voice note's own clip.
       const canWords = engine.engineCan(s.id, 'words');
+      const canAround = engine.engineCan(s.id, 'words-around');
       const hasReplyExcerpt = !!replyTo?.text?.trim();
-      // The caption/quote typed alongside the recording, with the recording's
-      // own (still-settling) words suppressed.
-      const alongsideText = compose((sg) => (sg === st ? '' : undefined)).text.trim();
-      const needsBody = !!alongsideText || hasReplyExcerpt;
+      // The caption/quote typed alongside the recording, before and after the
+      // recording's own (still-settling) words, without the gap between them.
+      const here = '\u0000voice\u0000';
+      const [before = '', after = ''] = compose((sg) => (sg === st ? here : undefined))
+        .text.trim()
+        .split(here);
+      const around = {before: before.replace(/\n\n$/, ''), after: after.replace(/^\n\n/, '')};
+      const needsBody = !!around.before || !!around.after || hasReplyExcerpt;
       const shipVoice = (
         body: string,
-        extra?: {partial?: {text: string; upToS: number}; streaming?: boolean}
+        extra?: {
+          partial?: {text: string; upToS: number};
+          streaming?: boolean;
+          around?: {before: string; after: string};
+        }
       ): Promise<SendSettled> => {
         const capId = loneCap!;
         cap.heldClips.delete(capId);
@@ -391,6 +402,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           // the sent bubble, and (draftCommitted set, even at zero chars)
           // keeps the row OPEN so the capture's later partials grow it live.
           ...(extra?.streaming ? {display: {text: heard.text, committed: heard.committed}} : {}),
+          ...(extra?.around ? {around: extra.around} : {}),
           ...(replyTo ? {replyTo} : {}),
           ...(alongside ? {alongside} : {})
         });
@@ -413,7 +425,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           delivered: settling
         });
       };
-      if (canWords && !needsBody) {
+      if (canWords && (!needsBody || canAround)) {
         // Instant, no wait (the owner's common record-then-Enter case), and
         // the words this device already settled go WITH the send: the point
         // of streaming transcription is that the engine never re-reads audio
@@ -421,21 +433,23 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
         const p = settledPartialOf(cap.partialByCapture.get(loneCap), st.durationS);
         if (p?.whole) {
           // The streaming decoder finalized the whole clip: the settled text
-          // IS the transcript. It ships as the body; the engine decodes
-          // nothing and the bubble is final at once.
-          return shipVoice(p.text);
+          // IS the transcript. It ships as the body (with any caption, as
+          // today); the engine decodes nothing and the bubble is final at once.
+          return shipVoice([around.before, p.text, around.after].filter(Boolean).join('\n\n'));
         }
         // Empty body plus the settled prefix: the engine decodes only the
         // tail past upToS and prepends this text. No prefix settled yet: the
         // engine reads the whole clip, exactly as before.
         return shipVoice('', {
           ...(p ? {partial: {text: p.text, upToS: p.upToS}} : {}),
-          streaming: true
+          streaming: true,
+          ...(needsBody ? {around} : {})
         });
       }
-      // A body must ride the wire (caption/reply) or the engine cannot fill
-      // it (`!canWords`): the device is the only transcript source, so wait
-      // for it to settle, then bake the full transcript in.
+      // A body must ride the wire (caption/reply on an engine without
+      // `words-around`) or the engine cannot fill it (`!canWords`): the
+      // device is the only transcript source, so wait for it to settle, then
+      // bake the full transcript in.
       return (async () => {
         await settleHeldWords();
         return shipVoice(compose().text.trim());
