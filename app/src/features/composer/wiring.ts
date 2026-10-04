@@ -68,10 +68,10 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
   });
 
   // `grace` keeps the stream open for MIC_GRACE_MS across back-to-back PTT
-  // recordings. The hard-release triggers (backgrounding on a touch device via
-  // hiddenSilences, hands-free end, teardown) call this without it, so they
-  // dispose at once and never hold the mic (or its iOS in-use indicator) in the
-  // background.
+  // recordings. The hard-release triggers (a press release, backgrounding on a
+  // touch device via hiddenSilences, hands-free end, teardown) call this without
+  // it, so they dispose at once and never hold the mic (or its iOS in-use
+  // indicator) in the background.
   function releaseMicIfIdle(grace = false) {
     const p = mic.ready;
     if (!p) return;
@@ -81,7 +81,9 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       if (pipeline.handsFreeSessionId) return;
       if (sessionState.activeId && sessionState.chatConversationMode.has(sessionState.activeId))
         return;
-      if (pipeline.captureBusy) {
+      // Only a take still recording needs the mic. A released take decodes
+      // from what it already captured, so its transcript never holds the mic.
+      if (pipeline.liveCaptureId) {
         if (retries > 0) window.setTimeout(() => attempt(retries - 1), 400);
         return;
       }
@@ -742,7 +744,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       }
       pipeline.endPTT();
 
-      releaseMicIfIdle(true);
+      releaseMicIfIdle();
     }
   });
 

@@ -206,48 +206,20 @@ describe('releaseMicIfIdle', () => {
     expect(micMock.ready).not.toBeNull();
   });
 });
-// Bug 2: keep a granted mic stream alive across back-to-back push-to-talk
-// recordings (a grace window) so getUserMedia is not re-run -- and, on iOS, not
-// re-prompted -- per recording. Hard-release triggers still dispose at once.
+// Bug 2: keep a granted mic stream alive for a grace window so getUserMedia is
+// not re-run -- and, on iOS, not re-prompted -- per recording. A press release
+// is a hard release (the mic's job ends when the take does), as are the other
+// hard-release triggers.
 describe('mic keep-alive (Bug 2)', () => {
-  test('G6: a PTT release keeps the stream for the grace window, then disposes', async () => {
+  test('G6: a PTT release disposes at once, with no grace window', async () => {
     vi.useFakeTimers();
     try {
       mk();
       micMock.ready = Promise.resolve();
       (composerOpts.onVoiceEnd as (how: string) => void)('release');
-      await vi.advanceTimersByTimeAsync(50);
-      // Not disposed on release: the stream is held for the window.
-      expect(pipelineMock.dispose).not.toHaveBeenCalled();
-      expect(micMock.ready).not.toBeNull();
-      // The window elapses with nothing recorded: it disposes now.
-      await vi.advanceTimersByTimeAsync(90_000);
-      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(0);
       expect(pipelineMock.dispose).toHaveBeenCalledTimes(1);
       expect(micMock.ready).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-  test('G6: two recordings inside the window keep one stream; getUserMedia is not re-run', async () => {
-    vi.useFakeTimers();
-    try {
-      mk();
-      micMock.ready = Promise.resolve();
-      (composerOpts.onVoiceEnd as (how: string) => void)('release');
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(pipelineMock.dispose).not.toHaveBeenCalled();
-      // A second recording starts within the window: it reuses the live stream
-      // (mic.ready never went null, so ensureMic re-inits nothing) and cancels
-      // the pending grace dispose.
-      (composerOpts.onVoiceStart as () => void)();
-      expect(micMock.ready).not.toBeNull();
-      (composerOpts.onVoiceEnd as (how: string) => void)('release');
-      await vi.advanceTimersByTimeAsync(80_000);
-      // 80s after the SECOND release: the window (reset by it) has not elapsed.
-      expect(pipelineMock.dispose).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(20_000);
-      expect(pipelineMock.dispose).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
