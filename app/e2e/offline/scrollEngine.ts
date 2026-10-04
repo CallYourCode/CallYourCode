@@ -47,6 +47,10 @@ export type ScrollEngineOptions = {
   // (the shape of a chat the agent filled while the owner was away), so the
   // rows near the end sit in ONE message group. 0 = roles alternate throughout.
   agentTail?: number;
+  // Every Nth agent line is spoken: it draws as a voice clip (msgId plus
+  // durationS) whose audio the engine serves (0 = none). The audio-jump chip
+  // and the go-to-audio travel need a clip that is really playing.
+  voiceEvery?: number;
 };
 
 // One session record as the engine's log line carries it (`t:"s"` on a page,
@@ -105,6 +109,10 @@ export const SESSION_NAME = 'Long Thread';
 const IMG_W = 300;
 const IMG_H = 720;
 const PNG_BYTES = makeGradientPng(IMG_W, IMG_H);
+// A spoken clip's audio: 30 s of a quiet tone, PCM WAV (both engines decode it
+// whatever the .mp3 name says), long enough to stay playing through a case.
+export const VOICE_S = 30;
+const WAV_BYTES = makeToneWav(VOICE_S);
 
 const LINES = [
   'Can you check why the relay drops the third peer?',
@@ -132,6 +140,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
   const attachDelayMs = o.attachDelayMs ?? 0;
   const dequeueDelayMs = o.dequeueDelayMs;
   const agentTail = o.agentTail ?? 0;
+  const voiceEvery = o.voiceEvery ?? 0;
   let agentRuns: ScrollAgentRun[] = [];
 
   type Msg = {
@@ -143,6 +152,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
     msgId?: string;
     cid?: string;
     upload?: Record<string, unknown>;
+    durationS?: number;
   };
   const messages: Msg[] = [];
   let seq = 0;
@@ -189,6 +199,7 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
     const role = i % 2 === 0 && i < count - agentTail ? 'user' : 'claude';
     const withImage = imageEvery > 0 && role === 'claude' && i % imageEvery === 0;
     const m = push(role, lines[i % lines.length] + (i % 7 === 0 ? ` (#${i})` : ''), withImage);
+    if (voiceEvery > 0 && role === 'claude' && i % voiceEvery === 0) m.durationS = VOICE_S;
     if (eventsEvery > 0 && role === 'claude' && i % eventsEvery === 0) {
       // The agent's activity before this line: a run of tool calls, then the
       // line's own transcript copy as a reply summary right after it.
@@ -243,7 +254,8 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
     text: m.text,
     msgId: m.msgId,
     ...(m.cid ? {cid: m.cid} : {}),
-    ...(m.upload ? {upload: m.upload} : {})
+    ...(m.upload ? {upload: m.upload} : {}),
+    ...(m.durationS ? {durationS: m.durationS} : {})
   });
   const wireEvent = (ev: ScrollEvent) => ({t: 's', ...ev});
   // The one page: messages and records interleaved by seq, records tagged t:"s".
@@ -292,6 +304,16 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
       };
       if (imageDelayMs) setTimeout(answer, imageDelayMs);
       else answer();
+      return;
+    }
+    if (/^\/audio\/[^/]+\.mp3$/.test(path)) {
+      res.writeHead(200, {
+        'content-type': 'audio/wav',
+        'content-length': String(WAV_BYTES.length),
+        ...CORS
+      });
+      if (method === 'HEAD') res.end();
+      else res.end(WAV_BYTES);
       return;
     }
     if (method === 'POST' && /^\/session\/[^/]+\/unread/.test(path)) {
@@ -388,6 +410,29 @@ export async function startScrollEngine(o: ScrollEngineOptions = {}): Promise<Sc
         wss.close(() => server.close(() => done()));
       })
   };
+}
+
+// -- deterministic WAV (8 kHz mono 8-bit PCM, a quiet 220 Hz tone) -------------
+
+function makeToneWav(seconds: number): Buffer {
+  const rate = 8000;
+  const n = rate * seconds;
+  const out = Buffer.alloc(44 + n);
+  out.write('RIFF', 0, 'ascii');
+  out.writeUInt32LE(36 + n, 4);
+  out.write('WAVE', 8, 'ascii');
+  out.write('fmt ', 12, 'ascii');
+  out.writeUInt32LE(16, 16);
+  out.writeUInt16LE(1, 20); // PCM
+  out.writeUInt16LE(1, 22); // mono
+  out.writeUInt32LE(rate, 24);
+  out.writeUInt32LE(rate, 28); // byte rate: rate x 1 channel x 1 byte
+  out.writeUInt16LE(1, 32); // block align
+  out.writeUInt16LE(8, 34); // bits per sample
+  out.write('data', 36, 'ascii');
+  out.writeUInt32LE(n, 40);
+  for (let i = 0; i < n; i++) out[44 + i] = 128 + Math.round(8 * Math.sin((2 * Math.PI * 220 * i) / rate));
+  return out;
 }
 
 // -- deterministic PNG (RGB, no external deps) --------------------------------

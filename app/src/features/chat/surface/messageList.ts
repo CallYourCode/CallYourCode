@@ -606,6 +606,8 @@ function cssEscape(id: string): string {
 export interface MessageScrollOwner {
   driving(): boolean;
   pinned(): boolean;
+  // A travel to a message is flying: the end is not followed under it.
+  travelling(): boolean;
   dividerHeld(): boolean;
   write(top: number, tag: string): void;
 }
@@ -685,6 +687,7 @@ function anchoredRewindow(inner: HTMLElement, st: RenderState): void {
   if (!driving && st.bank !== 0) releaseBank(inner, st, box);
   const atBottom =
     !driving &&
+    !owner?.travelling() &&
     (box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_PIN_PX ||
       (!!owner && owner.pinned()));
   const boxTop = box.getBoundingClientRect().top;

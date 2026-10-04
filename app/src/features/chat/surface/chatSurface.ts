@@ -1110,6 +1110,9 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     modelTop: () => messageModelTop(messageListInner),
     nearBottomPx: () => Math.max(OVERLAY_SCROLL_NEAR_PX, messageListScroll.clientHeight / 3),
     isPinned: () => pinnedToBottom,
+    notePin: () => {
+      pinnedToBottom = distToEnd() <= PIN_PX;
+    },
     distToEnd,
     reseatDivider,
     bankShift: (d) => bankMessageShift(messageListInner, d),
@@ -1124,6 +1127,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   setMessageScrollOwner(messageListInner, {
     driving: scrollOwner.driving,
     pinned: scrollOwner.pinned,
+    travelling: scrollOwner.travelling,
     dividerHeld: () => holdDivider,
     write: scrollOwner.rewindowWrite
   });
