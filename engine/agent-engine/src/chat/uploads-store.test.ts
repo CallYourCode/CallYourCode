@@ -14,6 +14,7 @@ import { mkdir, readdir, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { makeUploads, uploadIdsOf, UPLOAD_KEEP, type Uploads } from "./uploads.ts";
 import { tmpDir } from "../test-utils/tmp.ts";
+import { agentUploadsDir } from "../storage/datadir.ts";
 import type { ChatMsg, UploadRec } from "./chatmsg.ts";
 
 let base = "";
@@ -164,6 +165,23 @@ test("binding nothing is nothing: no logs, no missing", async () => {
   const { u, logged } = await store("bindempty");
   expect(await u.bindOwnedUploads([])).toEqual({ ups: [], missing: [] });
   expect(logged).toEqual([]);
+});
+
+test("a file this session already adopted, with no owner on record (a crash before its row), binds from its own dir", async () => {
+  /* Adoption moves the file home before the message's row is written, and the
+   * index is rebuilt from rows at boot: a process that died in between leaves
+   * the file at home and no owner. The re-drive names the session it was sent
+   * to, and only that session's dir is looked in. */
+  const { u, staging, owner, agentId } = await store("reclaim");
+  await Bun.write(join(staging, `${ID_A}-note.webm`), "clip");
+  const { ups: first } = await u.bindOwnedUploads([rec(ID_A)]);
+  await u.adoptStagedUploads("s-reclaim", first);
+  owner.clear(); // the restart: the index knows nothing of a row never written
+  expect(await u.ownedUploadPath(ID_A), "without the session it must not be found").toBeNull();
+  const { ups } = await u.bindOwnedUploads([rec(ID_A)], "c-1", "s-reclaim");
+  expect(ups.length).toBe(1);
+  expect(ups[0].path).toBe(join(agentUploadsDir(agentId), `${ID_A}-note.webm`));
+  expect(owner.get(ID_A), "the ownership is recorded again").toBe(agentId);
 });
 
 test("adoption moves a staged file into the agent's own dir and stamps the index", async () => {

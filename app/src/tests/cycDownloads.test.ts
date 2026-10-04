@@ -97,10 +97,12 @@ describe('save-path choice: share sheet on iOS, download link elsewhere', () => 
     expect(saveMethodFor('clip.mp4', blob())).toBe('share');
   });
 
-  test('iPhone with canShare rejecting the file: falls back to a download', () => {
+  test('iPhone with canShare rejecting the file: nothing, never a link to the bytes', () => {
+    // A link to a blob in a home-screen app opens the file as a page inside the
+    // app with no way back (the owner's report, 2026-10-03).
     asIphone();
     withShare(false, () => Promise.resolve());
-    expect(saveMethodFor('clip.mp4', blob())).toBe('download');
+    expect(saveMethodFor('clip.mp4', blob())).toBe('none');
   });
 
   test('shareOrSaveBlob without share support saves through a blob URL link', async () => {
@@ -149,14 +151,23 @@ describe('save-path choice: share sheet on iOS, download link elsewhere', () => 
     expect(createObjectURL).not.toHaveBeenCalled();
   });
 
-  test('iPhone: a share that throws for a real reason falls back to a download', async () => {
+  test('iPhone: a share that throws for a real reason never falls back to a link', async () => {
     asIphone();
     const share = vi.fn(() => Promise.reject(new Error('boom')));
     Object.defineProperty(navigator, 'canShare', {configurable: true, value: () => true});
     Object.defineProperty(navigator, 'share', {configurable: true, value: share});
     const createObjectURL = vi.fn(() => 'blob:x');
     vi.stubGlobal('URL', {createObjectURL, revokeObjectURL: vi.fn()});
-    await expect(shareOrSaveBlob('clip.mp4', blob())).resolves.toBe('download');
-    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    await expect(shareOrSaveBlob('clip.mp4', blob())).resolves.toBe('none');
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  test('iPhone: a file the share sheet will not take is not linked either', async () => {
+    asIphone();
+    withShare(false, () => Promise.resolve());
+    const createObjectURL = vi.fn(() => 'blob:x');
+    vi.stubGlobal('URL', {createObjectURL, revokeObjectURL: vi.fn()});
+    await expect(shareOrSaveBlob('clip.mp4', blob())).resolves.toBe('none');
+    expect(createObjectURL).not.toHaveBeenCalled();
   });
 });

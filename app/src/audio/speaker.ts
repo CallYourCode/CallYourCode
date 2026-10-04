@@ -1,4 +1,4 @@
-import {resolveAudioUrl} from './audioCache';
+import {streamAudioUrl} from './audioCache';
 import {WebAudioClip, unlockPlayback} from './webAudioClip';
 import {cyclog} from '@/shared/logging';
 
@@ -24,14 +24,35 @@ type SpeakerItem = {
 
   durationS?: number;
 
+  /** A user command (a tap), not automatic speech: it starts now even while a
+   *  capture's transcript is pending (setBusy), it waits only while the mic is
+   *  recording (recording), and a kept utterance that began before it does not
+   *  cancel it (supersede). */
   manual?: boolean;
   /** WHY this clip is playing (audioPlayback.PlayReason): 'autoplay-open',
    *  'autoplay-arrival' or 'tap'. Kept as a string here so the speaker owns no
    *  app-surface types; it rides onto the clip.play log line for diagnosis. */
   reason?: string;
+  /** performance.now() when it was enqueued: times enqueue-to-sound on the
+   *  clip.started and clip.fail lines. */
+  at?: number;
+  /** USER INTENT TIME: performance.now() of the last user action asking for this
+   *  clip to sound (a tap that enqueued it, a press that resumed it). Unset for
+   *  automatic speech nobody asked for. It is the one thing the hold (setBusy)
+   *  and a kept utterance (supersede) look at. */
+  askedAt?: number;
 };
 
-type SpeakerStateName = 'idle' | 'loading' | 'speaking' | 'paused' | 'finished' | 'blocked';
+/* 'waiting': a tap made while the mic is recording, shown on its button and
+ * started the moment the recording is released. */
+type SpeakerStateName =
+  | 'idle'
+  | 'loading'
+  | 'speaking'
+  | 'paused'
+  | 'finished'
+  | 'blocked'
+  | 'waiting';
 
 export type SpeakerState = {
   state: SpeakerStateName;
@@ -55,10 +76,40 @@ class Speaker {
   private get busy(): boolean {
     return this.busyClaims.size > 0;
   }
+  holds(): string[] {
+    return [...this.busyClaims];
+  }
+
+  /* THE RULE for a tap: nothing sounds into a live recording. While the mic is
+   * recording (a press held or locked, or a hands-free capture: the pipeline's
+   * recState, plus the composer's 'press' claim that covers the press before
+   * the mic answers), a tap waits, visibly ('waiting'), and starts the moment
+   * the recording is released. Once released (only the transcript pending), a
+   * tap plays at once. Automatic speech is held for the whole capture either
+   * way (setBusy). */
+  private micRecording = false;
+  recording(): boolean {
+    return this.micRecording || this.busyClaims.has('press');
+  }
+  setRecording(on: boolean): void {
+    const was = this.recording();
+    this.micRecording = on;
+    this.recordingMayHaveEnded(was);
+    this.giveBack();
+  }
+  private recordingMayHaveEnded(was: boolean): void {
+    if (!was || this.recording() || this.stateName !== 'waiting') return;
+    dbg('recording released: starting the waiting tap');
+    if (this.current) this.resumeCurrent();
+    else this.playNext();
+  }
   private lastBySession = new Map<string, SpeakerItem>();
+  // The clip a press or a capture paused, until the user pauses or resumes it.
+  private machinePaused: SpeakerItem | null = null;
   private stateName: SpeakerStateName = 'idle';
   private stateListeners = new Set<StateListener>();
   private errorListeners = new Set<ErrorListener>();
+  private endedListeners = new Set<(item: SpeakerItem) => void>();
   private startGate: StartGate | null = null;
 
   constructor() {
@@ -68,8 +119,18 @@ class Speaker {
     this.audio.addEventListener('ended', () => {
       const done = this.current;
       this.current = null;
-      if (this.queue.length) this.playNext();
-      else {
+      // played through to its end: the one moment a clip counts as heard
+      // a throwing listener must not stall the queue behind it
+      if (done) {
+        for (const fn of [...this.endedListeners]) {
+          try {
+            fn(done);
+          } catch (e) {
+            console.warn('[speaker] ended listener threw', e);
+          }
+        }
+      }
+      if (!this.playNext()) {
         this.emit('finished', done || undefined);
 
         this.releaseMedia();
@@ -78,11 +139,25 @@ class Speaker {
 
     this.audio.addEventListener('error', () => {
       if (!this.current) return;
-      const bad = this.current;
-      this.current = null;
-      for (const fn of this.errorListeners) fn(bad);
-      this.playNext();
+      this.failed(this.current, 'media', 'the player could not decode or load the clip');
     });
+  }
+
+  /* Every way a clip can fail to sound ends here, so none is silent: a log line,
+   * the error listeners (a toast), and the queue moves on. */
+  private failed(item: SpeakerItem, stage: string, err: unknown): void {
+    cyclog('clip.fail', {
+      session: item.sessionId,
+      msg: item.msgId,
+      reason: item.reason ?? 'tap',
+      stage,
+      err,
+      ms: item.at === undefined ? undefined : Math.round(performance.now() - item.at)
+    });
+    if (this.current === item) this.current = null;
+    for (const fn of this.errorListeners) fn(item);
+    // Never left in 'loading' (a spinner with nothing behind it), busy or not.
+    if (!this.playNext()) this.emit('idle');
   }
 
   private releaseMedia(): void {
@@ -131,6 +206,14 @@ class Speaker {
     return () => this.errorListeners.delete(fn);
   }
 
+  /* A clip that played through to its END, whatever plays next. 'finished' is
+   * not that: it fires only when the queue runs dry, and 'speaking' is the
+   * START. A clip stopped or skipped part way never arrives here. */
+  onEnded(fn: (item: SpeakerItem) => void): () => void {
+    this.endedListeners.add(fn);
+    return () => this.endedListeners.delete(fn);
+  }
+
   setStartGate(fn: StartGate): void {
     this.startGate = fn;
   }
@@ -148,7 +231,8 @@ class Speaker {
   }
 
   get state(): SpeakerState {
-    const about = this.current || undefined;
+    // A waiting tap that has not started is the queue head.
+    const about = this.current || (this.stateName === 'waiting' ? this.queue[0] : undefined);
     return {
       state: this.stateName,
       sessionId: about?.sessionId,
@@ -220,6 +304,8 @@ class Speaker {
     dbg('unlock done');
   }
 
+  /* A manual item is a tap: the user asked for it now (askedAt). The hold
+   * (setBusy) delays only what nobody asked for; the gate is in playNext. */
   enqueue(item: SpeakerItem): void {
     if (this.current && this.current.sessionId !== item.sessionId) this.stopAll();
 
@@ -227,12 +313,37 @@ class Speaker {
       dbg('enqueue duplicate dropped', item.msgId);
       return;
     }
+    item.at = performance.now();
+    item.askedAt = item.manual ? item.at : undefined;
+    this.started.delete(item);
     this.queue.push(item);
 
-    if (!this.current && !this.busy) this.playNext();
+    if (!this.current) this.playNext();
+  }
+
+  /* The user just said something (pipeline: a capture that began at `since` was
+   * kept): what the speaker was saying or holding from before is stale and goes.
+   * Anything the user asked for after `since` (a tap, a resume, including one
+   * that waited for the recording to end) is newer than the utterance and stays. */
+  supersede(since: number): void {
+    const fresh = (it: SpeakerItem) => (it.askedAt ?? -Infinity) >= since;
+    const keep = this.queue.filter(fresh);
+    if (this.current && fresh(this.current)) {
+      this.queue = keep;
+      return;
+    }
+    this.stopAll();
+    if (!keep.length) return;
+    this.queue = keep;
+    this.playNext();
   }
 
   pause(): void {
+    this.machinePaused = null;
+    this.pauseCurrent();
+  }
+
+  private pauseCurrent(): void {
     dbg('pause', this.current?.msgId);
     if (!this.current) return;
     ++this.playGen;
@@ -242,9 +353,50 @@ class Speaker {
     this.emit('paused', this.current);
   }
 
+  /* A user's press on play for the clip that is current (paused, or blocked by
+   * the autoplay policy): it is asked for now. */
   resume(): void {
+    const asked = this.current ?? (this.stateName === 'blocked' ? this.queue[0] : undefined);
+    if (asked) asked.askedAt = performance.now();
+    this.machinePaused = null;
+    this.resumeCurrent();
+  }
+
+  /* A press or a capture pauses what is sounding. A clip the user paused stays
+   * the user's: the machine never resumes it. */
+  interrupt(): void {
+    if (!this.current || this.stateName === 'paused') return;
+    this.pauseCurrent();
+    this.machinePaused = this.current;
+  }
+
+  /* The machine giving back what it paused, once the last press or capture
+   * holding the speaker lets go (every take judged), and only while that clip
+   * is still current and paused: a kept take's supersede may have stopped it.
+   * Nobody asked anew: the clip keeps the intent it had. */
+  private giveBack(): void {
+    if (!this.machinePaused || this.busy || this.recording()) return;
+    const item = this.machinePaused;
+    this.machinePaused = null;
+    if (this.current === item && this.stateName === 'paused') this.resumeCurrent();
+  }
+
+  private resumeCurrent(): void {
     dbg('resume', this.current?.msgId);
-    if (!this.current) return;
+    if (!this.current) {
+      // Blocked by the autoplay policy: the clip went back to the head of the
+      // queue, and a press on play is the gesture that starts it.
+      if (this.stateName === 'blocked' && this.queue.length) this.playNext();
+      return;
+    }
+    // Still fetching: playing now would run the player with no source and drop
+    // the clip. The load in flight starts it.
+    if (this.stateName === 'loading') return;
+    // Not into a live recording: it resumes when the recording is released.
+    if (this.recording()) {
+      this.emit('waiting', this.current);
+      return;
+    }
 
     if (!this.mayStart(this.current)) {
       dbg('resume refused by the gate');
@@ -273,9 +425,11 @@ class Speaker {
 
   setBusy(busy: boolean, claim = ALL_CLAIMS): void {
     const was = this.busy;
+    const wasRecording = this.recording();
     if (busy) this.busyClaims.add(claim);
     else if (claim === ALL_CLAIMS) this.busyClaims.clear();
     else this.busyClaims.delete(claim);
+    this.recordingMayHaveEnded(wasRecording);
     if (this.busyGuard) {
       clearTimeout(this.busyGuard);
       this.busyGuard = 0;
@@ -291,6 +445,7 @@ class Speaker {
       return;
     }
 
+    this.giveBack();
     if (was && !this.current && this.queue.length) this.playNext();
   }
 
@@ -315,25 +470,44 @@ class Speaker {
         dbg('playEl playing');
 
         this.suppressMediaSession();
+        const item = this.current;
+        // Timed once, from the enqueue; a resume is not a start.
+        if (item && item.at !== undefined && !this.started.has(item)) {
+          this.started.add(item);
+          cyclog('clip.started', {
+            msg: item.msgId,
+            reason: item.reason ?? 'tap',
+            backend: this.audio.backend,
+            ms: Math.round(performance.now() - item.at)
+          });
+        }
         onPlaying();
       })
       .catch((e) => {
         dbg('playEl rejected', String(e).slice(0, 60), gen === this.playGen ? 'current' : 'stale');
         if (gen !== this.playGen) return;
+        const item = this.current;
+        if (!item) return;
 
-        if ((e as DOMException)?.name === 'NotAllowedError' && this.current) {
-          this.queue.unshift(this.current);
+        if ((e as DOMException)?.name === 'NotAllowedError') {
+          cyclog('clip.blocked', {
+            session: item.sessionId,
+            msg: item.msgId,
+            reason: item.reason ?? 'tap',
+            why: 'the browser refused play() without a user gesture; the next press starts it'
+          });
+          this.queue.unshift(item);
           this.current = null;
           this.armGesture();
           return;
         }
-        this.current = null;
-        this.playNext();
+        this.failed(item, 'play', e);
       });
   }
 
   private gestureArmed = false;
   private busyGuard = 0;
+  private started = new WeakSet<SpeakerItem>();
 
   private armGesture(): void {
     if (this.gestureArmed) return;
@@ -349,19 +523,40 @@ class Speaker {
     document.addEventListener('keydown', go, true);
   }
 
-  private playNext(): void {
-    if (this.queue.length && !this.mayStart(this.queue[0])) {
-      dbg('playNext refused by the gate', this.queue[0].msgId, this.queue.length);
+  /* THE ONE GATE every start goes through (enqueue, a clip ending or failing,
+   * a hold or a recording released, a gesture): what the user asked for waits
+   * only for a live recording ('waiting'); what nobody asked for waits for the
+   * whole hold (a capture recording or awaiting its verdict), and the mute gate.
+   * True when the head started loading or is waiting visibly. */
+  private playNext(): boolean {
+    if (!this.queue.length) {
       this.current = null;
       if (!this.busy) this.emit('idle');
-      return;
+      return false;
     }
-    const item = this.queue.shift();
-    if (!item) {
+    // Under the hold, the first thing the user asked for goes ahead of the
+    // automatic speech held in front of it, which stays queued.
+    const at = this.busy ? this.queue.findIndex((it) => it.askedAt !== undefined) : 0;
+    if (at > 0) this.queue.unshift(...this.queue.splice(at, 1));
+    const head = this.queue[0];
+    if (head.askedAt !== undefined && this.recording()) {
+      dbg('playNext: the mic is recording; the tap waits', head.msgId);
+      this.current = null;
+      this.emit('waiting', head);
+      return true;
+    }
+    if (head.askedAt === undefined && this.busy) {
+      dbg('playNext: held for the capture', head.msgId, [...this.busyClaims]);
+      this.current = null;
+      return false;
+    }
+    if (!this.mayStart(head)) {
+      dbg('playNext refused by the gate', head.msgId, this.queue.length);
       this.current = null;
       if (!this.busy) this.emit('idle');
-      return;
+      return false;
     }
+    const item = this.queue.shift()!;
     this.current = item;
     dbg('playNext', item.msgId);
     this.lastBySession.set(item.sessionId, item);
@@ -370,7 +565,7 @@ class Speaker {
     if (this.rateResolver) this.setRate(this.rateResolver());
     this.emit('loading', item);
 
-    void resolveAudioUrl(item.msgId, new URL(item.url, location.href).href)
+    void streamAudioUrl(item.msgId, new URL(item.url, location.href).href)
       .then((src) => {
         if (this.current !== item) {
           dbg('cache resolve dropped', item.msgId);
@@ -393,10 +588,9 @@ class Speaker {
       })
       .catch((e) => {
         if (this.current !== item) return;
-        console.warn('[speaker] clip unavailable', item.msgId, e);
-        this.current = null;
-        this.emit('idle');
+        this.failed(item, 'fetch', e);
       });
+    return true;
   }
 }
 

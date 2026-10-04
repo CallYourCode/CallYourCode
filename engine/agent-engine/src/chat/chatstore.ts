@@ -29,7 +29,11 @@
 
 import { readdir } from "node:fs/promises";
 import { agentChatFile, agentChatsDir } from "../storage/datadir.ts";
-import { appendPrivate, mkdirPrivate } from "../../../shared/runfiles.ts";
+import { appendPrivate, mkdirPrivate, writeAtomicPrivate } from "../../../shared/runfiles.ts";
+
+/** How a re-sequence's file and pointer writes back off while they fail. */
+const RETRY_MIN_MS = 250;
+const RETRY_MAX_MS = 5000;
 import { parseSessionRec, type SessionRec } from "./sessionrec.ts";
 
 /** The store is generic over the message shape: server.ts owns ChatMsg. */
@@ -125,6 +129,14 @@ export function rowsBySeq<M extends { seq?: number }, R extends { seq: number }>
   return out;
 }
 
+/** A whole log as file lines in storage order (records interleaved by seq). */
+function logBody(msgs: StoredMsg[], recs: SessionRec[]): string {
+  const recSet = new Set<unknown>(recs);
+  return rowsBySeq(msgs as (StoredMsg & { seq?: number })[], recs)
+    .map((r) => JSON.stringify(recSet.has(r) ? { t: "s", ...r } : { t: "m", ...r }))
+    .join("\n");
+}
+
 export class ChatStore {
   /* One append chain per chat file, so the line order on disk is the call
    * order even when appends interleave with awaits. The chain never rejects;
@@ -140,6 +152,14 @@ export class ChatStore {
       await appendPrivate(path, line + "\n");
     }).catch((e) => this.onError(e, path));
     this.chains.set(path, next);
+  }
+
+  /** Hold every later append to this chat file until `first` settles (a write
+   *  that must reach disk before them, such as an absorb's tombstone). */
+  after(agentId: string, chatId: string, first: Promise<unknown>): void {
+    const path = agentChatFile(agentId, chatId);
+    const prev = this.chains.get(path) ?? Promise.resolve();
+    this.chains.set(path, prev.then(() => first).then(() => {}, () => {}));
   }
 
   /** Append one message line. The caller has already stamped ts + seq. */
@@ -168,6 +188,12 @@ export class ChatStore {
     await Promise.all([...this.chains.values()]);
   }
 
+  /** Every append issued so far to ONE chat file is on disk when this resolves
+   *  (a delivery waits on its own chat, never on another agent's). */
+  async flushFile(agentId: string, chatId: string): Promise<void> {
+    await this.chains.get(agentChatFile(agentId, chatId));
+  }
+
   /** Load one chat's messages. Missing file = empty log (a fresh chat id not
    *  yet written). */
   async load(agentId: string, chatId: string): Promise<StoredMsg[]> {
@@ -181,8 +207,8 @@ export class ChatStore {
     return replayLogText(await f.text());
   }
 
-  /** Write a whole log as a NEW chat file (merge, trim) and return its id.
-   *  Never touches an existing file; the caller flips the meta pointer. The
+  /** Write a whole log as a NEW chat file (the boot migration) and return its
+   *  id. Never touches an existing file; the caller flips the meta pointer. The
    *  records, when given, are interleaved with the messages by seq so the new
    *  file's line order is its storage order. */
   async writeNew(agentId: string, msgs: StoredMsg[], recs: SessionRec[] = []): Promise<string> {
@@ -192,12 +218,54 @@ export class ChatStore {
     const path = agentChatFile(agentId, chatId);
     await mkdirPrivate(dir);
     // build the whole body, one append: a new file either exists whole or not at all
-    const recSet = new Set<unknown>(recs);
-    const body = rowsBySeq(msgs as (StoredMsg & { seq?: number })[], recs)
-      .map((r) => JSON.stringify(recSet.has(r) ? { t: "s", ...r } : { t: "m", ...r }))
-      .join("\n");
+    const body = logBody(msgs, recs);
     await appendPrivate(path, body.length ? body + "\n" : "");
     return chatId;
+  }
+
+  /** A NEW chat file for a log that stays live while it lands (a re-sequence:
+   *  carry absorb, trim). The body is serialized NOW, from the rows as they are
+   *  this instant, and the write is the first entry on the new file's append
+   *  chain, after `after` (a write that must land first) and before `then` (the
+   *  caller flips and saves the meta pointer there; it must THROW when the save
+   *  did not land). Every append the caller routes to `chatId` from this instant
+   *  queues behind both, so it can never reach disk before the body or before
+   *  the pointer that makes it readable, and it is not in the body (it was not
+   *  in the rows yet). The body is written atomically and both steps are retried
+   *  until they land (a full disk, a read-only meta dir): a rewrite is done only
+   *  when its file and the pointer naming it are durable. Resolves then. */
+  writeNewQueued(agentId: string, chatId: string, msgs: StoredMsg[], recs: SessionRec[],
+    opts: { after?: Promise<unknown>; then: () => Promise<void> }): Promise<void> {
+    const dir = agentChatsDir(agentId);
+    const path = agentChatFile(agentId, chatId);
+    const body = logBody(msgs, recs);
+    const prev = this.chains.get(path) ?? Promise.resolve();
+    const done = prev
+      .then(() => opts.after)
+      .catch(() => {}) // a failed tombstone write does not stop the log landing
+      .then(async () => {
+        await this.untilDurable(path, async () => {
+          await mkdirPrivate(dir);
+          await writeAtomicPrivate(path, body.length ? body + "\n" : "");
+        });
+        await this.untilDurable(path, opts.then);
+      });
+    this.chains.set(path, done);
+    return done;
+  }
+
+  /** Run `step` until it resolves, backing off from RETRY_MIN_MS to RETRY_MAX_MS
+   *  and reporting each failure through onError. */
+  private async untilDurable(path: string, step: () => Promise<void>): Promise<void> {
+    for (let wait = RETRY_MIN_MS; ; wait = Math.min(wait * 2, RETRY_MAX_MS)) {
+      try {
+        await step();
+        return;
+      } catch (e) {
+        this.onError(e, path);
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
   }
 
   /** The chat ids that have files on disk for this agent, no order promised. */

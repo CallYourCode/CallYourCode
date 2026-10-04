@@ -4,7 +4,7 @@ import * as engine from '../../engine/store';
 import {sessionState, dataState, unsentWork, stagedBlocks} from '../../sessionState';
 import {speaker} from '../../audio/speaker';
 import {pipeline} from '../../audio/pipeline';
-import {ensureMic, mic, hiddenSilences} from '../../speechGate';
+import {ensureMic, mic} from '../../speechGate';
 import {cyclog} from '@/shared/logging';
 import {toast} from '../../components/widgets';
 import {
@@ -42,37 +42,23 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
   let voiceHoldStart = 0;
   let pttHolding = false;
 
-  // Keep a granted microphone stream alive for this long after a push-to-talk
-  // release before disposing it, so a second recording started inside the
-  // window reuses the live stream (pipeline.init's `if (this.stream)` guard)
-  // and getUserMedia is not called -- and, on iOS/WebKit, not re-prompted --
-  // once per recording. iOS still re-prompts across cold starts and some
-  // lifecycle transitions; this only removes the within-session per-recording
-  // prompt.
-  const MIC_GRACE_MS = 90_000;
-  let micGraceTimer = 0;
-  const cancelMicGrace = () => {
-    if (micGraceTimer) {
-      clearTimeout(micGraceTimer);
-      micGraceTimer = 0;
-    }
-  };
-  // Teardown is a hard release: drop any grace-held stream at once so keep-alive
-  // never leaves the mic (and its iOS in-use indicator) alive with no owner.
+  // The mic is held only while it is used: a press-and-hold take (until its
+  // capture settles) or hands-free. Every other moment it is released, so the
+  // iPhone's mic indicator and its play-and-record audio session are never
+  // held between takes, and replies always play outside them. The cost: each
+  // press opens the mic afresh (getUserMedia), so a take has no pre-roll from
+  // a warm recorder. This is how the phone has always behaved (app.log since
+  // 2026-08-24: mic.disposed within 2s of every take's verdict).
   deps.onTeardown(() => {
-    cancelMicGrace();
     if (mic.ready && !pttHolding && !pipeline.handsFreeSessionId) {
       pipeline.dispose();
       mic.ready = null;
     }
   });
 
-  // `grace` keeps the stream open for MIC_GRACE_MS across back-to-back PTT
-  // recordings. The hard-release triggers (backgrounding on a touch device via
-  // hiddenSilences, hands-free end, teardown) call this without it, so they
-  // dispose at once and never hold the mic (or its iOS in-use indicator) in the
-  // background.
-  function releaseMicIfIdle(grace = false) {
+  // Release the mic once nothing uses it: no press down, no hands-free, and no
+  // capture still settling (retried while one is).
+  function releaseMicIfIdle() {
     const p = mic.ready;
     if (!p) return;
     const attempt = (retries: number) => {
@@ -85,17 +71,6 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
         if (retries > 0) window.setTimeout(() => attempt(retries - 1), 400);
         return;
       }
-      // A backgrounded touch device is a hard release even on the grace path:
-      // the mic must not stay lit in the background.
-      if (grace && !hiddenSilences()) {
-        cancelMicGrace();
-        micGraceTimer = window.setTimeout(() => {
-          micGraceTimer = 0;
-          releaseMicIfIdle(false);
-        }, MIC_GRACE_MS);
-        return;
-      }
-      cancelMicGrace();
       pipeline.dispose();
       mic.ready = null;
     };
@@ -353,18 +328,21 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       // until the words land. So a plain note ships AT ONCE with no body and no
       // wait; the composer clears synchronously.
       //
-      // The engine only fills a voice note whose body is empty (a non-empty
-      // body is the device's own words and is left alone), so when the user
-      // typed a caption or is answering with a reply excerpt -- text that MUST
-      // ride the wire -- the engine will NOT server-fill this note. In that
-      // case, and on an engine without server words at all, the on-device
-      // decoder is the only transcript source, so we bound-wait
-      // (`settleHeldWords`, up to 10s) for it to settle before reading the
-      // body, restoring the full device transcript alongside the caption
-      // rather than shipping whatever partial the card happened to hold.
-      // `words` markers do not apply here: they fill uploads listed on a text
-      // message, not a voice note's own clip.
+      // A caption or a reply excerpt is text that MUST ride the wire beside the
+      // words. An engine that can 'note-words' takes that note at once too:
+      // the body is the caption with a marker naming this send's cid where the
+      // words belong, the wire puts the reply quote on top, and the engine
+      // reads the clip into the marker (deliver.ts noteWords). The agent gets
+      // quote, words and caption as one message, the same text a send that
+      // waited for the words produced.
+      //
+      // An engine with server words but without 'note-words' only fills an
+      // empty body and would hand the marker to the agent as text; there, and
+      // on an engine without server words at all, the on-device decoder is the
+      // only transcript source, so the send bound-waits (`settleHeldWords`, up
+      // to 10s) for it, and the card says the message is waiting for its words.
       const canWords = engine.engineCan(s.id, 'words');
+      const canNoteWords = canWords && engine.engineCan(s.id, 'note-words');
       const hasReplyExcerpt = !!replyTo?.text?.trim();
       // The caption/quote typed alongside the recording, with the recording's
       // own (still-settling) words suppressed.
@@ -372,7 +350,11 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       const needsBody = !!alongsideText || hasReplyExcerpt;
       const shipVoice = (
         body: string,
-        extra?: {partial?: {text: string; upToS: number}; streaming?: boolean}
+        extra?: {
+          partial?: {text: string; upToS: number};
+          streaming?: boolean;
+          into?: {cid: string; body: string};
+        }
       ): Promise<SendSettled> => {
         const capId = loneCap!;
         cap.heldClips.delete(capId);
@@ -381,6 +363,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           durationS: st.durationS,
           text: body,
           ...(extra?.partial ? {partial: extra.partial} : {}),
+          ...(extra?.into ? {cid: extra.into.cid, into: extra.into.body} : {}),
           // An empty-body ship paints the device's own transcript-so-far on
           // the sent bubble, and (draftCommitted set, even at zero chars)
           // keeps the row OPEN so the capture's later partials grow it live.
@@ -407,32 +390,60 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           delivered: settling
         });
       };
-      if (canWords && !needsBody) {
-        // Instant, no wait (the owner's common record-then-Enter case), and
-        // the words this device already settled go WITH the send: the point
-        // of streaming transcription is that the engine never re-reads audio
-        // the device already turned into text.
+      if (canWords && (!needsBody || canNoteWords)) {
+        // Instant, no wait (the owner's common record-then-Enter case, and a
+        // note answering a quote or carrying a caption), and the words this
+        // device already settled go WITH the send: the point of streaming
+        // transcription is that the engine never re-reads audio the device
+        // already turned into text.
         const p = settledPartialOf(cap.partialByCapture.get(loneCap), st.durationS);
         if (p?.whole) {
           // The streaming decoder finalized the whole clip: the settled text
-          // IS the transcript. It ships as the body; the engine decodes
-          // nothing and the bubble is final at once.
-          return shipVoice(p.text);
+          // IS the transcript. It ships as the body (beside any caption); the
+          // engine decodes nothing and the bubble is final at once.
+          return shipVoice(compose((sg) => (sg === st ? p.text : undefined)).text.trim());
         }
         // Empty body plus the settled prefix: the engine decodes only the
         // tail past upToS and prepends this text. No prefix settled yet: the
         // engine reads the whole clip, exactly as before.
-        return shipVoice('', {
-          ...(p ? {partial: {text: p.text, upToS: p.upToS}} : {}),
-          streaming: true
+        const partial = p ? {partial: {text: p.text, upToS: p.upToS}} : {};
+        if (!needsBody) return shipVoice('', {...partial, streaming: true});
+        const cid = crypto.randomUUID();
+        const body = compose((sg) => (sg === st ? engine.wordsMarker(cid) : undefined)).text;
+        cyclog('send.note-words', {
+          session: s.id,
+          cid,
+          reply: hasReplyExcerpt,
+          chars: alongsideText.length,
+          partial: p ? `${p.upToS.toFixed(1)}s:${p.text.length}c` : undefined,
+          why:
+            'the note goes now with its quote and caption around a marker; the engine ' +
+            'reads the recording into the marker, so the send does not wait for the words'
         });
+        return shipVoice('', {...partial, streaming: true, into: {cid, body: body.trim()}});
       }
-      // A body must ride the wire (caption/reply) or the engine cannot fill
-      // it (`!canWords`): the device is the only transcript source, so wait
-      // for it to settle, then bake the full transcript in.
+      // A body must ride the wire and this engine cannot fill the words into
+      // it: the device is the only transcript source, so wait for it to
+      // settle, then bake the full transcript in. The card says so meanwhile.
+      const card = cap.heldClips.get(loneCap);
+      cyclog('send.words-wait', {
+        session: s.id,
+        reply: hasReplyExcerpt,
+        chars: alongsideText.length,
+        engineCan: canWords ? 'words' : 'none',
+        why:
+          'this engine cannot fill this note\'s words itself (no server words, or none ' +
+          'beside a quote or caption), so the send waits for this device\'s decoder; the ' +
+          'card shows it is waiting for its words'
+      });
+      card?.update({wordsWait: true});
       return (async () => {
-        await settleHeldWords();
-        return shipVoice(compose().text.trim());
+        try {
+          await settleHeldWords();
+          return await shipVoice(compose().text.trim());
+        } finally {
+          card?.update({wordsWait: false});
+        }
       })();
     }
 
@@ -632,19 +643,15 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
 
       speaker.setBusy(false, 'press');
 
-      releaseMicIfIdle(true);
+      releaseMicIfIdle();
     },
     onVoiceStart: () => {
       voiceHoldStart = Date.now();
-      // A new recording claims the stream: cancel any pending grace-window
-      // dispose so it cannot pull the mic out from under this recording.
-      cancelMicGrace();
       cap.lastPartial = {text: '', committed: 0};
 
       if (dataState.mode !== 'live') return;
 
-      speaker.pause();
-      speaker.setBusy(true, 'press');
+      pipeline.holdForPress();
       pttHolding = true;
       void ensureMic()
         .then(() => {
@@ -653,8 +660,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
         })
         .catch(() => {
           pttHolding = false;
-          speaker.setBusy(false, 'press');
-          speaker.resume();
+          pipeline.refusePress('the microphone could not be opened (getUserMedia failed)');
           toast('Microphone unavailable');
         });
     },
@@ -698,7 +704,9 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           cid: pipeline.cidOf(undefined),
           capture: captureId,
           heldS: seconds,
-          why: 'the release beat getUserMedia: nothing was ever recorded, so no block was made'
+          why:
+            'nothing was ever recorded, so no block was made: the press ended before ' +
+            'the mic or its recovery answered, or it was refused (ptt.start.refused says why)'
         });
 
         if (interrupted) {
@@ -742,7 +750,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       }
       pipeline.endPTT();
 
-      releaseMicIfIdle(true);
+      releaseMicIfIdle();
     }
   });
 

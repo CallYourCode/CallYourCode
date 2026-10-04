@@ -18,6 +18,7 @@ import {sessionState, bootUrlNav, dataState} from './sessionState';
 import {installStaleTabReload} from './bundleReload';
 import {installErrorReporter} from './errorReporter';
 import {setLazyNotifier} from './shared/lazy';
+import {setSelfNavNotifier} from './shared/selfReload';
 import {installSpeechGate} from './speechGate';
 import {installComposerTestHooks, installTestHooks} from './testHooks';
 import {installIdleProbe} from './testing/idleProbe';
@@ -72,7 +73,6 @@ import {toast} from './components/widgets';
 import * as engine from './engine/store';
 import './engine/contract';
 import {speaker} from './audio/speaker';
-import {warmClipPlayback} from './audio/webAudioClip';
 import './components/pluginCard';
 import './components/pluginPanel';
 import './engine/limitsAge';
@@ -120,6 +120,7 @@ void showVault.stats().then((s) => {
 });
 
 setLazyNotifier((message) => toast(message, 4000));
+setSelfNavNotifier((message) => toast(message, 4000));
 installErrorReporter();
 installStaleTabReload();
 
@@ -209,6 +210,7 @@ function buildApp() {
     loadDraft: (id) => loadDraft(id),
     releaseMicIfIdle: () => releaseMicIfIdle(),
     rowAudioClick: (id) => rowAudioClick(id),
+    playerToggle: () => playerToggle(),
     openPlayingMessage: () => openPlayingMessage(),
     restored,
     cancelPendingOpens,
@@ -288,7 +290,12 @@ function buildApp() {
       'tab:!flex',
       'desk:transition-transform desk:duration-0',
       'group-[.view-list]/cols:tab:max-desk:translate-x-[calc(var(--cyc-rail-width)+var(--cyc-pane-gap))]',
-      'group-[.view-list]/cols:pointer-events-none group-[.view-chat]/cols:pointer-events-auto',
+      // Inert only where the list really covers the chat (phone: the pane slides
+      // off-screen). At tablet width the list is a drawer and the chat stays in
+      // view beside it; on a laptop they sit side by side. A visible chat must
+      // take the press: a click on its composer focuses the input, and the
+      // chatEl click below closes the drawer.
+      'group-[.view-list]/cols:max-tab:pointer-events-none',
       'group-[.view-chat]/cols:max-tab:translate-x-0 group-[.view-chat]/cols:max-tab:opacity-100',
       'group-[.view-profile]/cols:max-tab:-translate-x-full group-[.view-profile]/cols:max-tab:opacity-0'
     ].join(' ')
@@ -368,7 +375,10 @@ function buildApp() {
     heardTsOf: (s) => heardTsOf(s),
     readMarkerOf: (s) => readMarkerOf(s),
     reportViewedThrough: (id) => reportViewedThrough(id),
-    play: (sid, mid, text) => play(sid, mid, text),
+    noteOnScreen: (id) => noteOnScreen(id),
+    heardOrSeen: (sid, rowId) => heardOrSeen(sid, rowId),
+    // the reason rides through, so speech on open logs as autoplay-open
+    play: (sid, mid, text, reason) => play(sid, mid, text, reason),
     suppressAutoSpeak: () => suppressAutoSpeak,
     clearSuppressAutoSpeak: () => {
       suppressAutoSpeak = false;
@@ -534,15 +544,22 @@ function buildApp() {
 
   composer.mountAsk(askPanel.el);
 
-  chatEl.addEventListener('click', (e) => {
-    if (nav.settingsOpen()) {
-      setSettingsOpen(false);
-      return;
-    }
+  // Capture phase: a click anywhere on the chat closes settings or the tablet
+  // drawer, even on a control that stops the click's propagation (the stamp's
+  // copy and quote), and the click still goes on to do its own action.
+  chatEl.addEventListener(
+    'click',
+    (e) => {
+      if (nav.settingsOpen()) {
+        setSettingsOpen(false);
+        return;
+      }
 
-    if ((e.target as HTMLElement).closest('.cyc-pane-header')) return;
-    if (inDrawerRegime() && drawerOpen() && sessionState.activeId) setView('chat');
-  });
+      if ((e.target as HTMLElement).closest('.cyc-pane-header')) return;
+      if (inDrawerRegime() && drawerOpen() && sessionState.activeId) setView('chat');
+    },
+    {capture: true}
+  );
 
   const {rightPane, profile} = createProfilePane({
     onTeardown,
@@ -589,11 +606,21 @@ function buildApp() {
 
   let suppressAutoSpeak = false;
 
-  const {heardTsOf, readMarkerOf, markSeen, reportViewedThrough, markHeard} = createHeardProgress({
+  const {
+    heardTsOf,
+    readMarkerOf,
+    markSeen,
+    reportViewedThrough,
+    markHeard,
+    noteOnScreen,
+    heardOrSeen
+  } = createHeardProgress({
     store: engine,
     isLive: () => dataState.mode === 'live',
     activeId: () => sessionState.activeId,
     isChatViewOpen: () => mainColumns.dataset.view === 'chat',
+    onScreenRows: (id) => cs.onScreenRows(id),
+    historyBelowWindow: (id) => engine.historyBelowWindow(id),
     onHeardMarked: (sessionId, marker) => noteHeardMarked(sessionId, marker)
   });
 
@@ -654,6 +681,7 @@ function buildApp() {
     rowAudioClick,
     onMessagePlay,
     onMessageSeek,
+    playerToggle,
     updateMessagePlays,
     updatePlayerBar,
     openPlayingMessage,
@@ -710,8 +738,6 @@ function buildApp() {
   logSizeBeacon();
 
   requestPersistence();
-
-  warmClipPlayback();
 
   render();
 }

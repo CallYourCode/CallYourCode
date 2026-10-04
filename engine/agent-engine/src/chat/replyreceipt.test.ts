@@ -51,8 +51,7 @@ async function reply(text: string): Promise<string> {
 
 /** HE SPEAKS OR TYPES into the session: the composer's frame, through the real
  *  delivery path, actually typed and SUBMITTED at the fake pane and logged as one
- *  of his messages. That last part is the whole point -- the marker moves inside
- *  injectUserMessage, which is the ONE way a user message enters a session. */
+ *  of his messages. It used to move the marker (#452); it no longer does. */
 async function utter(c: FakeClient, text: string): Promise<void> {
   const before = core.submitted.length;
   await onUtterance(c.sock, { id: wireId(PANE), text });
@@ -70,9 +69,12 @@ function attachOf(): Record<string, any> {
   return ok;
 }
 
-test("a reply advances the pointer to the tail; a second device has nothing to speak", async () => {
-  /* THE WHOLE OF THE FIX: his reply on one device is why his other device stays
-   * quiet. Two replies while he was away, then his answer. */
+test("his reply reads nothing he did not see: the replies wait on his other device until seen", async () => {
+  /* WAS: "his reply on one device is why his other device stays quiet" (#452),
+   * the marker moving with every utterance. Owner, 2026-10-03: a row is read
+   * only when a device has had it on screen or heard it to the end, so a reply
+   * typed (or spoken hands-free from a locked phone) without seeing what came
+   * before reads none of it. The device's sighting is what moves the marker. */
   await reply("first thing");
   await reply("second thing");
   expect(row().unread).toBe(2);
@@ -80,13 +82,13 @@ test("a reply advances the pointer to the tail; a second device has nothing to s
   const phone = core.client({ attach: wireId(PANE) });
   await utter(phone, "got it, thanks");
 
-  // the marker is at the tail: the row is clear...
+  expect(row().unread, "his message read replies nobody saw").toBe(2);
+  const before = attachOf();
+  expect(before.pointer).toBeLessThan(before.total); // the second device still has them
+
+  // the phone then had them on screen: its sighting through the tail reads both
+  onProgress({ id: wireId(PANE), seq: 1e9 });
   expect(row().unread).toBe(0);
-  // ...and a fresh device attaching sees the pointer past the last message
-  const ok = attachOf();
-  expect(ok.known).toBe(true);
-  expect(ok.total).toBe(3); // two replies + his utterance
-  expect(ok.pointer).toBe(ok.total); // nothing before the end to speak
 });
 
 test("an utterance at the tail does not rewind, and mark-unread afterwards still moves it back", async () => {
@@ -115,17 +117,17 @@ test("an utterance at the tail does not rewind, and mark-unread afterwards still
   expect(back.pointer, "mark-unread did not move the pointer back").toBeLessThan(back.total);
 });
 
-test("a second utterance cannot rewind below the first: forward only", async () => {
-  /* markRead is the single forward-only gate every path to "read" goes through,
-   * and an utterance is just another caller of it. Two messages he sends in a
-   * row cannot leave the marker behind the first of them, however the stamps
-   * happen to fall. */
+test("utterances after a read never rewind it: forward only", async () => {
+  /* markRead is the single forward-only gate; an utterance no longer calls it
+   * at all, so his messages can neither read nor un-read anything. */
   await reply("something to answer");
   const phone = core.client({ attach: wireId(PANE) });
+  onAttach(phone.sock, { id: wireId(PANE) });
+  onProgress({ id: wireId(PANE), seq: 1e9 });
+  const afterRead = session().heardTs;
   await utter(phone, "one");
-  const afterFirst = session().heardTs;
   await utter(phone, "two");
-  expect(session().heardTs).toBeGreaterThanOrEqual(afterFirst);
+  expect(session().heardTs).toBe(afterRead);
   expect(row().unread).toBe(0);
 });
 
@@ -146,9 +148,8 @@ test("a claude reply does not advance the marker", async () => {
 
 test("an engine notice does not advance the marker either", async () => {
   /* Engine notices share the reply path (noticeChat logs role:"claude"), so
-   * neither ever moves the pointer: only HIS messages, through
-   * injectUserMessage, do. A notice that advanced it would silently mark a real
-   * reply beneath it as read. */
+   * neither ever moves the pointer: only a device's sighting does. A notice
+   * that advanced it would silently mark a real reply beneath it as read. */
   await reply("the reply he has not seen");
   expect(row().unread).toBe(1);
 
@@ -177,10 +178,9 @@ test("a heard ack for an OLD clip cannot rewind a newer read", async () => {
   expect(row().unread).toBe(0);
 });
 
-test("his message in a chat he had never read still leaves nothing behind", async () => {
-  /* The first-utterance case: the marker starts level and his message is the
-   * newest thing in the log, so everything above it -- which is everything -- is
-   * read. No pointer to park, no divider to draw. */
+test("his message in a chat he had never read leaves all of it unread (M2)", async () => {
+  /* WAS: everything above his first message read. Under the owner's rule his
+   * message is not a sighting: the three replies wait until they are seen. */
   await reply("a");
   await reply("b");
   await reply("c");
@@ -188,8 +188,8 @@ test("his message in a chat he had never read still leaves nothing behind", asyn
 
   const phone = core.client({ attach: wireId(PANE) });
   await utter(phone, "answering all three at once");
-  expect(row().unread).toBe(0);
+  expect(row().unread).toBe(3);
   const ok = attachOf();
   expect(ok.total).toBe(4);
-  expect(ok.pointer).toBe(ok.total);
+  expect(ok.pointer).toBeLessThan(ok.total);
 });

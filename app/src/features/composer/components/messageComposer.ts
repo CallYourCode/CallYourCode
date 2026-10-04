@@ -1,5 +1,5 @@
 import {h} from '../../../components/domHelpers';
-import {makeIcon, makeIconButton, BTN_HOVER_UTILS} from '../../../components/iconGlyphs';
+import {makeIcon, makeIconButton} from '../../../components/iconGlyphs';
 import {paintActionControlSize} from '@/components/circleButtonSize';
 import type {CycReplyTo} from '../../../types';
 import {pasteImageFile, sanitizeClipboardHtml} from '@/features/composer/paste';
@@ -275,11 +275,17 @@ export function createComposer({
     // mic, it now sits directly ABOVE it, on the slide-up-to-lock path, and the
     // mic no longer moves. The pointer-slide lock detection reads the chip's
     // live rect, so it follows the chip to its new position.
+    // It floats over the chat, so it is painted with the theme surface like the
+    // corner floats: `!`, because the reset's un-layered `button` background
+    // beats a layered utility. Its hover is the usual 10% muted tint, mixed
+    // over the surface so the chip stays opaque.
     'cyc-icon-btn cyc-ctl-round cyc-rec-lock absolute left-1/2 -translate-x-1/2 [bottom:calc(100%+0.625rem)] ' +
       'flex-none items-center justify-center text-[1.5rem]! text-(--cyc-text-muted) p-0! w-10! h-10! ' +
       'leading-[var(--cyc-circle-size)] ' +
-      'bg-[var(--cyc-surface)] [box-shadow:0_1px_4px_rgba(0,0,0,0.35)] z-[3] hidden! ' +
-      `${COMPOSER_ICON_TRANSITION} [.cyc-composer[data-cyc-recording]:not(.cyc-rec-locked)_&]:flex! ${BTN_HOVER_UTILS}`
+      'bg-[var(--cyc-surface)]! [box-shadow:0_1px_4px_rgba(0,0,0,0.35)] z-[3] hidden! ' +
+      `${COMPOSER_ICON_TRANSITION} [.cyc-composer[data-cyc-recording]:not(.cyc-rec-locked)_&]:flex! ` +
+      'fine:hover:bg-[color-mix(in_srgb,var(--cyc-text-muted)_10%,var(--cyc-surface))]! ' +
+      'fine:active:bg-[color-mix(in_srgb,var(--cyc-text-muted)_10%,var(--cyc-surface))]!'
   );
   paintActionControlSize(lockChip);
   lockChip.append(makeIcon('lock'));
@@ -369,6 +375,79 @@ export function createComposer({
   container.append(composerRowsOuter);
   el.append(container);
 
+  const focusAtEnd = () => {
+    input.focus({preventScroll: true});
+
+    const selection = window.getSelection();
+    if (selection) {
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+  };
+
+  // The composer's own surface is the input box: a press on the pill itself, the
+  // blocks row or the text line that does not land on a control focuses the
+  // input. The rule names the controls, not the surfaces, so a quote card, the
+  // band around the text and any block added later are part of the box without
+  // being listed. Panels docked into the pill with their own interaction (the
+  // ask panel, plugin dials) are siblings of the blocks row and the line, so
+  // they are outside the surface by construction.
+  //
+  // The reply card's panel is a control (it jumps to the replied message), but
+  // the caret stays: its mousedown never takes focus, and a mouse press puts the
+  // caret in the input if it was elsewhere, so typing goes on after the jump. A
+  // touch press only keeps a keyboard that is already up; it does not raise one
+  // over the message the jump just brought into view.
+  //
+  // The decision is read off pointerdown, the true hit. A touch tap's mouse
+  // events and click are retargeted by the browser to a nearby control (WebKit
+  // snaps a tap just under the reply card onto it, which jumped instead of
+  // focusing), so they only act on what pointerdown saw.
+  const JUMP = '.cyc-block-reply .cyc-reply.cyc-callout-surface';
+  const CONTROL =
+    'button, a[href], input, textarea, select, label, [role="button"], [role="slider"], ' +
+    `[tabindex], cyc-voice-card, .cyc-attach-chip, .cyc-rec-panel, ${JUMP}`;
+  const onSurface = (t: Element) =>
+    t === composerRows || blocksRow.contains(t) || composerLine.contains(t);
+  const controlOf = (t: Element) => {
+    const c = t.closest(CONTROL);
+    return c && composerRows.contains(c) ? c : null;
+  };
+  type Press = 'surface' | 'jump' | null;
+  let press: Press = null;
+  let pressByTouch = false;
+  composerRows.addEventListener('pointerdown', (e) => {
+    press = null;
+    const t = e.target as Element;
+    if (!e.isPrimary || e.button !== 0 || disabled || input.contains(t) || !onSurface(t)) return;
+    // A press on a scrollbar (outside the target's client box) is the scroller's.
+    // Inline targets have no client box (clientWidth 0) and no scrollbar.
+    if (t.clientWidth && (e.offsetX >= t.clientWidth || e.offsetY >= t.clientHeight)) return;
+    const control = controlOf(t);
+    press = !control ? 'surface' : control.matches(JUMP) ? 'jump' : null;
+    pressByTouch = e.pointerType === 'touch';
+  });
+  composerRows.addEventListener('mousedown', (e) => {
+    if (!press) return;
+    e.preventDefault();
+    if (document.activeElement === input) return;
+    if (press === 'surface' || !pressByTouch) focusAtEnd();
+  });
+  composerRows.addEventListener(
+    'click',
+    (e) => {
+      // detail 0 is a keyboard click: it follows no press of ours.
+      if (press !== 'surface' || e.detail === 0) return;
+      press = null;
+      // A surface press whose click the browser retargeted onto a control.
+      if (controlOf(e.target as Element)) e.stopPropagation();
+    },
+    {capture: true}
+  );
+
   input.addEventListener('paste', (e) => {
     const data = (e as ClipboardEvent).clipboardData;
     const file = pasteImageFile(data);
@@ -449,18 +528,7 @@ export function createComposer({
     setLive,
     setLivePartial,
     setTranscribing,
-    focus() {
-      input.focus({preventScroll: true});
-
-      const selection = window.getSelection();
-      if (selection) {
-        const range = document.createRange();
-        range.selectNodeContents(input);
-        range.collapse(false);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      }
-    },
+    focus: focusAtEnd,
     clear: field.clear,
     getDraft: field.getDraftText,
     setDraft: field.setDraft,

@@ -129,7 +129,14 @@ export type UnreadPayload = {
  * restart- and renumber-invariant row key; `msgId` is the older audio-clip
  * shape the engine still resolves; `ts` is the instant, the fallback identity
  * for a legacy row with no mid and the coalesce key (furthest wins). */
-export type HeardPayload = {paneId: string; mid?: string; msgId?: string; ts: number};
+// `spoken`: a clip played to the end (how far speech has got), not a sighting.
+export type HeardPayload = {
+  paneId: string;
+  mid?: string;
+  msgId?: string;
+  ts: number;
+  spoken?: true;
+};
 export type ProgressPayload = {paneId: string; seq: number; explicit: boolean};
 export type SessionSettingsPayload = {paneId: string; patch: Record<string, boolean | null>};
 export type GlobalSettingsPayload = {patch: Record<string, unknown>};

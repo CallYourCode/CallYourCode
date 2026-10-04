@@ -19,12 +19,14 @@
  */
 
 import { expect, test, beforeEach, afterAll } from "bun:test";
-import { rm } from "node:fs/promises";
+import { rm, rename, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as S from "./session-state.ts";
 import { adoptSession, absorb, mergeChats, carryDirectHandleBind } from "./carry.ts";
 import { tmpDataDir } from "../test-utils/tmp.ts";
 import { seedAgent, readAgentMetas, readChatLog } from "../test-utils/builders.ts";
+import { initChatlog, logChat, logSession } from "../chat/chatlog.ts";
+import { replayLogText } from "../chat/chatstore.ts";
 import { until } from "../test-utils/wait.ts";
 import type { ChatMsg } from "../chat/chatmsg.ts";
 
@@ -227,16 +229,237 @@ test("absorb folds the session records too, onto ONE seq axis with the messages,
   S.metaFor(pid);
   absorb(prov, agentId);
 
-  // one axis, in ts order, dense from 0
+  // one axis, in ts order: the target's rows keep their seqs, the parked ones
+  // follow its tail
   expect(target.chat.map((m) => [m.text, m.seq])).toEqual([["before", 0], ["parked", 3]]);
   expect(target.log.map((r) => [r.text, r.seq])).toEqual([["status: working", 1], ["Allow?", 2], ["Read a", 4]]);
-  // on disk: the merged file carries both kinds, interleaved by seq
-  await until(async () => (await readChatLog(root, U1)).length === 2, { what: "the merged chat on disk" });
+  // on disk: both kinds appended to the target's own file, in seq order (the
+  // seeded file held the message only; the in-memory record is the fixture's)
+  await until(async () => (await readChatLog(root, U1)).length === 2, { what: "the folded rows on disk" });
   const meta = S.metaFor(agentId);
   const loaded = await S.chatStore.loadLog(agentId, meta.chat!);
-  expect(loaded.recs.map((r) => r.seq)).toEqual([1, 2, 4]);
+  expect(loaded.recs.map((r) => r.seq)).toEqual([2, 4]);
   expect(loaded.msgs.map((m) => m.seq)).toEqual([0, 3]);
 });
+
+// ------------------------------------------------- the axis epoch (fix-log-epoch)
+
+test("a provisional newer than the target folds onto its axis: no seq moves, same file, same epoch", async () => {
+  // the Hunter shape: a gappy axis (seq 3 was an old patch line's), then one
+  // status line said by the provisional before its pane announced
+  const { agentId, chatId } = await seedAgent(root, U1, [row("x", "one", 1000, { seq: 0, mid: "mr-1" }),
+    row("x", "two", 2000, { seq: 4, mid: "mr-2" })]);
+  const file = join(data, "agents", agentId, "chats", `${chatId}.jsonl`);
+  const rec = { t: "s", seq: 1, ts: 1500, id: "se-w", kind: "status", text: "status: working", status: "working" };
+  await Bun.write(file, (await Bun.file(file).text()) + JSON.stringify(rec) + "\n");
+  await S.loadSessionState(deps);
+  S.sessionStateReady();
+  const target = live(agentId, U1, S.restoredChats.get(agentId)!);
+  target.log = S.restoredLogs.get(agentId)!;
+  expect(S.axisOf(agentId), "the epoch is the chat file").toBe(chatId);
+
+  const pid = S.freshAgentId();
+  const prov = live(pid, null, []);
+  prov.log = [{ seq: 0, ts: 3000, id: "se-idle", kind: "status", text: "status: idle", status: "idle" }];
+  S.metaFor(pid);
+  absorb(prov, agentId);
+
+  expect(target.chat.map((m) => m.seq), "the target's seqs are untouched").toEqual([0, 4]);
+  expect(target.log.map((r) => [r.id, r.seq]), "the folded record follows the tail").toEqual([["se-w", 1], ["se-idle", 5]]);
+  expect(S.axisOf(agentId), "the same axis, the same epoch").toBe(chatId);
+  expect(S.metaFor(agentId).chat).toBe(chatId);
+  const disk = async () => (await S.chatStore.loadLog(agentId, chatId)).recs;
+  await until(async () => (await disk()).length === 2, { what: "the record appended to the target's file" });
+  expect((await disk()).map((r) => r.seq)).toEqual([1, 5]);
+  expect((await S.chatStore.loadLog(agentId, chatId)).msgs.map((m) => m.seq)).toEqual([0, 4]);
+});
+
+test("a provisional row older than the target's newest re-sequences the log: a new epoch in the same tick", async () => {
+  const { agentId, chatId } = await seedAgent(root, U1, [row("x", "one", 1000, { seq: 0, mid: "mr-1" }),
+    row("x", "three", 3000, { seq: 1, mid: "mr-3" })]);
+  await S.loadSessionState(deps);
+  S.sessionStateReady();
+  const target = live(agentId, U1, S.restoredChats.get(agentId)!);
+
+  const pid = S.freshAgentId();
+  const prov = live(pid, null, [row(pid, "two", 2000, { msgId: "m-2", mid: "mr-2", seq: 0 })]);
+  S.metaFor(pid);
+  absorb(prov, agentId);
+
+  // the interleave can only be ordered by re-sequencing: the axis is new, and
+  // the epoch says so at once, before the new file exists
+  expect(target.chat.map((m) => [m.text, m.seq])).toEqual([["one", 0], ["two", 1], ["three", 2]]);
+  const fresh = S.axisOf(agentId)!;
+  expect(fresh).not.toBe(chatId);
+  expect(S.metaFor(agentId).chat, "the pointer still names the old file").toBe(chatId);
+  // and the new file, once written, carries exactly that id
+  await until(async () => S.metaFor(agentId).chat === fresh, { what: "the pointer flip to the epoch's file" });
+  expect((await S.chatStore.loadLog(agentId, fresh)).msgs.map((m) => m.seq)).toEqual([0, 1, 2]);
+  expect(S.axisOf(agentId)).toBe(fresh);
+});
+
+/* THE RE-SEQUENCE RACE (fix-log-epoch). A re-sequence swaps the in-memory log
+ * synchronously, but the new chat file and the meta pointer land only after
+ * awaits (the tombstone, the body write, the pointer save). Every row, record
+ * and patch the target writes in that window used to go to the OLD file under
+ * a NEW-axis seq: those written after the new body was serialized existed
+ * nowhere a restart would read (message loss), and the rest landed twice. The
+ * writer below appends on every macrotask from the instant of the swap until
+ * the new pointer is on disk, and a few more after. */
+test("rows written while a re-sequence lands go to the new file only, each exactly once, and survive a restart", async () => {
+  // a real-sized log, so the new file's body takes its time to land
+  const bulk = Array.from({ length: 4000 }, (_, i) =>
+    row("x", `old ${i} `.padEnd(400, "."), 3001 + i, { seq: 2 + i, mid: `mr-old-${i}` }));
+  const { agentId, chatId: oldChat } = await seedAgent(root, U1, [row("x", "one", 1000, { seq: 0, mid: "mr-1" }),
+    row("x", "three", 3000, { seq: 1, mid: "mr-3" }), ...bulk]);
+  await S.loadSessionState(deps);
+  S.sessionStateReady();
+  initChatlog({
+    chatOf: (id) => S.sessions.get(id)?.chat ?? S.restoredChats.get(id),
+    restoredChats: () => S.restoredChats,
+    persistPatch: (id, mts, set, unset) => S.persistPatch(id, mts, set, unset),
+    broadcast: () => {},
+    chatRefFor: (id) => S.chatRefFor(id),
+    indexMsgBlobs: () => {},
+    appendMsg: (aid, chatId, m) => S.chatStore.appendMsg(aid, chatId, m as never),
+    appendRec: (aid, chatId, rec) => S.chatStore.appendRec(aid, chatId, rec),
+  });
+  const target = live(agentId, U1, S.restoredChats.get(agentId)!);
+  const oldFile = join(data, "agents", agentId, "chats", `${oldChat}.jsonl`);
+  const oldBytes = await Bun.file(oldFile).text();
+
+  // a provisional that reached disk (so the tombstone write is in the window)
+  // and said something OLDER than the target's newest row: an interleave
+  const pid = S.freshAgentId();
+  const prov = live(pid, null, [row(pid, "two", 2000, { msgId: "m-2", mid: "mr-2", seq: 0 })]);
+  S.metaFor(pid);
+  S.chatRefFor(pid);
+  await S.flushAgentSave(pid);
+
+  absorb(prov, agentId);
+  const fresh = S.axisOf(agentId)!;
+  expect(fresh).not.toBe(oldChat);
+
+  let n = 0;
+  const said: string[] = [];
+  const write = () => {
+    n++;
+    if (n % 3 === 0) {
+      const r = logSession(target as never, { ts: 10_000 + n, kind: "status", text: `status ${n}`, status: "idle" });
+      said.push("e:" + r!.id);
+    } else {
+      logChat(target as never, row(agentId, `live ${n}`, 10_000 + n, { mid: `mr-live-${n}` }));
+      said.push(`m:mr-live-${n}`);
+    }
+  };
+  // an edit to a row the old file holds, made inside the window
+  write();
+  const three = target.chat.find((m) => m.mid === "mr-3")!;
+  (three as Record<string, unknown>).durationS = 7; // the caller edits, then persists
+  S.persistPatch(agentId, 3000, { durationS: 7 });
+  const onDisk = async () => JSON.parse(await Bun.file(join(data, "agents", agentId, "meta.json")).text()).chat;
+  for (let i = 0; i < 2000 && (await onDisk()) !== fresh; i++) {
+    write();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  expect(await onDisk(), "the pointer reached the new file").toBe(fresh);
+  for (let i = 0; i < 5; i++) { write(); await new Promise((r) => setTimeout(r, 0)); }
+  await S.chatStore.flush();
+  await S.settleAgentSaves();
+  expect(n, "the writer ran inside the window").toBeGreaterThan(3);
+
+  // the old file is untouched: nothing was written to it after the swap
+  expect(await Bun.file(oldFile).text()).toBe(oldBytes);
+
+  // the new file holds every row exactly once, on one strictly increasing axis,
+  // the same axis the engine serves from memory
+  const keyOf = (r: Record<string, unknown>) => (typeof r.mid === "string" ? `m:${r.mid}` : `e:${r.id}`);
+  const replay = replayLogText(await Bun.file(join(data, "agents", agentId, "chats", `${fresh}.jsonl`)).text());
+  const rows = [...replay.msgs, ...replay.recs].sort((a, b) => Number(a.seq ?? 0) - Number(b.seq ?? 0)) as Record<string, unknown>[];
+  const keys = rows.map(keyOf);
+  expect(new Set(keys).size, "no row twice").toBe(keys.length);
+  for (const k of ["m:mr-1", "m:mr-2", "m:mr-3", ...said]) expect(keys, `${k} on disk`).toContain(k);
+  expect(keys.length).toBe(3 + bulk.length + said.length);
+  const seqs = rows.map((r) => r.seq as number);
+  expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+  expect(new Set(seqs).size).toBe(seqs.length);
+  const mem = new Map([...target.chat, ...target.log].map((r) => [keyOf(r as never), r.seq]));
+  for (const r of rows) expect(r.seq, `${keyOf(r)} at its in-memory seq`).toBe(mem.get(keyOf(r)));
+  expect((replay.msgs.find((m) => m.mid === "mr-3") as Record<string, unknown>).durationS, "the edit landed").toBe(7);
+
+  // and a restart reads exactly that
+  await S.settleAgentSaves();
+  S.resetForTest();
+  await S.loadSessionState(deps);
+  const back = [...(S.restoredChats.get(agentId) ?? []), ...(S.restoredLogs.get(agentId) ?? [])];
+  expect(back.map((r) => keyOf(r as never)).sort()).toEqual([...keys].sort());
+  expect(S.axisOf(agentId)).toBe(fresh);
+});
+
+/* THE POINTER SAVE MUST BE DURABLE (verifier E4). The meta save used to log and
+ * swallow its failure, so a re-sequence whose pointer save failed counted as
+ * landed: the epoch fell back to the old file id, and a restart read the old
+ * file while every row written since the swap sat, on disk, in the new file
+ * nothing named (26 lost in the verifier's run). Now the pointer is retried
+ * until it lands, and the appends wait behind it. */
+test("a pointer save that fails during a re-sequence is retried until durable; a restart loses nothing", async () => {
+  const bulk = Array.from({ length: 300 }, (_, i) =>
+    row("x", `old ${i} `.padEnd(300, "."), 3001 + i, { seq: 2 + i, mid: `mr-old-${i}` }));
+  const { agentId } = await seedAgent(root, U1, [row("x", "one", 1000, { seq: 0, mid: "mr-1" }),
+    row("x", "three", 3000, { seq: 1, mid: "mr-3" }), ...bulk]);
+  await S.loadSessionState(deps);
+  S.sessionStateReady();
+  initChatlog({
+    chatOf: (id) => S.sessions.get(id)?.chat ?? S.restoredChats.get(id),
+    restoredChats: () => S.restoredChats,
+    persistPatch: (id, mts, set, unset) => S.persistPatch(id, mts, set, unset),
+    broadcast: () => {},
+    chatRefFor: (id) => S.chatRefFor(id),
+    indexMsgBlobs: () => {},
+    appendMsg: (aid, chatId, m) => S.chatStore.appendMsg(aid, chatId, m as never),
+    appendRec: (aid, chatId, rec) => S.chatStore.appendRec(aid, chatId, rec),
+  });
+  const target = live(agentId, U1, S.restoredChats.get(agentId)!);
+  const pid = S.freshAgentId();
+  const prov = live(pid, null, [row(pid, "two", 2000, { msgId: "m-2", mid: "mr-2", seq: 0 })]);
+  S.metaFor(pid);
+  S.chatRefFor(pid);
+  await S.flushAgentSave(pid);
+  // meta.json becomes unwritable (a directory in its place)
+  const mf = join(data, "agents", agentId, "meta.json");
+  await rename(mf, mf + ".bak");
+  await mkdir(mf);
+  await writeFile(join(mf, "x"), "block");
+  let n = 0;
+  const write = () => {
+    n++;
+    logChat(target as never, row(agentId, `live ${n}`, 100_000 + n, { mid: `mr-live-${n}` }));
+  };
+  try {
+    absorb(prov, agentId);
+    for (let i = 0; i < 20; i++) { write(); await new Promise((r) => setTimeout(r, 5)); }
+    await new Promise((r) => setTimeout(r, 1500));
+  } finally {
+    await rm(mf, { recursive: true, force: true });
+    await rename(mf + ".bak", mf);
+  }
+  const fresh = S.axisOf(agentId)!;
+  // the new file is still where the log lives: the epoch did not fall back
+  expect(fresh).not.toBe(JSON.parse(await Bun.file(mf).text()).chat);
+  const onDisk = async () => JSON.parse(await Bun.file(mf).text()).chat;
+  for (let i = 0; i < 400 && (await onDisk()) !== fresh; i++) await new Promise((r) => setTimeout(r, 25));
+  expect(await onDisk(), "the pointer landed once the disk recovered").toBe(fresh);
+  for (let i = 0; i < 5; i++) { write(); await new Promise((r) => setTimeout(r, 5)); }
+  await S.chatStore.flush();
+  await S.settleAgentSaves();
+  const keyOf = (r: Record<string, unknown>) => (typeof r.mid === "string" ? `m:${r.mid}` : `e:${r.id}`);
+  const mem = [...target.chat, ...target.log].map((r) => keyOf(r as never)).sort();
+  S.resetForTest();
+  await S.loadSessionState(deps);
+  const back = [...(S.restoredChats.get(agentId) ?? []), ...(S.restoredLogs.get(agentId) ?? [])];
+  expect(back.map((r) => keyOf(r as never)).sort(), "a restart reads every row").toEqual(mem);
+  expect(S.axisOf(agentId)).toBe(fresh);
+}, 30_000);
 
 test("absorbing an agent into itself is a no-op", async () => {
   const { agentId } = await seedAgent(root, U1, []);

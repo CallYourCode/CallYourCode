@@ -107,6 +107,7 @@ export type StoredSession = Pick<
   | 'turnSince'
   | 'replyLevel'
   | 'claudeSessionId'
+  | 'axis'
   | 'settings'
   | 'muted'
   | 'ask'
@@ -534,6 +535,7 @@ function strip(m: CycEngineMessage): CycEngineMessage {
   if (m.wordsFailed) out.wordsFailed = true;
 
   if (m.transcriptPending) out.transcriptPending = true;
+  if (m.undelivered) out.undelivered = m.undelivered;
   if (m.file) out.file = m.file;
   if (m.upload) out.upload = m.upload;
   if (m.uploads?.length) out.uploads = m.uploads;

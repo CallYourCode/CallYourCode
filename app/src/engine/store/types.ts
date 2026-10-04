@@ -14,11 +14,18 @@ export type CycEngineSession = CycSession & {
 
   sessionAgentId?: string;
   claudeSessionId: string | null;
+  /* THE CHAT LOG'S AXIS EPOCH as the engine last stated it (roster, attach-ok),
+   * persisted with the roster so a cold open knows it before any network: the
+   * open compares it with the epoch its stored rows carry (rows/repl.ts) and
+   * drops a dead axis before painting it. Absent from an older engine. */
+  axis?: string;
   /** the session records held for this agent: rows of the same pages as
    *  `messages`, kept apart so the chat surface can merge them by ts */
   events: CycSessionEvent[];
   agentRuns: EngineAgentRun[];
   heardTs?: number;
+  /* How far speech has got, as last broadcast (contract EngineSession.spokenTs). */
+  spokenTs?: number;
   /* THE ENGINE'S READ-THROUGH ROW IDENTITY as last broadcast (fix-unread):
    * the durable key and instant of the newest row read, session-global across
    * every device. The one authority the divider, landing and speech anchor on,

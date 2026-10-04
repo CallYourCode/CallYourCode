@@ -1,7 +1,7 @@
 import {setAppAuth} from './appFetch';
 import {setLogAutoShip} from '../shared/logging';
 import {hostnameOf} from './hostNames';
-import {markSelfReload} from '@/shared/selfReload';
+import {markSelfReload, navigateSelf} from '@/shared/selfReload';
 import {
   cachedImageBlob,
   cachedImagesMatching,
@@ -92,6 +92,12 @@ export type EngineSession = {
   thinking?: boolean;
   claudeSessionId: string | null;
 
+  /** The chat log's axis epoch (engine sessions/session-state.ts axisOf): the
+   *  id the engine minted when it last created or re-sequenced this log. Rows
+   *  this device holds under another epoch are on a dead axis. Absent from an
+   *  engine older than the field, and while the agent has no log yet. */
+  axis?: string;
+
   contextPct?: number | null;
 
   /** How many subagents this chat's agent has running right now. Present only
@@ -128,6 +134,11 @@ export type EngineSession = {
    * read yet; absent from an engine older than this field, where `heardTs`
    * above is the only marker. */
   readThrough?: EngineReadThrough | null;
+  /* HOW FAR SPEECH HAS GOT: the instant of the newest agent row whose clip,
+   * and every clip before it, a device played to the end. Not read state (the
+   * count and divider ignore it); speech on every device skips clips at or
+   * before it. Absent from an older engine: nothing known spoken. */
+  spokenTs?: number;
   order?: number;
 
   ask?: EngineAsk | null;
@@ -236,6 +247,8 @@ export type EngineChatMessage = {
   wordsFailed?: boolean;
 
   transcriptPending?: boolean;
+  /** the engine gave up delivering this note: the reason */
+  undelivered?: string;
   file?: EngineFileRef;
 
   scheduled?: string;
@@ -266,6 +279,9 @@ export type EnginePage = {
   sealed: boolean;
   messages: EngineChatMessage[];
   events: EngineSessionEvent[];
+  /** The axis epoch this page was cut from (a fetched page; an attach-ok's
+   *  inline pages ride under the attach-ok's own). Absent from older engines. */
+  axis?: string;
 };
 
 export type EngineAttachOk = {
@@ -295,6 +311,10 @@ export type EngineAttachOk = {
   /* Fingerprints of the shown pages below the ones this answer carries,
    * present when the attach named a verifyFrom page. */
   fp?: EnginePagePrints;
+  /* The chat log's axis epoch the served pages and tail bookkeeping belong
+   * to. Absent from engines older than the field: the app then falls back to
+   * the stale-axis heuristics (store/rows/repl.ts). */
+  axis?: string;
 };
 
 // The engine's receipt for an utterance, sent before any delivery work.
@@ -522,10 +542,17 @@ export function clearEnginePinAndReload(): void {
   try {
     delete document.documentElement.dataset.cycPin;
   } catch {}
-  const url = new URL(location.href);
-  url.searchParams.delete('engine');
-  markSelfReload();
-  location.replace(url.toString());
+  // Through the self-navigation gate; no composer hold, a draft is on disk.
+  navigateSelf({
+    why: 'engine-switch',
+    notice: 'Reloading…',
+    to: () => {
+      const url = new URL(location.href);
+      url.searchParams.delete('engine');
+      return url.toString();
+    },
+    before: markSelfReload
+  });
 }
 
 export function engineUrl(): string {

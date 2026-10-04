@@ -242,6 +242,19 @@ describe('sessions family', () => {
     expect(list[1].sessionAgentId).toBeUndefined();
     expect(tabs).toEqual([]);
   });
+  test('sessions: how far speech has got rides through the decoder (release-1 re-gate B2)', () => {
+    // The engine broadcast spokenTs, the decoder whitelists fields, and dropping
+    // it here is why a heard clip replayed after a reload on the first try.
+    const {ctx, emitted} = fakeCtx();
+    dispatchFrame(ctx, {
+      t: 'sessions',
+      list: [{id: 'p1', heardTs: 100, spokenTs: 300}, {id: 'p2', spokenTs: 'x'}]
+    });
+    const [list] = emitted[0][1] as [any[]];
+    expect(list[0].spokenTs).toBe(300);
+    expect(list[0].heardTs).toBe(100);
+    expect(list[1].spokenTs).toBeUndefined();
+  });
   test('sessions: a malformed ask drops WHOLE and surfaces as askUnknown when blocked', () => {
     const {ctx, emitted} = fakeCtx();
     dispatchFrame(ctx, {

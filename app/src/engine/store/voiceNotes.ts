@@ -8,6 +8,7 @@ import type {CycEngineMessage, CycEngineSession} from './types';
 import {connOf, findLocal, notifyNow, sessions} from './registry';
 import {stampRowId} from './rows/core';
 import {clearAck, discardSend, quoteForWire, sendText} from './sends';
+import {wordsMarker} from './attachSend';
 
 type VoiceNoteDeps = {
   cacheTail(s: CycEngineSession): void;
@@ -84,8 +85,10 @@ export function updateVoiceNote(
     });
     return;
   }
-  m.text = text;
-  m.draftCommitted = Math.max(0, Math.min(committed ?? text.length, text.length));
+  const cut = Math.max(0, Math.min(committed ?? text.length, text.length));
+  const around = m.wordsAround;
+  m.text = around ? around.before + text + around.after : text;
+  m.draftCommitted = (around?.before.length ?? 0) + cut;
   notifyNow();
 }
 
@@ -179,7 +182,25 @@ export function commitVoiceNote(
     Date.now().toString(36) + Math.random().toString(36).slice(2);
   const reply = opts.replyTo ?? m?.replyTo;
   const excerpt = (reply?.text ?? '').trim();
-  const wire = clean && excerpt ? quoteForWire(excerpt) + '\n\n' + clean : clean;
+  // An empty body is the engine's to fill. With a reply quote it cannot simply
+  // carry the quote (a bodied note is left alone and its words never come):
+  // on an engine that can 'note-words' the quote goes on top of a marker
+  // naming this cid, exactly as sendVoiceClip ships a quoted note. An engine
+  // without it would hand the marker to the agent as text, so there the note
+  // goes empty-bodied for its words and the quote stays on the row (replyTo).
+  const noteWords = !clean && !!excerpt && owner.client.can('note-words');
+  const body = noteWords ? wordsMarker(cid) : clean;
+  const wire = body && excerpt ? quoteForWire(excerpt) + '\n\n' + body : body;
+  if (!clean && excerpt && !noteWords) {
+    cyclog('commit.quote-unwired', {
+      cid,
+      session: sessionId,
+      localId,
+      why:
+        'an empty-bodied note answering a quote, on an engine that cannot fill words ' +
+        'beside a quote: the words go, the quote stays on the bubble but not on the wire'
+    });
+  }
   if (m) {
     // An empty-body commit (the engine fills the words) on a still-streaming
     // row keeps the streamed display and its draftCommitted, so the device's
@@ -223,6 +244,7 @@ export function commitVoiceNote(
         msgId: opts.msgId,
         replyTo: reply,
         wire,
+        ...(noteWords ? {words: [cid]} : {}),
         ...(moving ? {clipKey: opts.transferKey, transferKey: opts.transferKey} : {}),
         // The device's settled streaming words, named by the frame's cid: the
         // engine reads only the clip's tail past upToS and prepends these.

@@ -107,6 +107,7 @@ function mk(over: Partial<ChatSurfaceDeps> = {}) {
     heardTsOf: () => 0,
     readMarkerOf: () => undefined,
     reportViewedThrough: vi.fn(),
+    noteOnScreen: vi.fn(),
     play: vi.fn(),
     suppressAutoSpeak: () => false,
     clearSuppressAutoSpeak: vi.fn(),

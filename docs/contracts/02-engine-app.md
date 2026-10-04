@@ -45,6 +45,21 @@ only the tail past `upToS` (`/stt?offset=`, contract 01) and prepends the
 settled text; the settled words are a floor a shorter or failed decode never
 replaces.
 
+A `kind:'voice'` note with text beside its words (the reply quote the app
+puts on top, a caption typed with the recording) is sent at once when the
+engine announced `note-words`: its body names where the note's own words go
+with `{{cyc-words:<cid>}}`, the frame's OWN cid, listed in `words`. The engine
+reads the note's clip into that marker (tail-only when a partial names the
+cid), so the agent gets quote, words and caption as one message, the same
+text the device's own transcript would have made. The marker is matched by
+its literal token, so any cid the engine accepts (a capture's `c-...` as well
+as a uuid) names it. A decode past the inline deadline shows the row pending:
+its `text` is the quote and caption without the marker (what other devices
+show meanwhile) and the body is kept on the row (`wordsInto`,
+engine-internal) for the completion and its re-drive. An engine
+without `note-words` would deliver the marker as text, so against it the app
+waits for the device decoder and bakes the transcript in.
+
 ### Engine -> app frames
 
 The hello burst first (`sendHelloBurst`): `can {list}`, `plugins {list}`
@@ -85,7 +100,64 @@ sequenceDiagram
 
 ### Delivery guarantees (PRODUCT.md section 5)
 
-The engine acks every utterance by cid BEFORE delivery work; `dup:true` marks
+The engine acks every utterance by cid BEFORE delivery work, and only once the
+frame is on its disk (`state/intake/`). Acks go out in frame order per session,
+so a frame's ack and delivery wait behind that one small write (a slow disk
+slows them; a full one is logged and the message still goes, unprotected).
+The frame is removed only after delivery has run AND what it wrote to the chat
+is on disk. A crash after the ack leaves the frame, and the session's next
+live pickup drives it again, deduped by cid against the chat log; a note shown
+with its words pending is completed at that same pickup.
+
+Exactly once across a stop. Each delivery keeps how far its keystrokes got,
+per cid: `typing` before the body is typed, `entering` before the Enter; the
+stage is removed when the attempt ends, delivered or failed, so a stage is
+only ever found after a stop. A retry inside the process keeps the in-memory
+rule (the box still holding content, or on a pane this engine cannot parse our
+typed tail, gets Enter only). After a restart a drive acts on a stage only
+with positive evidence from the input box: the box holding exactly this body
+gets Enter only; a box positively empty means, after `entering`, that the
+Enter took it (nothing typed again, only the missing row written) and, after
+`typing`, that nothing landed (typed fresh). Anything else (a screen not
+readable as a box, someone else's text in it, a long paste the harness
+collapsed, a harness this engine cannot parse such as pi or codex) is not
+guessed at: nothing is pressed, the box is left alone, and the send fails
+visibly with a retry. A pending voice note whose completion is refused this
+way stops being pending and its row carries `undelivered: <reason>`; the app
+takes such a row in as a failed send with that reason (one rule, where rows
+enter its store), so every device shows it failed, open or not, after any
+reload or restart. Its retry is a new send, cid `<cid>-r`, naming the same clip
+with an empty body; the engine puts the words into the quote and caption kept
+on the failed row (`wordsInto`) and reads the box by the same rule as a resumed
+drive (type only into a box positively empty, Enter only on exactly this body,
+anything else refused again with the same reason). When the retry is delivered
+the failed row's mark is removed (its rev moves), so every device shows it sent
+and stops offering the retry. On SIGTERM or
+SIGINT the engine drains: no new frame is taken (not acked, so the app sends it
+to the next process), nothing new starts typing (it stays on disk), and the
+deliveries already typing finish, rows on disk, within 10 s; a second signal
+exits at once. A delivery waits only on its own chat file's writes.
+
+What remains: a kill -9 (or the 10 s bound running out) between the `entering`
+mark and the Enter, with the box then emptied by hand before the restart, is
+taken as delivered; a body a refused drive leaves in the box is submitted with
+the next message typed onto it (crash only), and if that body was a note the
+engine gave up on, its retry afterwards finds the box empty and sends the note
+a second time (the engine cannot tell the glued submission carried it). As on main: when herdr refuses an
+Enter, the body stays in the box with no stage (a stage lives only while an
+attempt runs), so if the engine restarts (SIGTERM included) before the user's
+retry of that cid, the retry types the body again onto it and the agent gets it
+twice in one message; inside one process the in-memory note makes that retry
+Enter only. herdr refusing a keystroke has not been seen in production since
+2026-08-24.
+
+Failures the sender is told: every refusal of a frame driven after a restart
+(no socket to answer on), a frame driven by three boots without finishing, and
+a frame whose session is not picked up live within 10 minutes of boot are
+dropped with `send-failed {id, cid, reason}`, broadcast and repeated to
+every app that connects to that process (a further restart before any app
+connects does not repeat it). The row goes to failed with a retry; the retry
+is the same cid taken fresh. `dup:true` marks
 a re-sent cid; `err` / `send-failed` are definitive refusals that keep the
 cid retriable. The app arms a per-cid ack deadline (`store/sends.ts armAck`);
 a deadline reached with no ack redelivers the SAME cid (`drain.redeliver`)

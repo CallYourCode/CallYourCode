@@ -33,14 +33,22 @@
  *
  * The reply is chunked by tunnel.ts and each chunk is sealed + sent in order
  * with a pipe.drain() between them, so a large answer rides the backpressure
- * dcpipe already has. Replies are NOT awaited by the frame dispatch: a growing
+ * dcpipe already has. The drain is read only AFTER the sealed frame is on the
+ * pipe (sendFrame awaits the sealed write): reading it right after queueing
+ * the seal saw an empty buffer every time, so the whole file was poured into
+ * the DataChannel stack at once, starving the engine's event loop for the rest
+ * of the download (download-lane, 2026-10-03). A multi-frame answer rides the
+ * sealed writer's BULK lane, which yields to every control frame, so a
+ * download never holds a chat frame or an upload ack behind its bytes; a route
+ * can put a one-frame answer there too with `x-cyc-lane: bulk` (a download
+ * chunk). Replies are NOT awaited by the frame dispatch: a growing
  * body can stay open for minutes, and the dispatch loop must keep reading --
  * not least the {t:"req-abort"} that stops that very reply. Frames of
  * concurrent replies interleave on the wire; the app correlates by id.
  */
 
 import { ReqReassembler, ResStreamEncoder, decodeChunk, encodeRes, TunnelError,
-  type ReqAbortFrame, type ReqFrame } from "./tunnel.ts";
+  type ReqAbortFrame, type ReqFrame, type ResFrame } from "./tunnel.ts";
 import { send } from "./wire.ts";
 import { markSealedTunnel } from "./httpx.ts";
 import { UPLOAD_BODY_MAX_BYTES } from "../storage/body-limits.ts";
@@ -140,6 +148,18 @@ function state(ws: Sock): TunnelState {
  * origin sees "this machine". */
 const SYNTH_ORIGIN = "http://127.0.0.1";
 
+type Lane = "ctl" | "bulk";
+
+/** One reply frame onto the pipe, on `lane`, resolving once it is IN the pipe
+ * and the pipe has drained under its low-water mark. Through the sealed writer
+ * when the sock has one (the DataChannel client), else the plain send. */
+async function sendFrame(ws: Sock, f: ResFrame, lane: Lane): Promise<void> {
+  const sec = ws.data.sec;
+  if (sec && typeof sec.sealSend === "function") await sec.sealSend(f, lane);
+  else send(ws, f);
+  await ws.data.pipeDrain?.();
+}
+
 /** Send one Response back over the sealed channel as chunked {t:"res"} frames,
  * streaming res.body AS IT ARRIVES: a fully-buffered body emits the
  * exact frames the old arrayBuffer() path did (the stream encoder's lookahead
@@ -158,6 +178,12 @@ async function reply(ws: Sock, id: string, res: Response, st?: TunnelState): Pro
    * The header is a control signal, stripped before it becomes the answer. */
   const liveStream = headers["x-cyc-stream"] === "live";
   delete headers["x-cyc-stream"];
+  /* The lane, same control-header pattern: a live stream stays on the control
+   * lane (its small flushes are what the user is listening to); any other
+   * answer moves to the bulk lane the moment it proves multi-frame, and stays
+   * there, so its frames keep their order. */
+  let lane: Lane = headers["x-cyc-lane"] === "bulk" && !liveStream ? "bulk" : "ctl";
+  delete headers["x-cyc-lane"];
   const enc = new ResStreamEncoder(id, res.status, headers);
   let aborted = false;
   st?.replies.set(id, () => {
@@ -177,18 +203,16 @@ async function reply(ws: Sock, id: string, res: Response, st?: TunnelState): Pro
           if (done) break;
           if (!value || value.length === 0) continue;
           for (const f of enc.push(value)) {
-            // seal + send in order; the RtcSock's send() seals through its
-            // EngineSecConn.
-            send(ws, f);
-            await ws.data.pipeDrain?.();
+            // seal + send in order through the sock's EngineSecConn; push()
+            // only emits a frame with more after it, so this answer is
+            // multi-frame: bulk, unless it is live.
+            if (!liveStream) lane = "bulk";
+            await sendFrame(ws, f, lane);
           }
           // A live stream flushes what push() held back, so a sub-CHUNK reply
           // goes out as it is produced rather than waiting for end().
           if (liveStream) {
-            for (const f of enc.flush()) {
-              send(ws, f);
-              await ws.data.pipeDrain?.();
-            }
+            for (const f of enc.flush()) await sendFrame(ws, f, lane);
           }
         }
       } catch (e) {
@@ -196,8 +220,7 @@ async function reply(ws: Sock, id: string, res: Response, st?: TunnelState): Pro
         if (!enc.started) {
           // nothing on the wire yet: the answer can still be a clean 500
           for (const f of encodeRes(id, 500, {}, new TextEncoder().encode("tunnel body stream error"))) {
-            send(ws, f);
-            await ws.data.pipeDrain?.();
+            await sendFrame(ws, f, "ctl");
           }
           return;
         }
@@ -206,10 +229,9 @@ async function reply(ws: Sock, id: string, res: Response, st?: TunnelState): Pro
       }
     }
     if (aborted) return;
-    for (const f of enc.end()) {
-      send(ws, f);
-      await ws.data.pipeDrain?.();
-    }
+    const last = enc.end();
+    if (last.length > 1 && !liveStream) lane = "bulk";
+    for (const f of last) await sendFrame(ws, f, lane);
   } finally {
     st?.replies.delete(id);
   }

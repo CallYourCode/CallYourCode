@@ -56,6 +56,10 @@ export interface ChatSurfaceDeps {
   heardTsOf(s: CycSession): number;
   readMarkerOf(s: CycSession): ReadMarker | undefined;
   reportViewedThrough(id: string): void;
+  /* Record the rows on screen as seen, without reporting (heardProgress). */
+  noteOnScreen(id: string): void;
+  /* Whether a row has been on screen or heard to the end (heardProgress). */
+  heardOrSeen?(sessionId: string, rowId: string): boolean;
   play(sessionId: string, msgId: string, text: string, reason?: PlayReason): void;
   suppressAutoSpeak(): boolean;
   clearSuppressAutoSpeak(): void;
@@ -609,6 +613,65 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     return null;
   };
 
+  /* WHAT IS ON SCREEN NOW, the one answer every read path asks (owner,
+   * 2026-10-03: a row is read only when it has actually been on screen). The
+   * message rows that overlap the viewport by at least SEEN_PX, as row ids. It
+   * says nothing about rows above them: heardProgress only reads a row that was
+   * itself in this list at some point, so a view the app jumped past rows
+   * reads none of them. Undefined when the viewport is not showing this chat:
+   * another chat painted, the page hidden, or the box not laid out (the list
+   * view on a phone). Found by SCREEN rect, for the reason holdAcrossPaint gives
+   * above. */
+  const SEEN_PX = 16;
+  const onScreenRows = (id: string): string[] | undefined => {
+    if (messageListInner.dataset.cycChat !== id) return undefined;
+    if (document.visibilityState !== 'visible') return undefined;
+    const clientH = messageListScroll.clientHeight;
+    if (clientH <= 0) return undefined;
+    const top = messageListScroll.getBoundingClientRect().top;
+    const out: string[] = [];
+    for (const row of messageListScroll.querySelectorAll<HTMLElement>('.cyc-message[data-mid]')) {
+      const r = row.getBoundingClientRect();
+      if (r.top < top + clientH - SEEN_PX && r.bottom > top + SEEN_PX && row.dataset.mid) {
+        out.push(row.dataset.mid);
+      }
+    }
+    return out;
+  };
+
+  /* THE READER'S OWN SCROLL is sampled as it moves (every SCROLL_NOTE_MS, short
+   * enough that a fling cannot carry a row through the viewport between two
+   * samples), so the rows he scrolled through are seen. A machine write (a
+   * landing, a re-window, the follow) is not: only where it stops counts, at the
+   * pause below, which is what keeps a jump to the bottom from reading what it
+   * skipped. */
+  const SCROLL_NOTE_MS = 50;
+  let lastScrollNote = 0;
+  const noteReaderScroll = () => {
+    const id = sessionState.activeId;
+    if (!id || dataState.mode !== 'live') return;
+    const now = performance.now();
+    if (now - lastScrollNote < SCROLL_NOTE_MS) return;
+    lastScrollNote = now;
+    deps.noteOnScreen(id);
+  };
+
+  /* A SCROLL brings rows on screen, so it is a read path like any other: the
+   * reader scrolling down to a reply sights it, and so does the machine's own
+   * follow to the end. Coalesced to one sighting per pause; never while the
+   * open landing still owns the chat (it reports when it places). */
+  const SCROLL_SIGHT_MS = 150;
+  let scrollSightTimer: ReturnType<typeof setTimeout> | undefined;
+  const sightAfterScroll = () => {
+    clearTimeout(scrollSightTimer);
+    scrollSightTimer = setTimeout(() => {
+      const id = sessionState.activeId;
+      if (!id || dataState.mode !== 'live' || openOwned() || openLanding) return;
+      deps.reportViewedThrough(id);
+    }, SCROLL_SIGHT_MS);
+  };
+  deps.onTeardown(() => clearTimeout(scrollSightTimer));
+
   let bracketMoves = 0;
   const bracketMessageRender = (id: string, paint: () => void) => {
     const keep = messageListInner.dataset.cycChat === id && messageListInner.childElementCount > 0;
@@ -919,6 +982,8 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       readerTrackClientH = clientH;
       listHeightSeen = height;
       boxHeightSeen = clientH;
+      if (!machine) noteReaderScroll();
+      sightAfterScroll();
     },
     {passive: true}
   );
@@ -1254,7 +1319,8 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
       const st = speaker.state;
       if (st.sessionId && st.sessionId !== id) speaker.stopAll();
     }
-    s.unread = 0;
+    // The badge is NOT zeroed on open (owner, 2026-10-03): opening is not
+    // seeing. It falls as the engine's marker moves with the rows on screen.
     if (dataState.mode === 'live') {
       cyclog('chat.opened', {
         session: id,
@@ -1406,6 +1472,8 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     // property storeBindings had locally.
     nearBottom: scrollOwner.nearBottom,
     recomputeNearBottom: scrollOwner.recomputeNearBottom,
+    // The one "what is on screen" answer every read path sights through.
+    onScreenRows,
     bracketMessageRender,
     scrollToBottom,
     releaseBottomPin,

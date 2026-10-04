@@ -472,3 +472,79 @@ test("CYC_CHAOS_DROP_AFTER_BYTES unset (or 0) is inert: a whole request goes thr
     routeRequest = prev;
   }
 });
+
+/* THE DOWNLOAD LANE (download-lane, 2026-10-03). A sock with a sealed writer:
+ * every reply frame goes through sec.sealSend with a lane, and the reply waits
+ * for each sealed write before it reads the next part of the body. The old
+ * reply queued the seal and read the pipe's drain at once, saw an empty buffer,
+ * and poured the whole file into the DataChannel stack. */
+function sealedSock() {
+  const sent: { f: ResFrame; lane: string }[] = [];
+  let pending: Array<() => void> = [];
+  let hold = false;
+  const ws = {
+    data: {
+      cid: 3, terms: new Map(), pipeDrain: () => yieldTurn(),
+      sec: {
+        sealSend: (f: ResFrame, lane = "ctl") => {
+          sent.push({ f, lane });
+          return hold ? new Promise<void>((r) => pending.push(r)) : Promise.resolve();
+        },
+      },
+    },
+    send: () => { throw new Error("a sealed sock's reply must go through sec.sealSend"); },
+  } as unknown as Sock;
+  return {
+    ws, sent,
+    hold() { hold = true; },
+    release() { hold = false; for (const r of pending.splice(0)) r(); },
+  };
+}
+
+test("a multi-frame answer rides the bulk lane and waits for each sealed write", async () => {
+  const s = sealedSock();
+  const prev = routeRequest;
+  routeRequest = async () => new Response(bytes(CHUNK * 4), { status: 200 });
+  try {
+    s.hold();
+    for (const f of encodeReq("big1", "GET", "/doc/x/raw", {}, null)) await onReq(s.ws, f);
+    await until(() => s.sent.length >= 1);
+    await settle();
+    // the first frame is not on the pipe yet: the reply must not have read on
+    expect(s.sent.length, "the reply raced ahead of its own sealed write").toBe(1);
+    expect(s.sent[0].lane).toBe("bulk");
+    s.release();
+    await until(() => s.sent.some((x) => x.f.id === "big1" && x.f.more !== true));
+    expect(s.sent.every((x) => x.lane === "bulk")).toBe(true);
+    const rx = new ResReassembler();
+    let done: ReturnType<ResReassembler["push"]> = null;
+    for (const x of s.sent) done = rx.push(x.f) ?? done;
+    expect(done!.body.length).toBe(CHUNK * 4);
+  } finally {
+    routeRequest = prev;
+  }
+});
+
+test("a one-frame answer stays on the control lane unless the route asks for bulk", async () => {
+  const s = sealedSock();
+  const prev = routeRequest;
+  try {
+    routeRequest = async () => new Response(JSON.stringify({ have: [0, 1] }), { status: 200 });
+    for (const f of encodeReq("ack1", "PUT", "/transfer/x/0", {}, bytes(10))) await onReq(s.ws, f);
+    await until(() => s.sent.some((x) => x.f.id === "ack1"));
+    expect(s.sent.filter((x) => x.f.id === "ack1").map((x) => x.lane)).toEqual(["ctl"]);
+
+    routeRequest = async () => new Response(bytes(1000), {
+      status: 206, headers: { "x-cyc-lane": "bulk", "content-range": "bytes 0-999/5000" },
+    });
+    for (const f of encodeReq("part1", "GET", "/doc/x/raw", { range: "bytes=0-999" }, null)) await onReq(s.ws, f);
+    await until(() => s.sent.some((x) => x.f.id === "part1"));
+    const part = s.sent.filter((x) => x.f.id === "part1");
+    expect(part.map((x) => x.lane)).toEqual(["bulk"]);
+    // the lane is a control header: it never reaches the app
+    expect(part[0].f.h?.["x-cyc-lane"]).toBeUndefined();
+    expect(part[0].f.h?.["content-range"]).toBe("bytes 0-999/5000");
+  } finally {
+    routeRequest = prev;
+  }
+});

@@ -11,6 +11,7 @@ import {
   type Conn
 } from '../registry';
 import {noteRosterSynced, persistRoster} from '../roster';
+import {settleAxis} from '../rows/repl';
 import {pruneNotifAvatars, syncNotifAvatars} from '@/features/media/notifAvatars';
 import * as sync from '../../sync';
 import type {HandlerCtx} from './types';
@@ -92,15 +93,14 @@ function applySessionRow(
         if (es.alive !== false) endDeathGrace(s.id);
         s.churnGrey = false;
       }
-      /* The attached (open) chat normally shows no badge for its own live
-       * activity -- you are reading it -- so its count is zeroed here. The one
-       * exception is a deliberate mark-unread: the engine moved the marker back
-       * and this frame carries that, so honour it. Cleared on open
-       * (store.attach), so the badge still lifts the moment he comes back. */
-      s.unread = s.id === ctx.attachedId() && !markedUnread.has(s.id) ? 0 : es.unread;
-      // The badge above is zeroed for the attached chat; keep the engine's real
-      // count beside it so speech-on-open reads the same unread authority the
-      // divider does even while the owner is reading this chat.
+      /* THE ENGINE'S COUNT, for the attached chat too (owner, 2026-10-03). It
+       * used to be zeroed here for the open chat ("you are reading it"), which
+       * was a read nobody saw: on a phone, back to the list keeps the chat
+       * attached, so replies that landed meanwhile showed 0, the re-open landed
+       * at the bottom with no divider, and the rows above were read on every
+       * device. The count now falls only as rows are actually seen (sightings
+       * move the engine's marker). */
+      s.unread = es.unread;
       s.engineUnread = es.unread;
 
       /* THE ENGINE IS THE ONE AUTHORITY (fix-unread): adopt its broadcast
@@ -112,6 +112,7 @@ function applySessionRow(
       if (es.readThrough !== undefined) applyBroadcastReadThrough(s, es.readThrough);
       else if (es.heardTs !== undefined) applyBroadcastReadThrough(s, {ts: es.heardTs});
       if (es.heardTs !== undefined) s.heardTs = es.heardTs;
+      if (es.spokenTs !== undefined) s.spokenTs = es.spokenTs;
       // The engine has now served this session's read state on the live pipe:
       // speech deferred at open (readStateFreshOnConn) may run, on this truth.
       noteReadStateFresh(s.id);
@@ -152,6 +153,15 @@ function applySessionRow(
         s.claudeSessionId !== es.claudeSessionId;
       const gained = s.claudeSessionId === null && es.claudeSessionId !== null;
       s.claudeSessionId = es.claudeSessionId;
+
+      /* THE CHAT LOG'S AXIS EPOCH (fix-log-epoch). A new one means the engine
+       * re-sequenced this log (an absorb, a trim): rows this device holds under
+       * the old one are dropped now, in the background, so opening the chat
+       * never paints a dead axis and then swaps it out under the reader. */
+      if (es.axis && es.axis !== s.axis) {
+        s.axis = es.axis;
+        void settleAxis(s.id, es.axis, 'roster');
+      }
 
       /* A rotation or a newly minted session id changes nothing the app holds:
        * the records of the new transcript land on the same log, on the same

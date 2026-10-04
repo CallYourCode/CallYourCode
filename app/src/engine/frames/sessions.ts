@@ -51,6 +51,8 @@ function parseSession(s: any, ctx: FrameContext): EngineSession {
     }
 
     if (typeof s.tab === 'string') es.tab = s.tab;
+    // the chat log's axis epoch (store/rows/repl.ts); absent from older engines
+    if (typeof s.axis === 'string' && s.axis) es.axis = s.axis;
     if (Number.isFinite(s.turnSince)) es.turnSince = Number(s.turnSince);
 
     if (Number.isFinite(s.lastActivity)) es.lastActivity = Number(s.lastActivity);
@@ -69,6 +71,8 @@ function parseSession(s: any, ctx: FrameContext): EngineSession {
     if (Number.isFinite(s.stateChangeSeq)) es.stateChangeSeq = Number(s.stateChangeSeq);
 
     if (Number.isFinite(s.heardTs)) es.heardTs = Number(s.heardTs);
+    // how far speech has got: not read state, but speech on this device skips it
+    if (Number.isFinite(s.spokenTs)) es.spokenTs = Number(s.spokenTs);
     if (s.readThrough === null) es.readThrough = null;
     else if (
       s.readThrough &&

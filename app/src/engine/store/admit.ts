@@ -3,8 +3,7 @@ import {markGrowing} from '../../audio/audioCache';
 import type {CycMessage} from '../../types';
 import {capSeen, seen} from './registry';
 import {stampRowId} from './rows/core';
-import {settleSend} from './sends';
-import {reportSighting} from './readState';
+import {quoteForWire, settleSend} from './sends';
 import {noteClip} from './voiceNotes';
 import {prefetchShownDoc} from './shownPrefetch';
 import type {CycEngineMessage, CycEngineSession} from './types';
@@ -76,11 +75,22 @@ export function findLocalFor(
     const ex = x as CycEngineMessage;
     if (x.role !== 'user' || ex.dedupeKey) return false;
     if (m.cid && ex.cid === m.cid) return true;
-    if (m.msgId && ex.msgId === m.msgId) return true;
+    // two cids that differ are two sends, even of one clip (a retry, `<cid>-r`)
+    if (m.msgId && ex.msgId === m.msgId) return !(m.cid && ex.cid);
     if (m.cid) return false;
     if (x.status !== 'sending' && x.status !== 'sent') return false;
     return x.text === displayText || ex.wireText === displayText;
   }) as CycEngineMessage | undefined;
+}
+
+// The engine's text for a reply starts with the quote this device's wire put
+// on top of it (quoteForWire). The bubble draws that quote as its reply panel,
+// so the body it takes from the engine is the text below the quote.
+function bodyBelowReply(local: CycEngineMessage, displayText: string): string {
+  const excerpt = (local.replyTo?.text ?? '').trim();
+  if (!excerpt) return displayText;
+  const quote = quoteForWire(excerpt) + '\n\n';
+  return displayText.startsWith(quote) ? displayText.slice(quote.length) : displayText;
 }
 
 // Fold the engine's row into the bubble: the send is delivered (its intent
@@ -114,13 +124,16 @@ export function adoptEngineRow(
   // holds a PARTIAL: the engine's delivered text is the settled superset
   // (device words plus the decoded tail) and replaces it whole, one repaint,
   // no duplicate. A bubble with no text at all takes the engine's words as
-  // before.
-  if (displayText && (local.draftCommitted !== undefined || !local.text)) {
-    local.text = displayText;
+  // before. A PENDING echo is not words: for a quoted or captioned note it
+  // carries the quote and caption alone (what another device shows while the
+  // engine reads the clip), and this bubble already shows those around its own
+  // growing words, so it keeps them.
+  if (displayText && !m.transcriptPending && (local.draftCommitted !== undefined || !local.text)) {
+    local.text = bodyBelowReply(local, displayText);
   }
 
   if (local.wordsPending) {
-    local.text = displayText;
+    local.text = bodyBelowReply(local, displayText);
     const files = m.uploads?.length ? m.uploads : m.upload ? [m.upload] : [];
     if (files.length) {
       local.upload = files[0];
@@ -134,19 +147,27 @@ export function adoptEngineRow(
   if (m.queued) local.queued = true;
 
   if (m.transcriptPending) local.transcriptPending = true;
+  // the engine's mark, set or (its retry delivered) cleared
+  if (m.undelivered) local.undelivered = m.undelivered;
+  else if (local.undelivered) {
+    delete local.undelivered;
+    delete local.failReason;
+  }
 
   if (m.seq !== undefined) local.seq = m.seq;
-  // THE OWN ROW IS DELIVERED: report a SIGHTING of it by its durable identity
-  // (fix-unread). The engine is the one authority and moves the marker to this
-  // row for every device; there is no local ts-marking to drift. Reporting the
-  // ROW (mid), not a press-time timestamp, is exactly what keeps a
-  // delivery-restamped send read with no divider stranded above it: the marker
-  // lands on this row's identity wherever the engine restamped it to.
-  reportSighting(s.id, {mid: local.mid ?? m.mid, ts: local.ts});
+  // NO READ ON SEND (owner, 2026-10-03). The own row's delivery used to report
+  // a sighting of it, which moved the one forward marker past every reply above
+  // it, seen or not (a hands-free send from a locked phone read them all). What
+  // he has seen is read by the on-screen sightings (the send scrolls to the
+  // bottom), and his own row is never unread: the divider only lands on agent
+  // rows (firstUnheardId), so nothing strands above it.
   // A pending echo (a long note shown before its transcript) carries no words
   // yet: the device's streaming display stands and keeps growing, so
   // draftCommitted stays until the completion row lands (settleTranscript).
-  if (!m.transcriptPending) delete local.draftCommitted;
+  if (!m.transcriptPending) {
+    delete local.draftCommitted;
+    delete local.wordsAround;
+  }
   noteClip(local);
 }
 

@@ -29,8 +29,6 @@ import {
   type VoiceHandle
 } from './composerModel';
 
-const SHEET_MAX_WIDTH = 900;
-
 // Chip fills. `!` beats the base light-secondary utility.
 const CHIP_BG_PRIMARY: Record<PresentationTheme, string> = {
   day: 'bg-[#96602f]!',
@@ -214,6 +212,14 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
     renderBlocks();
   };
 
+  // A block's X is pressed while composing: the caret goes back to the input
+  // (every block alike), never left on the removed button. Touch is left alone
+  // so removing a chip does not raise the keyboard.
+  const dropToInput = (block: ComposerBlock) => {
+    drop(block);
+    if (!touchCapable) input.focus({preventScroll: true});
+  };
+
   const attachChip = (block: ComposerBlock & {kind: 'attach'}): HTMLElement => {
     const st = block.staged;
     const chip = h(
@@ -227,7 +233,7 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
     const remove = removeBtn('cyc-attach-remove w-6! h-6!', st.fromPage?.label ?? st.file.name);
     remove.addEventListener('click', (e) => {
       e.stopPropagation();
-      drop(block);
+      dropToInput(block);
     });
 
     chip.addEventListener('click', () => {
@@ -323,11 +329,7 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
       'the reply'
     );
 
-    cancel.addEventListener('click', () => {
-      drop(block);
-
-      if (!touchCapable) input.focus({preventScroll: true});
-    });
+    cancel.addEventListener('click', () => dropToInput(block));
 
     content.addEventListener('click', (e) => {
       if (!(e.target as HTMLElement).closest('.cyc-reply.cyc-callout-surface')) return;
@@ -359,7 +361,7 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
     body.textContent = block.text;
     quote.append(body);
     const remove = removeBtn('', 'this quote');
-    remove.addEventListener('click', () => drop(block));
+    remove.addEventListener('click', () => dropToInput(block));
     card.append(quote, remove);
     return card;
   };
@@ -462,6 +464,11 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
       const note = h('span', 'cyc-block-voice-note block text-xs italic opacity-80');
       note.textContent = 'waiting for this recording before the message goes';
       transcript.append(note);
+    } else if (block.clip.wordsWait) {
+      card.classList.add('cyc-block-voice-unsure');
+      const note = h('span', 'cyc-block-voice-note block text-xs italic opacity-80');
+      note.textContent = 'sending once these words are in';
+      transcript.append(note);
     } else if (block.clip.restored) {
       card.classList.add('cyc-block-voice-unsure');
       const note = h('span', 'cyc-block-voice-note block text-xs italic opacity-80');
@@ -486,7 +493,7 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
     }
     card.append(transcript);
     const remove = removeBtn('', 'this recording');
-    remove.addEventListener('click', () => drop(block));
+    remove.addEventListener('click', () => dropToInput(block));
     card.append(remove);
     return card;
   };
@@ -502,7 +509,7 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
     );
     name.textContent = block.text;
     const remove = removeBtn('', block.text);
-    remove.addEventListener('click', () => drop(block));
+    remove.addEventListener('click', () => dropToInput(block));
     chip.append(name, remove);
     chip.title = block.text;
     const paintPrompt = () => {
@@ -618,7 +625,9 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
 
   btnAttach.addEventListener('click', (e) => {
     if (isDisabled()) return;
-    if (touchCapable || window.innerWidth <= SHEET_MAX_WIDTH) {
+    // Sheet or menu is an input-device choice, never a width one: a mouse in a
+    // half-width window still gets the menu at the button.
+    if (touchCapable) {
       openSheet(attachItems(), {triggerElement: btnAttach});
     } else {
       openMenu(attachItems(), e, {triggerElement: btnAttach});
@@ -714,7 +723,7 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
       }));
       btn.addEventListener('click', (e) => {
         if (isDisabled()) return;
-        if (touchCapable || window.innerWidth <= SHEET_MAX_WIDTH) {
+        if (touchCapable) {
           openSheet(rows, {triggerElement: btn, className: 'cyc-plugin-widget cyc-bits'});
         } else {
           openMenu(rows, e, {triggerElement: btn, className: 'cyc-plugin-widget cyc-bits'});

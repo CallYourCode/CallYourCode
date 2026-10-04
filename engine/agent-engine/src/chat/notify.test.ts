@@ -31,9 +31,10 @@ import { wireCore, type WireCore, type WireCoreOpts, type FakeClient, wireId } f
 import { PANE } from "../test-utils/fake-herdr.ts";
 import { until, settle } from "../test-utils/wait.ts";
 import { onChat } from "./reply.ts";
-import { batchMs, ceilingMs, ceilingTickMs, sendDismissal } from "./notify.ts";
+import { batchMs, ceilingMs, ceilingTickMs, sendDismissal, msToBoundary } from "./notify.ts";
+import { dispatchClientFrame } from "../transport/frames.ts";
 import { onPresenceChange, graceMs, stableMs, recentUseMs } from "../sessions/presence.ts";
-import { unreadOf } from "../sessions/readstate.ts";
+import { unreadOf, markRead } from "../sessions/readstate.ts";
 import { deriveSessionKey, openPush } from "../../../shared/e2e";
 import { newestGen } from "../security/sec";
 import type { Sock } from "../transport/sock.ts";
@@ -183,7 +184,7 @@ async function openSealed(hit: { sessionId: string; enc?: string }) {
 
 /* --------------------------------------------------------- watched or not -- */
 
-test("a page that is really watching gets no notification, and the row goes read", async () => {
+test("a page that is really watching gets no notification, and the row stays unread until it is seen", async () => {
   const c = core.client({ attach: wireId(PANE), visible: true });
   await say("still here");
 
@@ -198,9 +199,12 @@ test("a page that is really watching gets no notification, and the row goes read
   expect(decision()).toContain("is watching");
   await quietWindow();
   expect(hits()).toHaveLength(0);
-  /* AND THE MARKER MOVED. Without this the suppressed notification and the row
-   * disagree: no banner, but a count of 1 on a chat open in front of you. */
-  expect(unreadOf(session())).toBe(0);
+  /* AND THE MARKER DID NOT MOVE (owner, 2026-10-03): a page open on the chat is
+   * not the reply having been on screen -- he can be scrolled up. The app's
+   * sighting of the on-screen row is what reads it. It goes on the ceiling
+   * clock instead, which the open page holds (next test). */
+  expect(unreadOf(session())).toBe(1);
+  expect(session().silentSince).toBeDefined();
 });
 
 test("a page that freezes still gets the notification, late rather than never", async () => {
@@ -620,18 +624,49 @@ test("a message held back by presence is announced once it passes the ceiling", 
   expect(line).toContain("silent=");
 });
 
-test("the ceiling never fires for a chat he is looking at", async () => {
+/** A live page's heartbeat for `ms` of logical time: one visible beat every
+ *  ten seconds, as presenceBeat sends while the page is visible. */
+async function beatFor(c: FakeClient, ms: number): Promise<void> {
+  for (let left = ms; left > 0; left -= 10_000) {
+    await core.clock.advance(Math.min(10_000, left));
+    c.setVisible(true, core.clock.now());
+  }
+}
+
+test("the ceiling never fires for a chat he is in, and fires once he leaves it unseen", async () => {
   /* The half of this that must not break. A backstop that buzzes him about the
-   * message on his screen trades a silent miss for noise, and he would report
-   * that within the hour. It cannot happen by construction: a chat he provably
-   * watches is marked read, and a chat with no unread is not one the sweep can
-   * fire for. This is that construction, asserted. */
+   * chat in his hand trades a silent miss for noise, and he would report that
+   * within the hour. It used to hold by the watched reply being MARKED READ,
+   * which was scroll-blind; now the reply stays unread (it may be a screen
+   * below him) and a live page on the chat holds the sweep instead. */
   const c = core.client({ attach: wireId(PANE), visible: true });
-  await say("he is reading this one");
+  await say("he is in this chat, scrolled up");
   c.sock.data.lastFrame = core.clock.now() + 1;
   await core.clock.advance(200);
   expect(decision()).toContain("is watching");
 
+  await beatFor(c, ceilingMs() * 2);
+  await settle();
+  expect(saidSomething("[notify] ceiling")).toBe(false);
+  expect(hits()).toHaveLength(0);
+  expect(unreadOf(session())).toBe(1);
+
+  // he leaves for another chat without ever scrolling to it: now it is owed
+  c.attached("some-other-chat");
+  await core.clock.advance(ceilingTickMs() + batchMs());
+  await until(() => sink().batches.length > 0, { what: "the ceiling's window" });
+  expect(saidSomething("[notify] ceiling")).toBe(true);
+  expect(hits()).toHaveLength(1);
+});
+
+test("a row he saw settles the ceiling: no banner after he leaves", async () => {
+  const c = core.client({ attach: wireId(PANE), visible: true });
+  await say("seen at the bottom");
+  c.sock.data.lastFrame = core.clock.now() + 1;
+  await core.clock.advance(200);
+  const s = session();
+  markRead(s, s.chat[s.chat.length - 1].ts); // the app's on-screen sighting
+  c.attached("some-other-chat");
   await core.clock.advance(ceilingMs() * 2);
   await settle();
   expect(saidSomething("[notify] ceiling")).toBe(false);
@@ -818,4 +853,145 @@ test("a chat read INSIDE the window never buzzes at all", async () => {
 
   expect(hits()).toHaveLength(0);
   expect(sink().dismissals.map((d) => d.sessionId)).toEqual([`seam-host:${wireId(PANE)}`]);
+});
+
+/* ------------------------------------------------ re-asked at send time -- */
+
+/* THE OWNER, 2026-10-03: "I had the phone app open, sent a text, and got a
+ * notification for the reply." The phone said hidden for a few seconds, the
+ * reply was queued in that gap ("all say backgrounded", correctly), the phone
+ * came back to that very chat at 18:44:29.07, and the window at :30 sent the
+ * banner anyway: nothing between the queue and the POST asked again. */
+
+/** A phone that has been on the chat, then said hidden a moment ago, with the
+ *  clock put just past a wall boundary so a whole window is ahead of the reply. */
+/** Did a window carry a new banner? Read off the batch line, which flushBatch
+ *  writes BEFORE its POST, so a negative does not depend on the fetch landing. */
+const bannerLeft = () => said().some((l) => /\[notify\] batch \S+ new=[1-9]/.test(l));
+
+async function phoneJustHidden(): Promise<FakeClient> {
+  const c = core.client({ attach: wireId(PANE), visible: true, desktop: false });
+  await holdOpen(c);
+  await core.clock.advance(msToBoundary(batchMs(), 0, core.clock.now()) + 100);
+  c.setVisible(false, core.clock.now());
+  await core.clock.advance(1_000);
+  return c;
+}
+
+test("a banner queued while the phone was hidden is not sent once the phone is back on that chat", async () => {
+  const c = await phoneJustHidden();
+  await say("the reply that landed while you were away for a second");
+  expect(decision()).toContain("all say backgrounded");
+  expect(session().notified).toBe(true);
+
+  await core.clock.advance(5_000);
+  // back on BZ Builder before the window: the visible frame the app sends
+  await dispatchClientFrame(c.sock, { t: "visible", on: true, why: "visibilitychange" });
+  await quietWindow();
+
+  expect(bannerLeft()).toBe(false);
+  expect(hits()).toHaveLength(0);
+  expect(said().find((l) => l.includes("[notify] dropped"))).toContain("said visible on this chat");
+  // it never reached a device, so nothing is standing; and the phone being on
+  // the chat is not the row being on screen, so it is still unread
+  expect(session().notified).toBe(false);
+  expect(unreadOf(session())).toBe(1);
+  expect(session().silentSince).toBeDefined();
+  expect(sink().dismissals).toHaveLength(0);
+});
+
+test("a visible frame on the chat cancels its pending banner at once, even if it hides again", async () => {
+  const c = await phoneJustHidden();
+  await say("on screen a second later");
+  expect(decision()).toContain("[notify] send");
+
+  await core.clock.advance(2_000);
+  await dispatchClientFrame(c.sock, { t: "visible", on: true, why: "visibilitychange" });
+  expect(said().find((l) => l.includes("[notify] dropped"))).toContain("said visible on this chat");
+  // and the presence change is in the log, with the frame and the page's own trigger
+  expect(lines.some((l) => l.includes(`[presence] c${c.sock.data.cid} visible (frame visible on=true why=visibilitychange`))).toBe(true);
+
+  await dispatchClientFrame(c.sock, { t: "visible", on: false, why: "blur" });
+  expect(lines.some((l) => l.includes(`[presence] c${c.sock.data.cid} hidden (frame visible on=false why=blur`))).toBe(true);
+  await quietWindow();
+  expect(bannerLeft()).toBe(false);
+  expect(hits()).toHaveLength(0);
+});
+
+test("a beat restating the same visibility is not a presence change, and is not logged", async () => {
+  const c = core.client({ attach: wireId(PANE), visible: true });
+  await dispatchClientFrame(c.sock, { t: "visible", on: true });
+  await dispatchClientFrame(c.sock, { t: "visible", on: true });
+  expect(lines.some((l) => l.includes("[presence]"))).toBe(false);
+});
+
+test("opening the chat on a visible page takes its queued banner back; a background re-attach does not", async () => {
+  /* The phone is visible on another chat, so no new visible frame is sent when
+   * he taps this one: the attach frame says it is visible (the app stamps
+   * `visible: true` only while the document is shown). */
+  const c = await phoneJustHidden();
+  await say("for the chat he is about to open");
+  c.attached("some-other-chat");
+  c.setVisible(true, core.clock.now());
+  await dispatchClientFrame(c.sock, { t: "attach", id: wireId(PANE), frontier: -1 });
+  expect(saidSomething("[notify] dropped")).toBe(false); // no visible stamp: nothing
+  c.attached("some-other-chat");
+  await dispatchClientFrame(c.sock, { t: "attach", id: wireId(PANE), frontier: -1, visible: true });
+  expect(said().find((l) => l.includes("[notify] dropped"))).toContain("said visible on this chat");
+  await quietWindow();
+  expect(hits()).toHaveLength(0);
+  expect(unreadOf(session())).toBe(1); // opening is not seeing
+});
+
+test("a phone back on ANOTHER chat does not take this chat's banner back", async () => {
+  const c = await phoneJustHidden();
+  await say("for the chat you are not on");
+  c.attached("some-other-chat");
+  await core.clock.advance(2_000);
+  c.setVisible(true, core.clock.now());
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+  expect(saidSomething("[notify] dropped")).toBe(false);
+});
+
+test("a page still claiming visible but silent since the banner was queued gets it (a frozen page)", async () => {
+  // The proof is a frame AFTER the queue. A frozen page's last word is older.
+  const c = await phoneJustHidden();
+  await say("while frozen");
+  c.sock.data.visible = true; // a stale claim, with no frame behind it
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+  expect(saidSomething("[notify] dropped")).toBe(false);
+});
+
+test("any frame but a visible one does not take a banner back (a background page with a stale flag)", async () => {
+  /* The proof is an EXPLICIT visible frame for the chat. A page whose flag still
+   * says visible from before it went to the background can answer a ping or
+   * re-attach from resumed javascript; that is not him on the chat, and it used
+   * to count (the boundary re-check took "any frame after queueing"). */
+  const c = await phoneJustHidden();
+  await say("while the page is in the background");
+  c.sock.data.visible = true; // the stale flag
+  await core.clock.advance(1_000);
+  await dispatchClientFrame(c.sock, { t: "pong", n: 1 });
+  await dispatchClientFrame(c.sock, { t: "ping", n: 7 });
+  await flushWindow();
+  expect(hits()).toHaveLength(1);
+  expect(saidSomething("[notify] dropped")).toBe(false);
+});
+
+test("a banner whose row the marker has already passed is not sent", async () => {
+  /* Every route to read through markRead dismisses a queued banner when the chat
+   * reaches zero unread. This is the guard for a marker that moved past the row
+   * without that: re-read at send time, so the window never announces a row the
+   * marker says is read. */
+  await phoneJustHidden();
+  await say("already read");
+  const s = session();
+  s.notified = false; // the dismissal path is not what moved the marker here
+  markRead(s, s.chat[s.chat.length - 1].ts);
+  await quietWindow();
+  expect(bannerLeft()).toBe(false);
+  expect(hits()).toHaveLength(0);
+  expect(said().find((l) => l.includes("[notify] dropped"))).toContain("why=read");
 });

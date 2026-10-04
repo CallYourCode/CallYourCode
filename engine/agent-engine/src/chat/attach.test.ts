@@ -25,7 +25,7 @@
 import { test, expect, afterAll, afterEach } from "bun:test";
 
 import { wireCore, sessionsFrame, type WireCore, type FakeClient, wireId } from "../test-utils/wire-core.ts";
-import { chatStore, chatRefFor, persistPatch } from "../sessions/session-state.ts";
+import { chatStore, chatRefFor, persistPatch, axisOf, rewriteLog } from "../sessions/session-state.ts";
 import { agentChatFile } from "../storage/datadir.ts";
 import { replayLogText } from "./chatstore.ts";
 import { PANE } from "../test-utils/fake-herdr.ts";
@@ -332,11 +332,13 @@ test("with nothing unread the pointer sits past the newest seq and the pages col
     expect(ok.pages.map((p: any) => p.page)).toEqual([1]);
   });
 
-test("a user message reads everything above it, and the next reply is unread again", async () => {
-  /* #452: his own message reads the conversation above it (the marker moves
-   * with the utterance), and the reply that comes back after it is news. The
-   * two together are what makes the unread count mean "things I have not seen"
-   * rather than "things since I last tapped". */
+test("a user message reads nothing: replies above it stay unread until seen (M2, was #452)", async () => {
+  /* #452 made his own message read the conversation above it, so the count meant
+   * "things I have not seen" rather than "things since I last tapped". It read
+   * rows nobody saw: a hands-free note from a locked phone read every reply on
+   * every device. Owner, 2026-10-03: a row is read only when it has been on
+   * screen (or heard to the end); the app's sightings say so. The reply after
+   * his message is still news, and the divider still never sits on his row. */
   core = await wireCore({ with: ["delivery", "frames"] });
   const c = core;
   await until(() => c.sessions.size === 1, { what: "the pane to reconcile" });
@@ -344,14 +346,13 @@ test("a user message reads everything above it, and the next reply is unread aga
   expect(row().unread).toBe(3);
 
   const page = c.client();
-  await onUtterance(page.sock, { id: wireId(PANE), text: "I read all that" });
-  expect(row().unread, "his own message did not read the conversation above it (#452)").toBe(0);
+  await onUtterance(page.sock, { id: wireId(PANE), text: "sent from my pocket" });
+  expect(row().unread, "a send read replies nobody saw").toBe(3);
 
   await seedReplies(c, 1, "after");
-  expect(row().unread, "the reply that followed his message is not news").toBe(1);
+  expect(row().unread, "the reply that followed his message is news").toBe(4);
   const ok = await attach(c, PANE);
   expect(ok.pages[0].messages.at(-1).text).toBe("after0");
-  expect(ok.pointer, "the divider must sit on the reply, not on his own message").toBe(4);
 });
 
 /* Plant a sparse (or gapped) seq axis directly. ensureSeqs leaves a fully
@@ -507,6 +508,50 @@ test("a frontier past the newest seq is a STALE AXIS: serve the cold tail, log t
   const mm = c.logs.find((l) => l.event === "attach.axis-mismatch")!;
   expect(mm.fields.frontier).toBe(133361);
   expect(mm.fields.tailVersion).toBe(12);
+});
+
+/* THE AXIS EPOCH (fix-log-epoch). Hunter, 2026-10-03: a carry absorb
+ * re-sequenced the whole log under the same session id (old axis 0..2645, new
+ * 0..2493). The phone still held the old axis and stated frontier 2600. The
+ * stale-axis test above caught it only because the new tail (2579) was still
+ * below 2600; a few hours of growth later the same frontier read as plausible
+ * and the engine would have served a delta onto a dead axis. The attach-ok now
+ * names the log's epoch, and a device naming another one attaches cold. */
+test("the attach-ok and every page name the chat log's epoch: its chat file", async () => {
+  const c = await boot();
+  await seedReplies(c, 3);
+  const id = c.byHandle(PANE)!.id;
+  const ok = await attach(c, PANE);
+  expect(ok.axis).toBe(chatRefFor(id).chatId);
+  expect(ok.axis).toBe(axisOf(id));
+  const row0 = (sessionsFrame().list as any[]).find((s) => s.id === wireId(PANE));
+  expect(row0.axis, "the roster row names it too").toBe(ok.axis);
+});
+
+test("a device naming another epoch attaches cold however plausible its frontier", async () => {
+  const c = await boot();
+  await seedReplies(c, 12); // T = 11
+  const id = c.byHandle(PANE)!.id;
+  const held = axisOf(id)!;
+  // same epoch, caught up: the usual metadata-only answer
+  const same = await attach(c, PANE, c.client(), { frontier: 11, axis: held });
+  expect(same.pages).toEqual([]);
+  expect(same.deltaBase).toBe(12);
+  // the log is re-sequenced (what absorb and the trim route do): a new epoch
+  const s = c.byHandle(PANE)!;
+  s.chat.forEach((m, i) => { m.seq = i; });
+  void rewriteLog(id, s.chat, s.log);
+  const fresh = axisOf(id)!;
+  expect(fresh).not.toBe(held);
+  const ok = await attach(c, PANE, c.client(), { frontier: 5, axis: held });
+  expect(ok.axis).toBe(fresh);
+  expect(ok.deltaBase, "cold: served from the bottom of the newest pages, not from 6").toBe(0);
+  expect(ok.pages[0].messages.length).toBe(12);
+  const mm = c.logs.find((l) => l.event === "attach.axis-epoch")!;
+  expect(mm.fields).toMatchObject({ frontier: 5, held, axis: fresh });
+  // a device that names no epoch (an app older than this) keeps today's rules
+  const old = await attach(c, PANE, c.client(), { frontier: 11 });
+  expect(old.pages).toEqual([]);
 });
 
 /* PAGE FINGERPRINTS (fix-sync-gap). The laptop's BZ Builder hole: the device's

@@ -35,7 +35,7 @@ import { turnSinceFor } from "../chat/turn.ts";
 import { ANNOUNCED_SOURCE, PREMINT_SOURCE, PARKED_SOURCE, agentLabel } from "../runtime/agents.ts";
 import { isHarnessSessionId } from "../runtime/ids.ts";
 import { adoptSession, absorb } from "./carry.ts";
-import { sessions, restoredChats, restoredLogs, restoredSeenOf, restoredNotifiedOf, restoredFiledOf,
+import { sessions, restoredChats, restoredLogs, restoredSeenOf, restoredNotifiedOf, restoredFiledOf, restoredSpokenOf,
   heardTsFor, agentMetas, metaFor, freshAgentId, sessionIndex,
   bindingOf, recordBinding, markBindingDead, savePaneBindings,
   purgeSessionState, scheduleAgentSave, type Session } from "./session-state.ts";
@@ -71,6 +71,11 @@ export type ReconcileDeps = {
   now?: () => number;
   /** the engine log line writer (status.edge for mux-driven changes) */
   log?(event: string, fields: Record<string, unknown>): void;
+  /** A session's pane is live now and it was not a moment ago (the first poll
+   *  after a boot, or a dead row coming back): whatever this engine owes it
+   *  from before (a message taken and never delivered, a note shown with its
+   *  words pending) can be driven to it now. Called after the row is set. */
+  sessionLive?(s: Session): void;
 };
 
 /** What one pane's mux evidence says, normalised. */
@@ -318,6 +323,7 @@ function deadRow(meta: AgentMeta, chat: Session["chat"], log: Session["log"], or
     doneSeq: restoredSeenOf(id)?.doneSeq ?? 0, seenDoneSeq: restoredSeenOf(id)?.seenDoneSeq ?? 0,
     heardTs: heardTsFor(undefined, id),
     notified: restoredNotifiedOf(id) ?? false, filedTs: restoredFiledOf(id) ?? 0,
+    spokenTs: restoredSpokenOf(id) ?? 0,
     order, chat, log, channels: [],
   };
 }
@@ -502,6 +508,7 @@ export function makeReconcile(d: ReconcileDeps): (agents: MuxAgentInfo[]) => voi
        * forgot it would push again for a notification already sitting on the
        * phone, and would never send the dismissal that takes it down. */
       notified: prev?.notified ?? restoredNotifiedOf(key) ?? false,
+      spokenTs: prev?.spokenTs ?? restoredSpokenOf(key) ?? 0,
       // ...and so is how far he had filed it: see restoredFiledTs
       filedTs: prev?.filedTs ?? restoredFiledOf(key) ?? 0,
       order: i, // agents arrive in herdr's "spaces" order
@@ -537,6 +544,7 @@ export function makeReconcile(d: ReconcileDeps): (agents: MuxAgentInfo[]) => voi
     sessions.set(key, s);
     restoredChats.delete(key); // owned by the live session now
     restoredLogs.delete(key);
+    if (!prev?.alive) d.sessionLive?.(s);
     // the edge the log line above reported, as a record in the agent's own log
     if (prev && prev.status !== status) {
       logSession(s, { ts: now, kind: "status", text: `status: ${status}`, status });

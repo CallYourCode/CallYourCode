@@ -55,6 +55,11 @@ describe('decodeChat: the frame envelope', () => {
     expect(off.wordsFailed).toBeUndefined();
     expect(off.transcriptPending).toBeUndefined();
   });
+  test('undelivered: the reason a note was given up on, a non-empty string only', () => {
+    expect(decodeChat({id: 's', undelivered: 'it did not arrive'})!.undelivered).toBe('it did not arrive');
+    expect(decodeChat({id: 's', undelivered: true})!.undelivered).toBeUndefined();
+    expect(decodeChat({id: 's', undelivered: ''})!.undelivered).toBeUndefined();
+  });
   test('scheduled: a non-empty string only', () => {
     expect(decodeChat({id: 's', scheduled: 'daily-note'})!.scheduled).toBe('daily-note');
     expect(decodeChat({id: 's', scheduled: ''})!.scheduled).toBeUndefined();

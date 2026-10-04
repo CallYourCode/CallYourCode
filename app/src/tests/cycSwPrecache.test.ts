@@ -40,9 +40,12 @@ function makeCaches() {
     return {
       match: async (k: unknown) => c.get(pathOf(k)),
       put: (k: unknown, v: unknown) => c.set(pathOf(k), v),
+      // All-or-nothing, like the real Cache.addAll: one failed fetch stores none.
       addAll: async (reqs: unknown[]) => {
+        const got: [string, unknown][] = [];
         for (const r of reqs)
-          c.set(pathOf(r), await (globalThis.fetch as (x: unknown) => Promise<unknown>)(r));
+          got.push([pathOf(r), await (globalThis.fetch as (x: unknown) => Promise<unknown>)(r)]);
+        for (const [k, v] of got) c.set(k, v);
       }
     };
   };
@@ -66,11 +69,21 @@ let handlers: Handlers;
 let fetched: string[];
 let caches: ReturnType<typeof makeCaches>;
 
-beforeAll(() => {
-  const code = readFileSync(resolve(process.cwd(), 'public/cyc-sw.js'), 'utf8');
-  handlers = {};
-  fetched = [];
-  caches = makeCaches();
+const SW_CODE = readFileSync(resolve(process.cwd(), 'public/cyc-sw.js'), 'utf8');
+
+// Evaluates the worker against a fresh fake `self`, a fresh CacheStorage and a
+// recording fetch, installing those as the bare globals the worker's helpers
+// call. `code` is the worker source (unbaked, or with a build stamp baked in the
+// way scripts/build-cyc.sh does).
+function bootWorker(code: string): {
+  sw: SwGlobals;
+  handlers: Handlers;
+  fetched: string[];
+  caches: ReturnType<typeof makeCaches>;
+} {
+  const handlers: Handlers = {};
+  const fetched: string[] = [];
+  const caches = makeCaches();
   const fakeSelf: Record<string, unknown> = {
     addEventListener: (type: string, fn: (ev: unknown) => void) => {
       (handlers[type] ||= []).push(fn);
@@ -94,7 +107,11 @@ beforeAll(() => {
   (globalThis as unknown as {fetch: unknown}).fetch = fakeSelf.fetch;
 
   new Function('self', code)(fakeSelf);
-  sw = fakeSelf as unknown as SwGlobals;
+  return {sw: fakeSelf as unknown as SwGlobals, handlers, fetched, caches};
+}
+
+beforeAll(() => {
+  ({sw, handlers, fetched, caches} = bootWorker(SW_CODE));
 });
 
 const req = (url: string, o: {method?: string} = {}) => ({
@@ -252,7 +269,7 @@ describe('service worker install precaches the whole build', () => {
     (globalThis as unknown as {fetch: unknown}).fetch = async (input: unknown) => {
       const p = pathOf(input);
       if (p === '/cyc-precache.json') return {ok: true, json: async () => manifest};
-      return {precached: p};
+      return {ok: true, precached: p};
     };
     try {
       await sw.cycPrecacheInstall();
@@ -267,14 +284,14 @@ describe('service worker install precaches the whole build', () => {
     expect(installed, 'install did not open the stamp-named cache').toBeTruthy();
     for (const a of manifest.assets) {
       const p = new URL(a).pathname;
-      expect(installed!.get(p), `${a} was not precached`).toEqual({precached: p});
+      expect(installed!.get(p), `${a} was not precached`).toEqual({ok: true, precached: p});
     }
 
     // A cold navigation now resolves the shell from the freshly installed cache
     // (its stamp is the highest present), with nothing hitting the network.
     fetched.length = 0;
     const shell = await sw.cycServeShell(req('/?testmode=1'));
-    expect(shell).toEqual({precached: '/index.html'});
+    expect(shell).toEqual({ok: true, precached: '/index.html'});
     expect(fetched).toEqual([]);
   });
 });
@@ -331,5 +348,292 @@ describe('service worker update handlers', () => {
     expect(after, 'cleanup must keep current + immediately previous only').toEqual(expectKept);
     expect(await caches.keys()).toContain('cyc-audio-not-a-precache');
     expect(claims, 'activate did not claim clients').toBe(1);
+  });
+});
+
+// THE STUCK BUILD (iPhone, 2026-10-03). An update worker whose precache failed
+// used to install anyway (the failure was swallowed), take control holding
+// nothing of its own build, and leave every launch on the previous build's
+// bucket; its bytes never changed again, so no update check re-ran the install.
+// An update install must now FAIL when it cannot fill its own build's bucket, so
+// the active worker stays and the browser retries the install on the next
+// update check. Only the very first install (nothing active to keep) may take
+// over without a precache.
+describe('service worker install fails an update it cannot precache', () => {
+  const STAMP = '1791000000';
+  const ASSETS = ['/index.html', '/assets/index-AAAA.js'].map((p) => ORIGIN + p);
+
+  const shellOf = (entry: string) =>
+    `<link rel="icon" href="./pwa/icons/favicon.svg" /><script type="module" src="./assets/${entry}"></script>`;
+
+  const boot = (o: {
+    active: boolean;
+    manifestVersion?: string;
+    failAsset?: string;
+    badAsset?: string;
+    // The index.html the network hands back (default: this build's).
+    shell?: string;
+  }) => {
+    const w = bootWorker(SW_CODE.replace('__CYC_BUILD__', STAMP));
+    const self = w.sw as unknown as Record<string, unknown>;
+    (self.registration as Record<string, unknown>).active = o.active ? {state: 'activated'} : null;
+    const manifest = {version: o.manifestVersion ?? STAMP, assets: ASSETS};
+    (globalThis as unknown as {fetch: unknown}).fetch = async (input: unknown) => {
+      const p = pathOf(input);
+      if (p === '/cyc-precache.json') return {ok: true, json: async () => manifest};
+      if (p === o.failAsset) throw new TypeError('Load failed');
+      if (p === o.badAsset) return {ok: false, status: 503};
+      const res = {ok: true, precached: p};
+      const html = o.shell ?? shellOf('index-AAAA.js');
+      // non-enumerable, so the stored marker still compares equal
+      Object.defineProperty(res, 'clone', {value: () => ({text: async () => html})});
+      return res;
+    };
+    const install = async () => {
+      const waited: Promise<unknown>[] = [];
+      w.handlers.install.forEach((h) => h({waitUntil: (p: Promise<unknown>) => waited.push(p)}));
+      await Promise.all(waited);
+    };
+    return {...w, install};
+  };
+
+  test('an update whose asset fetch dies rejects its install and leaves no bucket', async () => {
+    const w = boot({active: true, failAsset: '/assets/index-AAAA.js'});
+    await expect(w.install(), 'a failed update precache was swallowed').rejects.toThrow();
+    expect(await w.caches.keys(), 'the failed install left its empty bucket').toEqual([]);
+  });
+
+  test('an update whose precache completes installs and fills its own bucket', async () => {
+    const w = boot({active: true});
+    await w.install();
+    expect(await w.caches.keys()).toEqual(['cyc-precache-' + STAMP]);
+    expect(await w.sw.cycServeShell(req('/'))).toEqual({ok: true, precached: '/index.html'});
+  });
+
+  test('a worker refuses to precache a manifest of another build', async () => {
+    const w = boot({active: true, manifestVersion: '1791000999'});
+    await expect(w.install()).rejects.toThrow(/not this worker/);
+    expect(await w.caches.keys()).toEqual([]);
+  });
+
+  test('the first install (nothing active) still takes over when its precache fails', async () => {
+    const w = boot({active: false, failAsset: '/assets/index-AAAA.js'});
+    await expect(w.install()).resolves.toBeUndefined();
+    expect(await w.caches.keys()).toEqual([]);
+  });
+
+  // THE TORN DEPLOY (verifier, 2026-10-04): the next build lands between the
+  // manifest fetch and the shell fetch, so the shell is the next build's and
+  // names a chunk this bucket never holds; installed, the next offline launch
+  // was blank.
+  test('a shell of another build fails the install and leaves no bucket', async () => {
+    const w = boot({active: true, shell: shellOf('index-CCCC.js')});
+    await expect(w.install()).rejects.toThrow(/another build/);
+    expect(await w.caches.keys()).toEqual([]);
+  });
+
+  test('a 503 on any file fails the install before a bucket is even opened', async () => {
+    const w = boot({active: true, badAsset: '/assets/index-AAAA.js'});
+    const opened: string[] = [];
+    const open = w.caches.open;
+    w.caches.open = async (n: string) => {
+      opened.push(n);
+      return open(n);
+    };
+    await expect(w.install()).rejects.toThrow(/503/);
+    expect(opened, 'a bucket was opened for a build that never arrived').toEqual([]);
+    expect(await w.caches.keys()).toEqual([]);
+  });
+
+  // WebKit's network process went down when a failed install discarded the
+  // worker with its own precache loads still in flight.
+  test('the install fails only once every precache fetch has settled', async () => {
+    const w = boot({active: true});
+    let release: () => void = () => {};
+    const slow = new Promise<void>((r) => (release = r));
+    let slowDone = false;
+    (globalThis as unknown as {fetch: unknown}).fetch = async (input: unknown) => {
+      const p = pathOf(input);
+      if (p === '/cyc-precache.json')
+        return {ok: true, json: async () => ({version: STAMP, assets: ASSETS})};
+      if (p === '/index.html') return {ok: false, status: 503};
+      await slow;
+      slowDone = true;
+      return {ok: true, precached: p};
+    };
+    let failedAt = '';
+    const done = w.install().catch(() => {
+      failedAt = slowDone ? 'after the slow fetch settled' : 'with a fetch still in flight';
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(failedAt, 'the install failed with a fetch still in flight').toBe('');
+    release();
+    await done;
+    expect(failedAt).toBe('after the slow fetch settled');
+  });
+
+  test('the shell is stored last: a bucket holding index.html holds every file', async () => {
+    const w = boot({active: true});
+    const order: string[] = [];
+    const open = w.caches.open;
+    w.caches.open = async (n: string) => {
+      const c = await open(n);
+      return {
+        ...c,
+        put: (k: unknown, v: unknown) => {
+          order.push(pathOf((k as {url: string}).url));
+          return c.put(k, v);
+        }
+      };
+    };
+    await w.install();
+    expect(order).toEqual(['/assets/index-AAAA.js', '/index.html']);
+  });
+
+  test('a store that fails part way drops the half-filled bucket', async () => {
+    const w = boot({active: true});
+    const open = w.caches.open;
+    w.caches.open = async (n: string) => {
+      const c = await open(n);
+      let puts = 0;
+      return {
+        ...c,
+        put: (k: unknown, v: unknown) => {
+          if (++puts === 2) throw new DOMException('quota', 'QuotaExceededError');
+          return c.put(k, v);
+        }
+      };
+    };
+    await expect(w.install()).rejects.toThrow(/quota/);
+    expect(await w.caches.keys()).toEqual([]);
+  });
+
+  test('a failed fill never deletes a bucket that already holds its shell', async () => {
+    const w = boot({active: true, failAsset: '/assets/index-AAAA.js'});
+    (await w.caches.open('cyc-precache-' + STAMP)).put('/index.html', {shell: 'kept'});
+    await expect(w.install()).rejects.toThrow();
+    expect(await w.caches.keys()).toEqual(['cyc-precache-' + STAMP]);
+  });
+});
+
+// THE PARKED WORKER (Chromium, 2026-10-03). Every same-origin request used to
+// dispatch a fetch event to the worker, even the ones it sends straight to the
+// network; one landing while the old worker is stopped for a new build's
+// activation restarted it and parked the new worker in "waiting". The worker
+// now declares its routes to the browser (Static Routing API) so only shell and
+// asset requests ever wake it, and a waiting worker takes over when asked.
+describe('service worker routes and the take-over ask', () => {
+  type Rule = {condition: {urlPattern: {pathname: string; search?: string}}; source: string};
+  const routes = () => (sw as unknown as {CYC_ROUTES: Rule[]}).CYC_ROUTES;
+  // What Chromium does with the declared rules: the first match wins; a request
+  // no rule matches gets the default, the fetch event. (Patterns here are a
+  // pathname exact or ending '/*', and a search '*x*'.)
+  const sourceFor = (path: string, search = '') =>
+    routes().find((r) => {
+      const {pathname: p, search: q} = r.condition.urlPattern;
+      const pathHit = p.endsWith('/*') ? path.startsWith(p.slice(0, -1)) : path === p;
+      return pathHit && (!q || search.includes(q.slice(1, -1)));
+    })?.source ?? 'fetch-event';
+
+  // A self-navigation that finds a new worker still waiting past its bound
+  // goes to the same URL with cyc-net=1: whatever the path, it must load from
+  // the network, never reaching the stuck old worker (Chromium), and the
+  // handler must agree (WebKit).
+  test('the escape hatch: any path with cyc-net=1 goes to the network, plain / reaches the worker', () => {
+    for (const [path, search] of [
+      ['/', '?cyc-net=1'],
+      ['/', '?b=2&cyc-net=1'],
+      ['/index.html', '?cyc-net=1'],
+      ['/some/page', '?x=1&cyc-net=1']
+    ]) {
+      expect(sourceFor(path, search), path + search).toBe('network');
+      expect(sw.cycRouteRequest(req(path + search)), path + search).toBe('network');
+    }
+    expect(sourceFor('/', '?testhooks=1')).toBe('fetch-event');
+    expect(sw.cycRouteRequest(req('/?testhooks=1'))).toBe('shell');
+  });
+
+  // fix-download-lane serves /__cyc_dl/<id>/... from the fetch handler. A route
+  // list ending in "everything else to the network" sent it to the server in
+  // Chromium (verifier, 2026-10-04): only named bypass paths may skip the worker.
+  test('a path the table does not name reaches the worker (streamed downloads)', () => {
+    for (const path of ['/__cyc_dl/abc123/report.pdf', '/plugins/git-page.html', '/some/new/path'])
+      expect(sourceFor(path), path).toBe('fetch-event');
+  });
+
+  test('the browser skips the worker only where the handler would go to the network anyway', () => {
+    for (const path of [
+      '/',
+      '/index.html',
+      '/boot-watchdog.js',
+      '/assets/main-AbCd1234.js',
+      '/assets/fonts/inter-latin.woff2',
+      '/clientlog',
+      '/build.txt',
+      '/config',
+      '/settings',
+      '/report',
+      '/push/read',
+      '/cyc-precache.json',
+      '/__cyc_dl/abc/x.bin'
+    ]) {
+      const handler = sw.cycRouteRequest(req(path));
+      if (sourceFor(path) === 'network') expect(handler, path).toBe('network');
+      if (handler !== 'network') expect(sourceFor(path), path).toBe('fetch-event');
+    }
+    // The app's constant traffic never wakes the worker.
+    for (const path of ['/clientlog', '/build.txt', '/config', '/settings', '/push/read'])
+      expect(sourceFor(path), path).toBe('network');
+  });
+
+  test('one table drives both: every network row is a declared rule, nothing else is', () => {
+    const table = (sw as unknown as {CYC_ROUTE_TABLE: [string, string][]}).CYC_ROUTE_TABLE;
+    expect(routes().map((r) => r.condition.urlPattern.pathname)).toEqual(
+      table.filter(([, route]) => route === 'network').map(([path]) => path)
+    );
+    expect(routes()[0].condition.urlPattern.search).toBe('*cyc-net=*');
+    expect(routes().every((r) => r.source === 'network')).toBe(true);
+  });
+
+  test('install declares the routes when the browser has the API, and installs without it', async () => {
+    const w = bootWorker(SW_CODE);
+    (globalThis as unknown as {fetch: unknown}).fetch = async () => {
+      throw new TypeError('offline');
+    };
+    const declared: unknown[] = [];
+    const run = async (event: Record<string, unknown>) => {
+      const waited: Promise<unknown>[] = [];
+      event.waitUntil = (p: Promise<unknown>) => waited.push(p);
+      w.handlers.install.forEach((h) => h(event));
+      await Promise.all(waited);
+    };
+    await run({
+      addRoutes: async (r: unknown) => {
+        declared.push(r);
+      }
+    });
+    expect(declared).toEqual([(w.sw as unknown as {CYC_ROUTES: Rule[]}).CYC_ROUTES]);
+    // A browser that rejects the rules still installs (first install, no active).
+    await expect(
+      run({
+        addRoutes: async () => {
+          throw new TypeError('unsupported condition');
+        }
+      })
+    ).resolves.toBeUndefined();
+    await expect(run({})).resolves.toBeUndefined();
+  });
+
+  test('a skip-waiting message makes the worker skip waiting again', () => {
+    const w = bootWorker(SW_CODE);
+    let skips = 0;
+    (w.sw as unknown as Record<string, unknown>).skipWaiting = () => {
+      skips += 1;
+    };
+    w.handlers.message.forEach((h) => h({data: {t: 'skip-waiting'}}));
+    expect(skips).toBe(1);
+    w.handlers.message.forEach((h) => h({data: {t: 'something-else'}}));
+    w.handlers.message.forEach((h) => h({data: null}));
+    expect(skips).toBe(1);
   });
 });

@@ -14,11 +14,14 @@ import {resolve} from 'node:path';
 //
 // This drives the REAL app/public/cyc-sw.js: build A warms fully, then build B
 // is served with a byte-different worker and a valid manifest but its ASSETS
-// 404, so B's addAll fails and B's bucket is created empty. The page then goes
-// offline and navigates through the controller. The fix makes cycServeShell fall
-// back to the newest bucket that actually holds a shell (build A, whose every
-// chunk is cached), so the page still boots. Before the fix this served the
-// network and, offline, failed: the blank page.
+// 404, so B's addAll fails. B's install now fails with it: B's half-made bucket
+// is deleted and A's worker stays in control (sw-stuck-build.spec.ts proves the
+// retry then lands B). The page then goes offline and navigates through the
+// controller, and must boot A from A's full bucket. cycServeShell's fallback to
+// the newest bucket that holds a shell still covers an empty bucket left behind
+// by a worker from before that change (unit-tested in cycSwPrecache.test.ts).
+// Before the first fix this served the network and, offline, failed: the blank
+// page.
 
 test.skip(({browserName}) => browserName !== 'chromium', 'service worker is chromium-only here');
 
@@ -138,29 +141,28 @@ test('an empty new bucket never blanks the reload: the cached shell still boots 
 
     // BUILD B: byte-different worker + valid manifest, but its assets 404 (the
     // network killed mid-precache). Force the update check and wait until B's
-    // bucket NAME exists and is the newest, while it holds NO shell.
+    // install attempt is over.
     host.serve(distB());
     await page.evaluate(async () => {
       const reg = await navigator.serviceWorker.getRegistration();
-      await reg?.update();
+      await reg?.update().catch(() => {});
     });
     await expect
       .poll(
         () =>
-          page.evaluate(async (stamp) => {
-            const names = (await caches.keys()).filter((n) => n.startsWith('cyc-precache-')).sort();
-            if (names[names.length - 1] !== 'cyc-precache-' + stamp) return false;
-            const bucket = await caches.open('cyc-precache-' + stamp);
-            const hasShell = !!((await bucket.match('/index.html')) || (await bucket.match('/')));
-            return !hasShell; // newest bucket exists but is empty
-          }, B.stamp),
-        {timeout: 30_000, message: 'build B never installed as an empty newest bucket'}
+          page.evaluate(async () => {
+            const reg = await navigator.serviceWorker.getRegistration();
+            return !!reg && !reg.installing && !reg.waiting;
+          }),
+        {timeout: 30_000, message: 'build B install attempt never settled'}
       )
       .toBe(true);
 
-    // Both buckets are retained; B (empty) is newest, A (full) is previous.
+    // B's failed install left no bucket behind; A's full bucket is the shell.
     const names = (await precacheNames(page)).sort();
-    expect(names[names.length - 1]).toBe('cyc-precache-' + B.stamp);
+    expect(names, 'a failed install left its empty bucket').not.toContain(
+      'cyc-precache-' + B.stamp
+    );
     expect(names).toContain('cyc-precache-' + A.stamp);
 
     // Go offline, then navigate through the controller. The worker must serve a

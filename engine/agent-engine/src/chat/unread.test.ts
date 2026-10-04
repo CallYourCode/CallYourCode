@@ -410,7 +410,7 @@ test("marking it unread never notifies, not even when his screen goes off", asyn
   const page = core.client({ attach: wireId(PANE), visible: true });
   await holdOpen(page);
   await say("the reply he read on his phone");
-  await proves(page); // he is looking at it: suppressed, and marked read
+  await proves(page); // he is in the chat: suppressed (read comes from openAndLeave)
   openAndLeave(page);
   expect(row().unread).toBe(0);
   const before = sink().hits.length;
@@ -474,7 +474,10 @@ test("a reply landing after the mark is announced, with an app connected", async
   expect(saidSomething("[notify] present")).toBe(true);
   expect(session().silentSince).toBeDefined();
 
-  await core.clock.advance(ceilingMs() + ceilingTickMs());
+  /* Plus a window: the sweep's tick phase is wherever its interval was armed
+   * (the suppressed first reply arms it too, now that it is not marked read),
+   * and the announcement leaves on the next wall boundary after the sweep. */
+  await core.clock.advance(ceilingMs() + ceilingTickMs() + batchMs());
   await until(() => sink().hits.length > before, { what: "the ceiling to announce it" });
   expect(sink().hits.at(-1)!.unread).toBe(2);
 });
@@ -566,3 +569,56 @@ test("the unread route: filing a chat he has read moves the count and reaches th
     reader.close();
     other.close();
   });
+
+/* ------------------------------------------- spoken: a second fact (release-1) */
+
+/* A clip played to the end is SPOKEN, which is not READ: the rows above it may
+ * never have been on screen (owner, 2026-10-03), so the marker and the count
+ * stay. But no device may speak it again, after a reload or on another phone
+ * (release-1 re-gate B2), so how far speech has got is the engine's, persisted
+ * and broadcast beside the marker. */
+/** A device played this row's clip to the end: the frame the app sends. */
+function spoke(n: number): number {
+  const r = session().chat[n];
+  onHeard({ id: wireId(PANE), mid: r.mid, ts: r.ts, spoken: true });
+  return r.ts;
+}
+
+test("a heard-to-end frame moves how far speech has got, never the read marker", async () => {
+  await say("one");
+  await say("two");
+  await say("three");
+  expect(row().unread).toBe(3);
+  const heardBefore = session().heardTs;
+
+  const bTs = spoke(1);
+
+  expect(session().heardTs, "hearing a clip read the rows above it").toBe(heardBefore);
+  expect(row().unread).toBe(3);
+  expect(row().spokenTs, "every device learns how far speech has got").toBe(bTs);
+  spoke(0); // forward only: an older clip heard again moves nothing back
+  expect(row().spokenTs).toBe(bTs);
+});
+
+test("how far speech has got survives a restart", async () => {
+  await say("heard before the restart");
+  await say("and this one");
+  const bTs = spoke(1);
+  await until(async () => (await metaForSession(core.root, PANE_SID))?.read?.spokenTs === bTs,
+    { what: "spokenTs to reach disk" });
+
+  await core.reset(BASE);
+  await until(() => core.sessions.size === 1, { what: "the restarted pane" });
+  expect(row().spokenTs).toBe(bTs);
+  expect(row().unread).toBe(2); // still not read
+});
+
+test("mark unread puts speech back with the marker, so the filed reply speaks again", async () => {
+  await say("read and heard");
+  openAndLeave(core.client({ attach: wireId(PANE) }));
+  spoke(0);
+  expect(row().spokenTs).toBeGreaterThan(0);
+  expect(markUnread(session())).toBe(true);
+  expect(row().spokenTs).toBeLessThanOrEqual(session().heardTs);
+  expect(row().unread).toBe(1);
+});
