@@ -142,6 +142,14 @@ export class ChatStore {
     this.chains.set(path, next);
   }
 
+  /** Hold every later append to this chat file until `first` settles (a write
+   *  that must reach disk before them: an absorb's tombstone, carry.ts). */
+  after(agentId: string, chatId: string, first: Promise<unknown>): void {
+    const path = agentChatFile(agentId, chatId);
+    const prev = this.chains.get(path) ?? Promise.resolve();
+    this.chains.set(path, prev.then(() => first).then(() => {}, () => {}));
+  }
+
   /** Append one message line. The caller has already stamped ts + seq. */
   appendMsg(agentId: string, chatId: string, msg: StoredMsg): void {
     this.enqueue(agentChatFile(agentId, chatId), JSON.stringify({ t: "m", ...msg }));

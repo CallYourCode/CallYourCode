@@ -7,7 +7,8 @@
  *                  --resume of a past id pulls it back to current; the meta is
  *                  flushed NOW, not on a debounce
  *   absorb         a provisional folds into its real agent AT MOST ONCE; the
- *                  tombstone (mergedInto) lands before the merged chat; a
+ *                  tombstone (mergedInto) lands before the appended rows; the
+ *                  target's seqs and chat file never change; a
  *                  provisional that never reached disk leaves no directory
  *   mergeChats     a UNION keyed by the row, never by the session id every row
  *                  of one chat shares
@@ -214,11 +215,12 @@ test("absorb into an agent no pane hosts yet lands the rows in its restored chat
 });
 
 test("absorb folds the session records too, onto ONE seq axis with the messages, and writes both kinds", async () => {
-  const { agentId } = await seedAgent(root, U1, [row("x", "before", 1000, { seq: 0 })]);
+  const status = { seq: 1, ts: 1500, id: "se-t", kind: "status", text: "status: working", status: "working" } as const;
+  const { agentId } = await seedAgent(root, U1, [row("x", "before", 1000, { seq: 0 }), { t: "s", ...status }]);
   await S.loadSessionState(deps);
   S.sessionStateReady();
   const target = live(agentId, U1, [row(agentId, "before", 1000, { seq: 0 })]);
-  target.log = [{ seq: 1, ts: 1500, id: "se-t", kind: "status", text: "status: working", status: "working" }];
+  target.log = [{ ...status }];
 
   const pid = S.freshAgentId();
   const prov = live(pid, null, [row(pid, "parked", 2000, { msgId: "m-p", seq: 1 })]);
@@ -227,15 +229,64 @@ test("absorb folds the session records too, onto ONE seq axis with the messages,
   S.metaFor(pid);
   absorb(prov, agentId);
 
-  // one axis, in ts order, dense from 0
+  // one axis: the target's rows as they were, the provisional's past its newest, in ts order
   expect(target.chat.map((m) => [m.text, m.seq])).toEqual([["before", 0], ["parked", 3]]);
   expect(target.log.map((r) => [r.text, r.seq])).toEqual([["status: working", 1], ["Allow?", 2], ["Read a", 4]]);
-  // on disk: the merged file carries both kinds, interleaved by seq
+  // on disk: the target's file carries both kinds, interleaved by seq
   await until(async () => (await readChatLog(root, U1)).length === 2, { what: "the merged chat on disk" });
   const meta = S.metaFor(agentId);
   const loaded = await S.chatStore.loadLog(agentId, meta.chat!);
   expect(loaded.recs.map((r) => r.seq)).toEqual([1, 2, 4]);
   expect(loaded.msgs.map((m) => m.seq)).toEqual([0, 3]);
+});
+
+test("absorb keeps the target's seq axis: its rows never move, the provisional's go on the end of the SAME file", async () => {
+  /* The Hunter rewrite (2026-10-03): one status line folded in renumbered all
+   * of the target's rows from 0 into a new chat file, so every device held a
+   * dead axis under the same session id. A seeded `t:"s"` overrides the
+   * builder's `t:"m"`: the target's file holds a record between its messages. */
+  const { agentId, chatId } = await seedAgent(root, U1, [
+    row("x", "one", 1000, { seq: 0, msgId: "m-1" }),
+    { t: "s", seq: 1, ts: 1500, id: "se-t", kind: "status", text: "status: working", status: "working" },
+    row("x", "two", 3000, { seq: 2, msgId: "m-2" }),
+  ]);
+  await S.loadSessionState(deps);
+  S.sessionStateReady();
+  const target = live(agentId, U1, S.restoredChats.get(agentId)!);
+  target.log = S.restoredLogs.get(agentId)!;
+
+  const pid = S.freshAgentId();
+  // older than the target's newest row, newer than it, and one it already holds
+  const prov = live(pid, null, [row(pid, "older", 2000, { msgId: "m-old" }),
+    row(pid, "two", 3000, { msgId: "m-2" }), row(pid, "newer", 4000, { msgId: "m-new" })]);
+  prov.log = [{ seq: 0, ts: 3500, id: "se-p", kind: "ask", text: "Allow?" }];
+  S.metaFor(pid);
+  S.chatRefFor(pid);
+  await S.flushAgentSave(pid);
+  absorb(prov, agentId);
+
+  // the target's rows keep their seqs; the new ones follow its newest, in ts order
+  expect(target.chat.slice(0, 2).map((m) => [m.text, m.seq])).toEqual([["one", 0], ["two", 2]]);
+  expect(target.log[0].seq).toBe(1);
+  expect(target.chat.map((m) => [m.text, m.seq])).toEqual([["one", 0], ["two", 2], ["older", 3], ["newer", 5]]);
+  expect(target.log.map((r) => [r.text, r.seq])).toEqual([["status: working", 1], ["Allow?", 4]]);
+
+  // ONE file, the one every device already pages: no new chat id, no pointer swap
+  await until(async () => (await metaOnDisk(pid)).mergedInto === agentId, { what: "the tombstone" });
+  await S.chatStore.flush();
+  await S.flushAgentSave(agentId);
+  expect(S.metaFor(agentId).chat).toBe(chatId);
+  expect((await metaOnDisk(agentId)).chat).toBe(chatId);
+  expect((await metaOnDisk(agentId)).chats.map((c: { id: string }) => c.id)).toEqual([chatId]);
+  expect(await Array.fromAsync(new Bun.Glob("*.jsonl").scan(join(data, "agents", agentId, "chats")))).toEqual([`${chatId}.jsonl`]);
+
+  // a restart reads the same axis back, every row once
+  S.resetForTest();
+  await S.loadSessionState(deps);
+  const chat = S.restoredChats.get(agentId)!.map((m) => [m.text, m.seq]);
+  const log = S.restoredLogs.get(agentId)!.map((r) => [r.text, r.seq]);
+  expect(chat).toEqual([["one", 0], ["two", 2], ["older", 3], ["newer", 5]]);
+  expect(log).toEqual([["status: working", 1], ["Allow?", 4]]);
 });
 
 test("absorbing an agent into itself is a no-op", async () => {

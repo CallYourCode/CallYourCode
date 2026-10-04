@@ -12,7 +12,7 @@
  *   absorb(provisional, target)       a pane the engine had to give a
  *                                      provisional agent (no announce yet)
  *                                      turns out to be a known agent: its
- *                                      rows fold into the target, once
+ *                                      rows append to the target, once
  *
  * The old relocate/rekey/boot-carry/quiet-pin machinery, and the aliases it
  * needed, are gone with the re-keying that needed them (adapters lane 2).
@@ -25,10 +25,11 @@ import { ensureSeqs } from "../chat/chatlog.ts";
 import { bumpRowsGen } from "../chat/wirecache.ts";
 import { evictContextFor } from "./context-cache.ts";
 import { sessions, restoredChats, restoredLogs, agentMetas, chatStore, metaFor, indexSession,
-  sessionIndex, flushAgentSave, scheduleAgentSave, getManualOrder, setManualOrder,
-  bindingOf, purgeSessionState } from "./session-state.ts";
+  sessionIndex, flushAgentSave, getManualOrder, setManualOrder,
+  bindingOf, purgeSessionState, chatRefFor } from "./session-state.ts";
 import type { ChatMsg } from "../chat/chatmsg.ts";
 import { srcKey, type SessionRec } from "../chat/sessionrec.ts";
+import { rowsBySeq } from "../chat/chatstore.ts";
 import type { Session } from "./session-state.ts";
 
 /** What makes one row THE SAME row under two agents. A ChatMsg's `id` is the
@@ -51,27 +52,30 @@ export function mergeChats(a: ChatMsg[], b: ChatMsg[]): ChatMsg[] {
   return out;
 }
 
-/** The same union over BOTH kinds of row: messages by rowKey, session
- *  records by their source key (or their own id when engine-authored), all
- *  of it ordered by ts and re-sequenced along ONE seq axis so the merged
- *  log pages exactly as a log written in that order would. */
-export function mergeLogs(
+/** The rows of `b` that `a` does not already hold (messages by rowKey,
+ *  session records by their source key or their own id), stamped onto a's
+ *  seq axis PAST ITS NEWEST ROW, in ts order among themselves. a's own rows
+ *  never move: every device pages them by seq under the same chat, and the
+ *  re-sequence this replaced (one status line folded into Hunter, 2026-10-03,
+ *  renumbered every row from 0 into a new file) left them all on a dead axis.
+ *  A row of b older than a's newest still goes on the end: chat order is seq
+ *  order. */
+function appendRows(
   a: { chat: ChatMsg[]; log: SessionRec[] }, b: { chat: ChatMsg[]; log: SessionRec[] },
 ): { chat: ChatMsg[]; log: SessionRec[] } {
-  const msgs = new Map<string, ChatMsg>();
-  for (const m of a.chat) msgs.set(rowKey(m), m);
-  for (const m of b.chat) if (!msgs.has(rowKey(m))) msgs.set(rowKey(m), m);
-  const recs = new Map<string, SessionRec>();
   const recKey = (r: SessionRec) => srcKey(r) ?? `id:${r.id}`;
-  for (const r of a.log) recs.set(recKey(r), r);
-  for (const r of b.log) if (!recs.has(recKey(r))) recs.set(recKey(r), r);
-  const recSet = new Set<unknown>(recs.values());
-  const rows: (ChatMsg | SessionRec)[] = [...msgs.values(), ...recs.values()].sort((x, y) => x.ts - y.ts);
-  rows.forEach((r, i) => { r.seq = i; });
-  return {
-    chat: rows.filter((r) => !recSet.has(r)) as ChatMsg[],
-    log: rows.filter((r) => recSet.has(r)) as SessionRec[],
-  };
+  const msgs = new Set(a.chat.map(rowKey));
+  const recs = new Set(a.log.map(recKey));
+  let next = 0;
+  a.chat.forEach((m, i) => { next = Math.max(next, (m.seq ?? i) + 1); });
+  for (const r of a.log) next = Math.max(next, r.seq + 1);
+  const chat: ChatMsg[] = [];
+  const log: SessionRec[] = [];
+  for (const m of b.chat) if (!msgs.has(rowKey(m))) { msgs.add(rowKey(m)); chat.push({ ...m }); }
+  for (const r of b.log) if (!recs.has(recKey(r))) { recs.add(recKey(r)); log.push({ ...r }); }
+  for (const r of [...chat, ...log].sort((x, y) => x.ts - y.ts)) r.seq = next++;
+  const bySeq = (x: { seq?: number }, y: { seq?: number }) => x.seq! - y.seq!;
+  return { chat: chat.sort(bySeq), log: log.sort(bySeq) };
 }
 
 /** A harness session id becomes this agent's current one. Idempotent: the id
@@ -133,8 +137,9 @@ export function carryDirectHandleBind(handle: string, sessionId: string): string
 /** FOLD A PROVISIONAL AGENT INTO THE AGENT IT TURNED OUT TO BE. Runs when a
  *  pane the engine had to key by a fresh provisional id (no announce within
  *  the grace, or none yet at boot) announces an id the index already maps to
- *  `target`. The provisional's rows (anything said in the window) union into
- *  the target by message id; the provisional record is marked `mergedInto`
+ *  `target`. The provisional's rows (anything said in the window) the target
+ *  does not already hold are appended to the target's own chat file on its
+ *  seq axis (appendRows); the provisional record is marked `mergedInto`
  *  FIRST and saved atomically, so a crash between the two writes leaves a
  *  record that points at the survivor rather than a duplicate row. At most
  *  once: a provisional already merged is skipped. Only a provisional is ever
@@ -154,12 +159,12 @@ export function absorb(provisional: Session, targetId: string): void {
   const targetLog = target?.log ?? restoredLogs.get(targetId) ?? [];
   // a row's `id` is the session it is shown under: the survivor's from now on
   const rows = provisional.chat.length || provisional.log.length
-    ? mergeLogs({ chat: targetRows, log: targetLog },
+    ? appendRows({ chat: targetRows, log: targetLog },
         { chat: provisional.chat.map((m) => ({ ...m, id: targetId })), log: provisional.log })
     : null;
   // THE IN-MEMORY MOVE IS SYNCHRONOUS (reconcile builds the target's row in
   // the same tick); the disk writes follow in order: the tombstone first, the
-  // merged chat after, so a crash between them leaves a pointer, never a twin.
+  // appended rows after, so a crash between them leaves a pointer, never a twin.
   let disk: Promise<void> = Promise.resolve();
   if (pm) {
     pm.mergedInto = targetId;
@@ -172,21 +177,21 @@ export function absorb(provisional: Session, targetId: string): void {
   }
   // any past ids the provisional gathered point at the survivor now
   for (const [sid, aid] of sessionIndex) if (aid === provisional.id) sessionIndex.set(sid, targetId);
-  if (rows) {
-    if (target) { target.chat = rows.chat; target.log = rows.log; bumpRowsGen(target); }
-    else { restoredChats.set(targetId, rows.chat); restoredLogs.set(targetId, rows.log); }
-    void disk.then(async () => {
-      try {
-        const tm = metaFor(targetId);
-        const cid = await chatStore.writeNew(targetId,
-          rows.chat as unknown as Parameters<typeof chatStore.writeNew>[1], rows.log);
-        tm.chat = cid;
-        tm.chats = [...(tm.chats ?? []), { id: cid, createdAt: Date.now() }];
-        scheduleAgentSave(targetId);
-      } catch (e) {
-        console.error(`[carry] could not write the merged chat for ${targetId}:`, e);
-      }
-    });
+  if (rows && (rows.chat.length || rows.log.length)) {
+    if (target) { target.chat.push(...rows.chat); target.log.push(...rows.log); bumpRowsGen(target); }
+    else {
+      restoredChats.set(targetId, [...targetRows, ...rows.chat]);
+      restoredLogs.set(targetId, [...targetLog, ...rows.log]);
+    }
+    // queued now, so a line the target logs next lands after these and the
+    // file stays in seq order; held behind the tombstone (ChatStore.after)
+    const { aid, chatId } = chatRefFor(targetId);
+    chatStore.after(aid, chatId, disk);
+    const recSet = new Set<unknown>(rows.log);
+    for (const r of rowsBySeq(rows.chat, rows.log)) {
+      if (recSet.has(r)) chatStore.appendRec(aid, chatId, r as SessionRec);
+      else chatStore.appendMsg(aid, chatId, r as ChatMsg);
+    }
   }
   // the provisional row leaves the list; its place in the manual order goes too
   sessions.delete(provisional.id);
@@ -198,5 +203,5 @@ export function absorb(provisional: Session, targetId: string): void {
   const order = getManualOrder();
   if (order.includes(provisional.id)) setManualOrder(order.filter((x) => x !== provisional.id));
   console.log(`[carry] ${provisional.id} absorbed into ${targetId}` +
-    (rows ? ` (${rows.chat.length} messages, ${rows.log.length} records)` : ""));
+    (rows ? ` (appended ${rows.chat.length} messages, ${rows.log.length} records)` : ""));
 }
