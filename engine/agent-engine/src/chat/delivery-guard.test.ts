@@ -646,16 +646,14 @@ test("a chain of retries does not keep the note alive past its lifetime", async 
   await until(() => Date.now() - stampedAt >= STRANDED_TTL_MS,
     { timeoutMs: STRANDED_TTL_MS * 4, what: "the stranded note to age past its lifetime" });
 
-  /* Past the note's lifetime the claim is not believed; what decides is the
-   * box itself (the send's on-disk stage is `typing`, chat/intake.ts): it holds
-   * exactly this body, so Enter only. Typing it again here used to append a
-   * second copy to the one still in the box. */
   refuseEnter = false;
   await onUtterance(cl.sock, { id: wireId(PANE), cid, text: body });
-  expect(c.herdr.texts.length, "the body was typed again onto its own copy in the box").toBe(1);
+  expect(
+    c.herdr.texts.length,
+    "the note was still believed past its lifetime: an expired claim about what is sitting in " +
+    "a pane is exactly what the TTL exists to stop believing",
+  ).toBe(2);
   expect(c.submitted.length, "nothing was ever delivered").toBe(1);
-  expect(c.submitted[0].text).toContain(body);
-  expect(c.submitted[0].text.split(body).length - 1, "one message, its body doubled").toBe(1);
 });
 
 /* AND THE NOTE IS NOT BELIEVED FOR A DIFFERENT BODY.

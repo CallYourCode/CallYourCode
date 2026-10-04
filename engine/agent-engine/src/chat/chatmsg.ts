@@ -198,6 +198,10 @@ export type ChatMsg = {
    * quote, words and caption as one message. Cleared with transcriptPending.
    * Engine-internal: the app decodes a row field by field and never reads it. */
   wordsInto?: string;
+  /* A NOTE THIS ENGINE GAVE UP DELIVERING: its completion after a restart was
+   * refused (deliver.ts failUndeliveredNote). The sender was told send-failed;
+   * the cid does not count as taken, so the retry is delivered into this row. */
+  undelivered?: boolean;
   /* THE MESSAGE'S PLACE IN THE CONVERSATION, monotonic within a session. It is
    * what the page contract counts by: page N holds seq in [N*100, N*100+99]
    * (pages.ts). Assigned at append (logChat) as lastSeq+1, and backfilled from

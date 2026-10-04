@@ -104,7 +104,7 @@ import { initAttach } from "../chat/attach.ts";
 import { initSessionsFrame, broadcastSessions, sessionsFrame, sendHelloBurst,
   resetForTest as resetSessionsFrame } from "../sessions/sessions-frame.ts";
 import { initDeliver, injectUserMessage, inOrder, deliverToAgent,
-  resetForTest as resetDeliver, redriveTaken } from "../chat/deliver.ts";
+  resetForTest as resetDeliver, redriveTaken, failUndeliveredNote } from "../chat/deliver.ts";
 import { initTranscribe, redrivePendingNotes, resetPendingForTest } from "../voice/transcribe.ts";
 import { initShowHandler } from "../chat/show-handler.ts";
 import { initSessionVerbs, compactSession } from "../sessions/session-verbs.ts";
@@ -1016,6 +1016,7 @@ export async function wireCore(initial: WireCoreOpts = {}): Promise<WireCore> {
         inOrder: (id, f) => inOrder(id, f),
         deliver: (s, opts) => injectUserMessage(s as Session, opts),
         sessionOf: (id) => sessions.get(id),
+        failNote: (s, ts, cid, tell) => failUndeliveredNote(s as Session, ts, cid, tell),
         clock,
       });
 

@@ -770,8 +770,11 @@ function readPaneBox(screen: string): { box: PaneBox; text: string } {
    *     do you want one?
    *   ────────────────────────────    <- the box closes
    */
+  /* The box's own marker sits at column zero; a body row starting with ">" (a
+   * quoted line of a multi-line message) is drawn indented under it, so it is
+   * interior, not the marker. */
   const marked = (r: string | undefined) =>
-    r !== undefined && /^[\s ]*[❯>]/.test(nonDimText(r));
+    r !== undefined && /^[❯>]/.test(nonDimText(r));
   let bottom = last;
   while (bottom > 0 && isBoxRule(bare(rows[bottom - 1]))) bottom--;
   let open = -1;
@@ -820,7 +823,7 @@ function readPaneBox(screen: string): { box: PaneBox; text: string } {
 
   if (inner.length) {
     // strip the prompt marker (it is followed by a space or a non-breaking one)
-    const text = inner.map((r) => nonDimText(r).replace(/^[\s ]*[❯>][\s ]?/, "")).join("\n");
+    const text = inner.map((r, i) => i ? nonDimText(r) : nonDimText(r).replace(/^[❯>][\s ]?/, "")).join("\n");
     return { box: { kind: "input", hasContent: text.replace(/[\s ]/g, "").length > 0 }, text };
   }
 

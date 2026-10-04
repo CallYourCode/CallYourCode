@@ -96,6 +96,7 @@ export function resetForTest(): void {
   ackQueue.clear();
   redrivenTaken.clear();
   ownTakes.clear();
+  stagedHere.clear();
   draining = false;
   inPane = 0;
   deps = null;
@@ -311,6 +312,23 @@ export async function redriveTaken(s: CidSession & { id: string }): Promise<numb
   return n;
 }
 
+/* A PENDING NOTE GIVEN UP ON (transcribe.ts, a completion driven after a
+ * restart that the pane refused): its row stops being pending, the cid stops
+ * counting as taken, and the sender is told, so its retry is delivered into
+ * this same row. */
+export function failUndeliveredNote(s: Session, ts: number, cid: string, tell: string): void {
+  const row = s.chat.find((r) => r.role === "user" && r.ts === ts);
+  if (row) {
+    delete row.transcriptPending;
+    delete row.wordsInto;
+    row.undelivered = true;
+    persistPatch(s.id, ts, { undelivered: true }, ["transcriptPending", "wordsInto"]);
+    broadcast({ t: "chat", ...row });
+  }
+  recentCids(s).delete(cid);
+  D().broadcast(noteFailed(s.id, cid, failReason(tell)));
+}
+
 /* A take that will not be delivered: the sender is told (send-failed, and on
  * every app that connects to this process later), and the frame goes. */
 async function failTake(t: Taken, reason: string): Promise<void> {
@@ -347,7 +365,7 @@ export function recentCids(s: CidSession): Map<string, { msgId?: string }> {
   const map = new Map<string, { msgId?: string }>();
   for (let i = Math.max(0, s.chat.length - USER_CIDS_KEEP * 2); i < s.chat.length; i++) {
     const c = s.chat[i];
-    if (c.role === "user" && c.cid) map.set(c.cid, { msgId: c.msgId });
+    if (c.role === "user" && c.cid && !c.undelivered) map.set(c.cid, { msgId: c.msgId });
   }
   while (map.size > USER_CIDS_KEEP) map.delete(map.keys().next().value as string);
   s.recentCids = map;
@@ -850,15 +868,20 @@ export const OFFLINE: Injected = { ok: false, retriable: true,
  * cannot land on any other message. */
 export function commitDelivery(s: Session, inj: Injection, ts: number, willQueue: boolean): ChatMsg {
   const { cid, text } = inj;
-  if (inj.completesTs != null) {
-    const row = s.chat.find((r) => r.role === "user" && r.ts === inj.completesTs);
+  // the retry of a note given up on is delivered into that note's own row
+  const prior = inj.completesTs == null &&
+    s.chat.find((r) => r.role === "user" && r.cid === cid && r.undelivered);
+  if (inj.completesTs != null || prior) {
+    const row = prior || s.chat.find((r) => r.role === "user" && r.ts === inj.completesTs);
     if (row) {
       row.text = text;
       delete row.transcriptPending;
       delete row.wordsInto;
+      delete row.undelivered;
       if (willQueue) row.queued = true;
-      persistPatch(s.id, row.ts,
-        { text, ...(willQueue ? { queued: true } : {}) }, ["transcriptPending", "wordsInto"]);
+      persistPatch(s.id, row.ts, { text, ...(willQueue ? { queued: true } : {}) },
+        ["transcriptPending", "wordsInto", "undelivered"]);
+      rememberCid(s, cid, row.msgId);
       broadcast({ t: "chat", ...row });
       return row;
     }
@@ -915,9 +938,12 @@ export async function injectUserMessage(
  * any failure that is not a clean refusal, and removed once the row is on disk.
  * The guard acts on it only with positive evidence from the box (delivery-
  * machine noteCheck); anything it cannot read plainly fails visibly. */
+const stagedHere = new Set<string>();
 async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
   const { cid, text } = inj;
-  const stage = await stageFor(s.id, cid);
+  /* A stage this process wrote is its own attempt's: a retry here keeps main's
+   * in-memory rules. Only a stage a stopped process left is handed on. */
+  const stage = stagedHere.has(cid) ? null : await stageFor(s.id, cid);
   /* The agent gets a real path per attachment, in the order they were
    * composed, and the caption (if any) rides along after them. ONE message:
    * several attachments make the line longer, they never
@@ -936,75 +962,81 @@ async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
    * with it. */
   const delivered = `${inj.how}${inj.note ? ` (${inj.note})` : ""}: ` +
     D().transformOutgoing({ sessionId: s.id, text: body, channels: s.channels });
-  {
-    // On disk before the agent can possibly read the message: the Stop hook at
-    // the end of this turn asks the state file whether a reply went out.
-    const noted = D().noteDelivery(s.id, inj.how);
-    D().writeHookState();
-    /* PRE-ARM the consumption listener BEFORE the keystrokes go out. The
-     * current claude journals the message's `user` record ~0.45s after it is
-     * typed, which is usually WHILE deliverToPane's echo gate is still
-     * settling; arming after the await meant that signal fired into a void
-     * and the queued divider stood until the next reply (or the deadline)
-     * on every busy-pane send (measured live, 2026-09-06: record ts equal to
-     * the send ts to the millisecond, strip still up seconds later). The ts
-     * is a placeholder: consumption during the await deletes the entry, and
-     * that deletion is the memory the commit reads as consumedEarly. Keyed by
-     * the delivery id (cid), so the reply slider moving between a failed attempt
-     * and its retry cannot change what this message is keyed under; the reverse
-     * index off the delivered text is what the transcript echo matches on. */
-    armAwaiting(cid, s.id, 0, delivered);
-    try {
-      await deliverToPane(s.muxHandle, delivered, cid, inj.takenAt, {
-        progress: (st) => noteStage(s.id, cid, st).catch((e) =>
-          D().log("intake.stage-unsaved", { cid, err: String(e) })),
-        ...(stage ? { resumed: stage } : {}),
-      });
-    } catch (e) {
-      clearAwaiting(cid);
-      /* A clean refusal typed nothing (or was swallowed): no stage. Anything
-       * else may have left the body in the box: `typing`, so a retry looks. */
-      if (e instanceof PaneNotReady) await forgetStage(s.id, cid);
-      else await noteStage(s.id, cid, "typing").catch(() => {});
-      /* Three failures now, and the user needs them told apart. A pane sitting
-       * on a prompt (PaneNotReady, nothing typed) is "go and answer it". A body
-       * typed but not submitted (DeliveryStranded) is "send it again and it will
-       * be submitted". herdr refusing the keystrokes somewhere in the pair is
-       * "try again". See deliverToPane. */
-      const notReady = e instanceof PaneNotReady;
-      const stranded = e instanceof DeliveryStranded;
-      D().log("utterance.delivery-failed", { cid, session: s.id, msgId: inj.extra?.msgId,
-        err: String(e),
-        why: notReady || stranded ? (e as PaneNotReady | DeliveryStranded).why
-          : "herdr would not take the keystrokes; the message never reached the pane" });
-      // Never enforce a reply to a message that never arrived.
-      D().forgetDelivery(s.id, noted);
-      D().writeHookState();
-      /* RETRIABLE FOR THE TWO FAILURES WHERE A RETRY IS SAFE.
-       *
-       * PaneNotReady is thrown BEFORE any send_text (or after the echo gate
-       * proved the text was swallowed): nothing is in any box, so a retry types
-       * the body fresh. DeliveryStranded is thrown AFTER the body is typed and
-       * left sitting in the input box: the unsubmitted note is kept, so a retry
-       * presses enter only and submits it. Both are retriable, and both are the
-       * existing measured stranded-note behaviour.
-       *
-       * The remaining case is the important one: herdr refused SOMEWHERE in a
-       * send_text/enter pair, and there is no way from here to know whether the
-       * text landed without its enter. Sending it again risks two copies of the
-       * same instruction in the pane, so it is not retriable at all. */
-      if (stranded)
-        return { ok: false, retriable: true,
-          why: (e as DeliveryStranded).why, tell: (e as DeliveryStranded).tell };
-      return notReady
-        ? { ok: false, retriable: true,
-            why: (e as PaneNotReady).why, tell: (e as PaneNotReady).tell,
-            showingPrompt: (e as PaneNotReady).showingPrompt || undefined }
-        : { ok: false,
-            why: "the pane is alive but would not take the keystrokes; nothing was " +
-              "delivered and nothing was written to the chat log",
-            tell: "(message not delivered; the session did not take it. Try again.)" };
+  // On disk before the agent can possibly read the message: the Stop hook at
+  // the end of this turn asks the state file whether a reply went out.
+  const noted = D().noteDelivery(s.id, inj.how);
+  D().writeHookState();
+  /* PRE-ARM the consumption listener BEFORE the keystrokes go out. The
+   * current claude journals the message's `user` record ~0.45s after it is
+   * typed, which is usually WHILE deliverToPane's echo gate is still
+   * settling; arming after the await meant that signal fired into a void
+   * and the queued divider stood until the next reply (or the deadline)
+   * on every busy-pane send (measured live, 2026-09-06: record ts equal to
+   * the send ts to the millisecond, strip still up seconds later). The ts
+   * is a placeholder: consumption during the await deletes the entry, and
+   * that deletion is the memory the commit reads as consumedEarly. Keyed by
+   * the delivery id (cid), so the reply slider moving between a failed attempt
+   * and its retry cannot change what this message is keyed under; the reverse
+   * index off the delivered text is what the transcript echo matches on. */
+  armAwaiting(cid, s.id, 0, delivered);
+  try {
+    await deliverToPane(s.muxHandle, delivered, cid, inj.takenAt, {
+      progress: (st) => {
+        stagedHere.add(cid);
+        return noteStage(s.id, cid, st).catch((e) =>
+          D().log("intake.stage-unsaved", { cid, err: String(e) }));
+      },
+      ...(stage ? { resumed: stage } : {}),
+    });
+  } catch (e) {
+    clearAwaiting(cid);
+    /* A clean refusal typed nothing (or was swallowed): no stage. Anything
+     * else may have left the body in the box: `typing`, so a retry looks. */
+    if (e instanceof PaneNotReady) {
+      stagedHere.delete(cid);
+      await forgetStage(s.id, cid);
+    } else {
+      stagedHere.add(cid);
+      await noteStage(s.id, cid, "typing").catch(() => {});
     }
+    /* Three failures now, and the user needs them told apart. A pane sitting
+     * on a prompt (PaneNotReady, nothing typed) is "go and answer it". A body
+     * typed but not submitted (DeliveryStranded) is "send it again and it will
+     * be submitted". herdr refusing the keystrokes somewhere in the pair is
+     * "try again". See deliverToPane. */
+    const notReady = e instanceof PaneNotReady;
+    const stranded = e instanceof DeliveryStranded;
+    D().log("utterance.delivery-failed", { cid, session: s.id, msgId: inj.extra?.msgId,
+      err: String(e),
+      why: notReady || stranded ? (e as PaneNotReady | DeliveryStranded).why
+        : "herdr would not take the keystrokes; the message never reached the pane" });
+    // Never enforce a reply to a message that never arrived.
+    D().forgetDelivery(s.id, noted);
+    D().writeHookState();
+    /* RETRIABLE FOR THE TWO FAILURES WHERE A RETRY IS SAFE.
+     *
+     * PaneNotReady is thrown BEFORE any send_text (or after the echo gate
+     * proved the text was swallowed): nothing is in any box, so a retry types
+     * the body fresh. DeliveryStranded is thrown AFTER the body is typed and
+     * left sitting in the input box: the unsubmitted note is kept, so a retry
+     * presses enter only and submits it. Both are retriable, and both are the
+     * existing measured stranded-note behaviour.
+     *
+     * The remaining case is the important one: herdr refused SOMEWHERE in a
+     * send_text/enter pair, and there is no way from here to know whether the
+     * text landed without its enter. Sending it again risks two copies of the
+     * same instruction in the pane, so it is not retriable at all. */
+    if (stranded)
+      return { ok: false, retriable: true,
+        why: (e as DeliveryStranded).why, tell: (e as DeliveryStranded).tell };
+    return notReady
+      ? { ok: false, retriable: true,
+          why: (e as PaneNotReady).why, tell: (e as PaneNotReady).tell,
+          showingPrompt: (e as PaneNotReady).showingPrompt || undefined }
+      : { ok: false,
+          why: "the pane is alive but would not take the keystrokes; nothing was " +
+            "delivered and nothing was written to the chat log",
+          tell: "(message not delivered; the session did not take it. Try again.)" };
   }
   // Completing a note shown earlier keeps its ts, so the words fill that same
   // bubble; an ordinary message takes the next one (#458).
@@ -1042,6 +1074,7 @@ async function typeAndCommit(s: Session, inj: Injection): Promise<Injected> {
     completing: inj.completesTs != null || undefined });
   await D().flushChat?.(s.id);
   await forgetStage(s.id, cid);
+  stagedHere.delete(cid);
   return { ok: true, ts };
 }
 

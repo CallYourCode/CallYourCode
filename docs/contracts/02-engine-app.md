@@ -111,15 +111,20 @@ with its words pending is completed at that same pickup.
 
 Exactly once across a stop. Each delivery keeps how far its keystrokes got,
 per cid: `typing` before the body is typed, `entering` before the Enter; any
-failure that is not a clean refusal puts it back to `typing`. A later attempt
-(a restart's drive, or a retry of the same cid) acts on it only with positive
-evidence from the input box: the box holding exactly this body gets Enter
+failure that is not a clean refusal puts it back to `typing`. Inside the
+process that made the attempt the stage is not read: a retry of the same cid
+keeps the in-memory rule (the box still holding content, or on a pane this
+engine cannot parse our typed tail, gets Enter only). After a restart a drive
+acts on the stage only with positive evidence from the input box: the box
+holding exactly this body gets Enter
 only; a box positively empty means, after `entering`, that the Enter took it
 (nothing typed again, only the missing row written) and, after `typing`, that
 nothing landed (typed fresh). Anything else (a screen not readable as a box,
 someone else's text in it, a long paste the harness collapsed, a harness this
 engine cannot parse such as pi or codex) is not guessed at: nothing is pressed,
-the box is left alone, and the send fails visibly with a retry. On SIGTERM or
+the box is left alone, and the send fails visibly with a retry. A pending voice
+note whose completion is refused this way stops being pending and fails the
+same way; its retry is delivered into that same row. On SIGTERM or
 SIGINT the engine drains: no new frame is taken (not acked, so the app sends it
 to the next process), nothing new starts typing (it stays on disk), and the
 deliveries already typing finish, rows on disk, within 10 s; a second signal
@@ -127,8 +132,7 @@ exits at once. A delivery waits only on its own chat file's writes.
 
 What remains: a kill -9 (or the 10 s bound running out) between the `entering`
 mark and the Enter, with the box then emptied by hand before the restart, is
-taken as delivered; a pending voice note whose completion fails this way stays
-pending and is completed at the session's next pickup rather than failed.
+taken as delivered.
 
 Failures the sender is told: every refusal of a frame driven after a restart
 (no socket to answer on), a frame driven by three boots without finishing, and

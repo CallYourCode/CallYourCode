@@ -64,6 +64,7 @@ import { sessions, sessionByHandle, resolveSession, loadSessionState, sessionSta
   globalVoice, setDefaultVoice, voiceFor, docDirFor, type Session } from "../sessions/session-state.ts";
 import { initPaneDeliver, onPaneKeyboard, deliverToPane } from "../chat/pane-deliver.ts";
 import { initDeliver, inOrder, injectUserMessage, deliverToAgent, redriveTaken, drainDeliveries,
+  failUndeliveredNote,
   failOrphanedTaken } from "../chat/deliver.ts";
 import { initReply, deliverReply } from "../chat/reply.ts";
 import { initNotify, notifyUnlessWatched, notifyDevices, notifyEngineDevices, sendDismissal, flushUnread } from "../chat/notify.ts";
@@ -1079,6 +1080,7 @@ initTranscribe({
   inOrder: (id, f) => inOrder(id, f),
   deliver: (s, opts) => injectUserMessage(s as Session, opts),
   sessionOf: (id) => sessions.get(id),
+  failNote: (s, ts, cid, tell) => failUndeliveredNote(s as Session, ts, cid, tell),
 });
 
 // Delivery: deliver.ts.

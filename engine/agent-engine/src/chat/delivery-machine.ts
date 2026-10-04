@@ -167,8 +167,9 @@ export async function runDeliveryMachine(
   const believable = !!note && note.deliveryId === deliveryId && Date.now() - note.at < strandedTtlMs();
   let stillThere = believable && (
     canParse ? box.kind === "input" && box.hasContent : tailVisible(pre, text));
-  if (io.resumed) {
-    /* A STOPPED PROCESS GOT THIS FAR, so only positive evidence acts: the box
+  if (io.resumed && !believable) {
+    /* A STOPPED PROCESS GOT THIS FAR (a believable note means this process
+     * made the attempt, and main's rule above stands), so only positive evidence acts: the box
      * holding exactly this body gets Enter only; a box positively empty after
      * `entering` means the Enter took it (nothing typed again), after `typing`
      * that nothing landed (typed fresh). Anything else -- a screen this engine

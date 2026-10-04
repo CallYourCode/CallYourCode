@@ -13,6 +13,9 @@
  *   D1 after_enter  Enter pressed, no row (after_keys, after_logchat): the row
  *                   is written, nothing typed again (claude and pi shapes)
  *   D1 completion   a pending note's completion stopped after its Enter
+ *   R1              a retry in the same process keeps main's Enter-only rule
+ *   R2              a pending note's completion refused after a restart fails
+ *                   visibly and is never driven again on its own
  *   D1 SIGTERM      the drain finishes what is typing and holds the rest
  *   E1-E5           verifier round 3: a stale stage, a refusal with no socket,
  *                   another chat's stuck write, an unreadable box, a draft
@@ -181,6 +184,48 @@ test("D1 completion: a pending note whose completion stopped after its Enter is 
   expect(rowsFor(cid)[0].text).toBe(voice!.transcript);
 });
 
+test("R2: a pending note whose completion is refused after a restart fails visibly and is never driven again", async () => {
+  const c = await boot();
+  const cid = crypto.randomUUID();
+  const msgId = crypto.randomUUID();
+  await cacheAudio(msgId, new Uint8Array(4096).fill(0x42), "audio/webm");
+  gate = never;
+  const client = c.client({ attach: wireId(PANE) });
+  void onUtterance(client.sock, { t: "utterance", id: wireId(PANE), text: "", kind: "voice",
+    msgId, durationS: 900, cid });
+  await until(() => has(c, cid, "rescue.start"), { what: "the decode to start" });
+  await c.clock.advance(RESCUE_INLINE_MS);
+  await until(() => has(c, cid, "utterance.shown-pending"), { what: "the note shown pending" });
+  // stopped mid-completion; the box now holds text this engine did not type
+  await noteStage(sid(), cid, "entering");
+  c.hooks.setInput!(PANE, "my own half typed draft");
+  gate = Promise.resolve();
+
+  await restart(c);
+  await until(() => has(c, cid, "rescue.complete-failed"), { what: "the refused completion" });
+  const app = c.client({ attach: wireId(PANE) });
+  c.hello(app);
+  expect(app.of("send-failed").some((f) => f.cid === cid), "the sender was never told").toBe(true);
+  expect(rowsFor(cid)[0].transcriptPending, "the note is still owed").toBeUndefined();
+
+  const drives = () => c.logs.filter((l) => l.event === "rescue.redrive" && l.fields.cid === cid).length;
+  expect(drives()).toBe(1);
+  c.hooks.setInput!(PANE, "");
+  await restart(c);
+  await new Promise((r) => setTimeout(r, 300));
+  expect(drives(), "a later boot drove the note again").toBe(1);
+  expect(c.submitted.length, "the note reached the agent with no user action").toBe(0);
+
+  // the retry the send-failed asks for is delivered once, into the same row
+  const again = c.client({ attach: wireId(PANE) });
+  void onUtterance(again.sock, { t: "utterance", id: wireId(PANE), text: "", kind: "voice",
+    msgId, durationS: 900, cid });
+  await until(() => c.submitted.length === 1 && rowsFor(cid)[0].transcriptPending === undefined &&
+    !rowsFor(cid)[0].undelivered, { what: "the retry to deliver", timeoutMs: 4000 });
+  expect(c.submitted.map((x) => x.text)).toEqual([`VOICE: ${voice!.transcript}`]);
+  expect(rowsFor(cid).length).toBe(1);
+});
+
 test("D1 SIGTERM: the drain finishes the delivery that is typing, holds the queued one, takes no new frame", async () => {
   const c = await boot();
   const client = c.client({ attach: wireId(PANE) });
@@ -328,6 +373,24 @@ test("E1 (V-stale-stage): an Enter that failed leaves `typing`, so a same-cid re
   await until(() => rowsFor(cid).length === 1, { what: "the retry's row" });
   expect(c.submitted.map((x) => x.text), "the retried message never reached the agent")
     .toEqual(["TEXT: enter failed"]);
+});
+
+test("R1: a retry in the same process keeps main's Enter-only rule, even with the body changed", async () => {
+  const c = await boot();
+  const app = c.client({ attach: wireId(PANE) });
+  const cid = crypto.randomUUID();
+  failEnter = true; // herdr refuses the Enter: the body stays in the box, a stage is written
+  await onUtterance(app.sock, textFrame(cid, "first words"));
+  await until(() => has(c, cid, "utterance.delivery-failed"), { what: "the failure" });
+  failEnter = false;
+  // the retry tap after the reply slider moved: same cid, another delivered string
+  await onUtterance(app.sock, textFrame(cid, "first words (reply as text)"));
+  await until(() => rowsFor(cid).length === 1, { what: "the retry's row" });
+  expect(c.submitted.map((x) => x.text), "the stranded body was not submitted once")
+    .toEqual(["TEXT: first words"]);
+  expect(c.herdr.rpcs.filter((r) => r.method === "pane.send_text").length, "typed twice").toBe(1);
+  expect(c.logs.some((l) => l.fields.cid === cid && String(l.fields.why ?? "").includes("engine stopped")),
+    "a restart was claimed in a process that never stopped").toBe(false);
 });
 
 test("E2 (V-refused-redrive): a redrive refused before any app connects is told to the app that connects later", async () => {
