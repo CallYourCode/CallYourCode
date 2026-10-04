@@ -23,7 +23,7 @@
 // re-activates (drops old caches + clients.claim). In app/public it stays the
 // literal placeholder. cyc-precache.json's version drives the cache name, and
 // install checks that it is this build's (cycPrecacheInstall).
-const CYC_BUILD = '1791073774';
+const CYC_BUILD = '1791077881';
 
 const CYC_CACHE_PREFIX = 'cyc-precache-';
 const CYC_MANIFEST_URL = '/cyc-precache.json';
@@ -53,6 +53,21 @@ async function cycReadManifest() {
 // the network process down (Playwright WebKit, 2026-10-03: 16 crashes in 190
 // failing update installs that way, 0 in 90 with every fetch settled first).
 // A network process crash costs the page its worker connection and its sockets.
+// The fetched shell must be THIS build's too: a deploy landing between the
+// manifest fetch and the shell fetch hands back the next build's index.html,
+// which names chunks this bucket does not hold, and the next offline launch is
+// blank (verifier, 2026-10-04). Its cyc-build stamp must be the manifest's and
+// every asset it names must be in the manifest; otherwise the install fails and
+// the next update check retries (fetching the newer worker anyway).
+function cycShellMismatch(html, version, assets) {
+  const stamp = /<meta name="cyc-build" content="([^"]*)"/.exec(html);
+  if (!stamp || stamp[1] !== version) return 'stamp ' + (stamp ? stamp[1] : 'none');
+  const own = new Set(assets.map((a) => new URL(a, self.location.origin).pathname.slice(1)));
+  for (const m of html.matchAll(/(?:src|href)="\.?\/?((?:assets\/[^"]+)|boot-watchdog\.js)"/g))
+    if (!own.has(m[1])) return 'names ' + m[1];
+  return '';
+}
+
 async function cycPrecacheInstall() {
   const {version, assets} = await cycReadManifest();
   if (/^\d+$/.test(CYC_BUILD) && version !== CYC_BUILD)
@@ -72,6 +87,12 @@ async function cycPrecacheInstall() {
     const p = new URL(req.url, self.location.origin).pathname;
     return p === '/' || p === '/index.html';
   };
+  if (/^\d+$/.test(CYC_BUILD))
+    for (const {req, res} of got) {
+      if (!isShell(req)) continue;
+      const why = cycShellMismatch(await res.clone().text(), version, assets);
+      if (why) throw new Error('cyc-precache: the fetched shell is another build (' + why + ')');
+    }
   const name = CYC_CACHE_PREFIX + version;
   const cache = await caches.open(name);
   try {
@@ -107,16 +128,16 @@ async function cycPrecacheActivate() {
 //    build's activation restarts it and parks the new build in "waiting", and a
 //    navigation into a parked activation hangs blank (2026-10-03,
 //    sw-activation-race.spec.ts). So: the app's own API, log and stamp traffic
-//    (sent all the time), and the escape hatch '/?cyc-net=1', the URL a user
-//    action (sign-out, engine switch, clear data) navigates to when a new worker
-//    stays parked (shared/selfReload.ts): it boots from the network, never
-//    touching the stuck old worker.
+//    (sent all the time), and the escape hatch: any URL carrying cyc-net=1,
+//    where a self-navigation goes when a new worker is still waiting a few
+//    seconds after being asked to take over (shared/selfReload.ts): it loads
+//    from the network, never touching the stuck old worker.
 // Anything NOT named here still reaches the fetch handler (so a path the handler
 // learns to serve later works without touching this table), as does every
 // cross-origin request (a urlPattern dict cannot name "another origin"); the
 // handler sends what it does not serve to the network untouched.
 const CYC_ROUTE_TABLE = [
-  ['/', 'network', 'cyc-net='],
+  ['/*', 'network', 'cyc-net='],
   ['/', 'shell'],
   ['/index.html', 'shell'],
   ['/assets/*', 'asset'],
@@ -127,10 +148,7 @@ const CYC_ROUTE_TABLE = [
   ['/config', 'network'],
   ['/settings', 'network'],
   ['/report', 'network'],
-  ['/health', 'network'],
-  ['/push/*', 'network'],
-  ['/engines', 'network'],
-  ['/engines/*', 'network']
+  ['/push/*', 'network']
 ];
 
 function cycTableRoute(pathname, search) {
@@ -833,6 +851,7 @@ self.CYC_BUILD = CYC_BUILD;
 self.cycRouteRequest = cycRouteRequest;
 self.cycReadManifest = cycReadManifest;
 self.cycPrecacheInstall = cycPrecacheInstall;
+self.cycShellMismatch = cycShellMismatch;
 self.cycPrecacheActivate = cycPrecacheActivate;
 self.cycServeShell = cycServeShell;
 self.cycServeAsset = cycServeAsset;
