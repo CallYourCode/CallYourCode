@@ -255,6 +255,13 @@ class Pipeline {
     this.syncRecordingState();
   }
 
+  // A take's claim on the speaker ends with its recording, so a clip loading or
+  // playing at its verdict was started after that: the verdict leaves it alone.
+  private get speakerStartedSince(): boolean {
+    const st = speaker.state.state;
+    return st === 'loading' || st === 'speaking';
+  }
+
   private workletReady = false;
   private srcNode: MediaStreamAudioSourceNode | null = null;
   private unbindTracks: (() => void) | null = null;
@@ -938,6 +945,12 @@ class Pipeline {
     const {watchdog, blobWithin} = this.armVerdictWatchdog(cap, released);
     await this.awaitStreamTail(cap);
     this.publishClipWhenReady(cap, released);
+    // The take is recorded, its tail included (when the mic is let go): its
+    // claim on the speaker ends here, not at the verdict, so a tap made while
+    // the transcript is pending plays at once.
+    void released.blobPromise
+      .catch((): null => null)
+      .then(() => speaker.setBusy(false, `capture:${cap.id}`));
     const heard = await this.runDecoders(cap, released, blobWithin);
 
     cap.streamOpen = false;
@@ -1203,7 +1216,7 @@ class Pipeline {
     blobWithin: () => Promise<Blob | null>
   ): Promise<void> {
     const {id, durationS} = released;
-    const resume = cap.wasPlaying;
+    const resume = cap.wasPlaying && !this.speakerStartedSince;
     if (normText(heard.text)) {
       this.emit('ignored', heard.text, undefined, undefined, id, durationS);
     } else {
@@ -1230,7 +1243,7 @@ class Pipeline {
     const {id, forCapture, durationS} = released;
     const text = heard.text;
 
-    speaker.stopAll();
+    if (!this.speakerStartedSince) speaker.stopAll();
 
     const blob = heard.blob ?? (await blobWithin());
 
