@@ -526,6 +526,69 @@ describe('lone voice note send (Bug 1)', () => {
     await p;
   });
 
+  // The owner's 2026-10-06 note: a voice note sent ~10 s after its words had
+  // settled on the device went as a text message with the clip as a plain
+  // file (send.words-gate path=already-heard). A settled card has left
+  // cap.heldClips; it is still a voice note, its words the body.
+  test.each([
+    ['an engine with words', true],
+    ['an engine without words', false]
+  ])(
+    'a lone note whose words already settled ships as a voice note with them as the body (%s)',
+    async (_name, canWords) => {
+      vi.mocked(engine.engineCan).mockReturnValue(canWords);
+      const {api, staged, compose} = setup({partial: 'the words it settled on'});
+      api.cap.heldClips.delete(1);
+      const p = onAttach(staged, compose);
+      // At once: nothing is left to wait for.
+      expect(engine.sendVoiceClip).toHaveBeenCalledTimes(1);
+      expect(engine.sendAttachments).not.toHaveBeenCalled();
+      const [, blob, opts] = vi.mocked(engine.sendVoiceClip).mock.calls[0] as [
+        string,
+        File,
+        {text: string; durationS?: number; display?: unknown}
+      ];
+      expect(blob).toBe(staged[0].file);
+      expect(opts.text).toBe('the words it settled on');
+      expect(opts.durationS).toBe(3);
+      expect(opts.display).toBeUndefined();
+      expect(api.cap.sentByCapture.size).toBe(0);
+      await p;
+    }
+  );
+
+  test('a settled quoted note with a caption ships its words and the caption in the body', async () => {
+    vi.mocked(engine.engineCan).mockReturnValue(true);
+    const {api, staged, compose} = setup({partial: 'the words', caption: 'and a caption'});
+    api.cap.heldClips.delete(1);
+    const p = onAttach(staged, compose, REPLY);
+    expect(engine.sendAttachments).not.toHaveBeenCalled();
+    const opts = vi.mocked(engine.sendVoiceClip).mock.calls[0][2] as {
+      text: string;
+      replyTo?: unknown;
+      around?: unknown;
+    };
+    expect(opts.text).toBe('the words\n\nand a caption');
+    expect(opts.replyTo).toEqual(REPLY);
+    expect(opts.around).toBeUndefined();
+    await p;
+  });
+
+  test('a settled note that heard nothing ships empty-bodied for the engine to fill', async () => {
+    vi.mocked(engine.engineCan).mockReturnValue(true);
+    const {api, staged, compose} = setup({caption: 'and a caption'});
+    api.cap.heldClips.delete(1);
+    const p = onAttach(staged, compose);
+    expect(engine.sendAttachments).not.toHaveBeenCalled();
+    const opts = vi.mocked(engine.sendVoiceClip).mock.calls[0][2] as {
+      text: string;
+      around?: {before: string; after: string};
+    };
+    expect(opts.text).toBe('');
+    expect(opts.around).toEqual({before: '', after: 'and a caption'});
+    await p;
+  });
+
   test('G3: the lone note keeps its clip-upload retry semantics (sendVoiceClip, not sendAttachments)', async () => {
     vi.mocked(engine.engineCan).mockReturnValue(true);
     const {staged, compose} = setup();
