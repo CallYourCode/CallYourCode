@@ -340,12 +340,14 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
     // reliable clip-upload path so it lands as a message row that goes pending ->
     // accepted, or failed-with-retry, keeping its recorded bytes for a resend --
     // rather than a silent /upload that, on a weak link, could stall away with the
-    // recording surfaced only back in the composer box.
+    // recording surfaced only back in the composer box. A recording whose words
+    // already settled has left cap.heldClips (loneCap undefined); it is still a
+    // voice note (a recording's staged file alone carries durationS).
     let loneCap: number | undefined;
     for (const [capId, handle] of cap.heldClips) {
       if (handle.file() === staged[0].file) loneCap = capId;
     }
-    if (staged.length === 1 && loneCap !== undefined) {
+    if (staged.length === 1 && (loneCap !== undefined || staged[0].durationS)) {
       const st = staged[0];
       deps.scrollToBottom();
       // Bug 1 (send frozen on transcription): the lone note used to `await
@@ -391,8 +393,8 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           around?: {before: string; after: string};
         }
       ): Promise<SendSettled> => {
-        const capId = loneCap!;
-        cap.heldClips.delete(capId);
+        const capId = loneCap;
+        if (capId !== undefined) cap.heldClips.delete(capId);
         const heard = cap.heardOn(capId);
         const id = engine.sendVoiceClip(s.id, st.file, {
           durationS: st.durationS,
@@ -401,7 +403,10 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           // An empty-body ship paints the device's own transcript-so-far on
           // the sent bubble, and (draftCommitted set, even at zero chars)
           // keeps the row OPEN so the capture's later partials grow it live.
-          ...(extra?.streaming ? {display: {text: heard.text, committed: heard.committed}} : {}),
+          // A settled capture has nothing left to stream.
+          ...(extra?.streaming && capId !== undefined
+            ? {display: {text: heard.text, committed: heard.committed}}
+            : {}),
           ...(extra?.around ? {around: extra.around} : {}),
           ...(replyTo ? {replyTo} : {}),
           ...(alongside ? {alongside} : {})
@@ -412,10 +417,12 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
         // utterance updates it once, and neither may reach the hands-free
         // fallback in settleUtterance, which would upload the clip again and
         // send a twin message.
-        cap.sentByCapture.set(capId, {sessionId: s.id, localId: id});
-        if (cap.sentByCapture.size > 8) {
-          for (const k of [...cap.sentByCapture.keys()].slice(0, cap.sentByCapture.size - 8)) {
-            cap.sentByCapture.delete(k);
+        if (capId !== undefined) {
+          cap.sentByCapture.set(capId, {sessionId: s.id, localId: id});
+          if (cap.sentByCapture.size > 8) {
+            for (const k of [...cap.sentByCapture.keys()].slice(0, cap.sentByCapture.size - 8)) {
+              cap.sentByCapture.delete(k);
+            }
           }
         }
         // Capture delivery before any durable operation can remove its row.
@@ -425,12 +432,25 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
           delivered: settling
         });
       };
+      // Settled words are the transcript: they ship as the body (with any
+      // caption, as a held note's settled words do below), at once. A settled
+      // card that heard nothing takes the routes below, minus the wait.
+      const settled = loneCap === undefined;
+      if (
+        settled &&
+        compose((sg) => (sg === st ? '' : undefined)).text.trim() !== compose().text.trim()
+      ) {
+        return shipVoice(compose().text.trim());
+      }
       if (canWords && (!needsBody || canAround)) {
         // Instant, no wait (the owner's common record-then-Enter case), and
         // the words this device already settled go WITH the send: the point
         // of streaming transcription is that the engine never re-reads audio
         // the device already turned into text.
-        const p = settledPartialOf(cap.partialByCapture.get(loneCap), st.durationS);
+        const p =
+          loneCap === undefined
+            ? null
+            : settledPartialOf(cap.partialByCapture.get(loneCap), st.durationS);
         if (p?.whole) {
           // The streaming decoder finalized the whole clip: the settled text
           // IS the transcript. It ships as the body (with any caption, as
@@ -451,7 +471,7 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       // device is the only transcript source, so wait for it to settle, then
       // bake the full transcript in.
       return (async () => {
-        await settleHeldWords();
+        if (!settled) await settleHeldWords();
         return shipVoice(compose().text.trim());
       })();
     }
