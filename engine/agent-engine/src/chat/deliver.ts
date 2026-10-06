@@ -505,7 +505,7 @@ export async function handleUtterance(ws: Sock, m: any, takenAt: number) {
       text = aroundWords(text, around);
     } else {
       showPendingVoiceNote(s, { cid, how: m.kind === "voice" ? "VOICE" : "TEXT",
-        extra: voice, msgId: voice.msgId, takenAt, around }, rescue);
+        extra: voice, msgId: voice.msgId, around }, rescue);
       return;
     }
   }
