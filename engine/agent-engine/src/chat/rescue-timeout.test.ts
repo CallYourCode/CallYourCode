@@ -192,6 +192,42 @@ test("a long note is shown at once, then completes THAT message in ONE delivery"
   expect(has(cid, "rescue.completed")).toBe(true);
 });
 
+test("a decode longer than the delivery deadline still delivers, and fills the row", async () => {
+  /* A 334 s note decoded in 52.6 s against a 53 s deadline was refused at the
+   * queue front and its row stayed "" for ever: the deadline ran from when the
+   * note ARRIVED, so the decode wait spent it. The delivery deadline is real
+   * wall time (delivery-machine.ts), so the decode is held for real, past a
+   * small DELIVER_DEADLINE_MS. */
+  const prior = process.env.DELIVER_DEADLINE_MS;
+  process.env.DELIVER_DEADLINE_MS = "1000";
+  try {
+    const cid = cidOf("slow-decode");
+    const msgId = await storedNote();
+    holdVoice();
+    void onUtterance(client.sock, wordless(msgId, cid));
+    await until(() => has(cid, "rescue.start"), { what: "the rescue decode to start" });
+    await core.clock.advance(RESCUE_INLINE_MS);
+    await until(() => has(cid, "utterance.shown-pending"), { what: "the note to be shown" });
+
+    await Bun.sleep(1200);
+    openVoice();
+    await until(() => has(cid, "rescue.completed") || has(cid, "rescue.complete-undelivered"),
+      { what: "the completion to settle" });
+
+    expect(has(cid, "rescue.complete-undelivered"),
+      "the decode wait was charged to the delivery deadline, so the note was refused").toBe(false);
+    expect(core.submitted.length, "the completed note never reached the agent").toBe(1);
+    const row = rowsFor(cid);
+    expect(row.length).toBe(1);
+    expect(row[0].text, "the pending row was never filled with the words")
+      .toBe("the long note transcript arrives after a while");
+    expect(row[0].transcriptPending).toBeUndefined();
+  } finally {
+    if (prior === undefined) delete process.env.DELIVER_DEADLINE_MS;
+    else process.env.DELIVER_DEADLINE_MS = prior;
+  }
+});
+
 test("a hanging voice engine is bounded, and the note arrives with the placeholder", async () => {
   /* A LIVE, REACHABLE ENGINE THAT HAS WEDGED: the request is accepted, the body
    * is read, and no answer ever comes. Nothing fails fast; only the bound ends

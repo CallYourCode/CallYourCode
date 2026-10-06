@@ -97,7 +97,7 @@ export function aroundWords(words: string, around?: Around): string {
 }
 
 /** What a pending note needs, to be shown now and completed later. */
-export type PendingNote = { cid: string; how: string; extra: Partial<ChatMsg>; msgId: string; takenAt: number;
+export type PendingNote = { cid: string; how: string; extra: Partial<ChatMsg>; msgId: string;
   around?: Around };
 
 export type TranscribeDeps = {
@@ -399,6 +399,10 @@ export async function completePendingVoiceNote(s: NoteSession, ts: number, d: Pe
   const dd = D();
   let words = "";
   try { words = await rescue; } catch { words = ""; }
+  /* The delivery deadline runs from when the words are READY, not from when
+   * the note arrived: the decode wait is not the pane's, and a decode longer
+   * than the deadline otherwise refuses the note before it is ever typed. */
+  const takenAt = Date.now();
   const text = aroundWords(words || "(voice note: transcription failed)", d.around);
   if (!words) {
     dd.log("rescue.failed-late", { cid: d.cid, session: s.id, msgId: d.msgId, ts,
@@ -406,7 +410,7 @@ export async function completePendingVoiceNote(s: NoteSession, ts: number, d: Pe
   }
   await dd.inOrder(s.id, async () => {
     const res = await dd.deliver(s, { cid: d.cid, how: d.how, text,
-      extra: d.extra, completesTs: ts, takenAt: d.takenAt });
+      extra: d.extra, completesTs: ts, takenAt });
     if (res.ok) {
       dd.log("rescue.completed", { cid: d.cid, session: s.id, msgId: d.msgId, ts, chars: text.length });
     } else {
@@ -434,7 +438,7 @@ export async function sweepPendingTranscripts(): Promise<void> {
         why: "a long note was shown with its transcript pending and the engine restarted before the decode landed" });
       const extra: Partial<ChatMsg> = { kind: "voice", msgId: m.msgId,
         ...(Number.isFinite(m.durationS) ? { durationS: m.durationS } : {}) };
-      void completePendingVoiceNote(s, m.ts, { cid, how: "VOICE", extra, msgId: m.msgId, takenAt: m.ts },
+      void completePendingVoiceNote(s, m.ts, { cid, how: "VOICE", extra, msgId: m.msgId },
         transcribeStored(m.msgId, cid));
       redriven++;
     }
