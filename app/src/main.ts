@@ -288,7 +288,9 @@ function buildApp() {
       'tab:!flex',
       'desk:transition-transform desk:duration-0',
       'group-[.view-list]/cols:tab:max-desk:translate-x-[calc(var(--cyc-rail-width)+var(--cyc-pane-gap))]',
-      'group-[.view-list]/cols:pointer-events-none group-[.view-chat]/cols:pointer-events-auto',
+      // Inert only where the phone list covers the chat. Beside the tablet
+      // drawer the chat stays in view and its scrim takes the press.
+      'group-[.view-list]/cols:max-tab:pointer-events-none',
       'group-[.view-chat]/cols:max-tab:translate-x-0 group-[.view-chat]/cols:max-tab:opacity-100',
       'group-[.view-profile]/cols:max-tab:-translate-x-full group-[.view-profile]/cols:max-tab:opacity-0'
     ].join(' ')
@@ -515,9 +517,16 @@ function buildApp() {
   emptyPill.textContent = 'Select a session to start talking';
   empty.append(emptyPill);
 
+  // Over the chat while the tablet drawer is open: a press on the chat lands
+  // here, so the chatEl click below closes the drawer and no control fires.
+  const drawerScrim = h(
+    'div',
+    'cyc-drawer-scrim hidden absolute inset-0 z-20 group-[.view-list]/cols:tab:max-desk:block'
+  );
+
   agentsBar.slot.append(jumpBar.el);
 
-  chatEl.append(header.el, agentsBar.el, messageListEl, composer.el, empty);
+  chatEl.append(header.el, agentsBar.el, messageListEl, composer.el, empty, drawerScrim);
 
   onTeardown(trackComposerHeight(composer.el));
   onTeardown(trackKeyboardInset(composer.el));
