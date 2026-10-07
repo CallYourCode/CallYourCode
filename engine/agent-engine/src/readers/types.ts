@@ -203,6 +203,15 @@ export interface HarnessReader {
    *  "ctrl+c". pi interrupts on Escape; ctrl+c there only clears the input. */
   readonly interruptKeys?: string[];
 
+  /** A harness whose interrupt puts its QUEUED messages back into the input box
+   *  unsent (pi: Escape runs restoreQueuedMessagesToEditor) declares how to read
+   *  that box off a plain screen once the harness is idle again. Returns null
+   *  while the harness is still busy or no box is found; `clipped` is true when
+   *  the box has scrolled and lines above the visible ones are hidden. The
+   *  adapter's interrupt uses it to resubmit text the engine itself delivered
+   *  (MuxAdapter.resubmitRestored). Absent means the interrupt is keys only. */
+  restoredInput?(text: string): { text: string; clipped: boolean } | null;
+
   /** How this harness prefers to take input. Absent means "keystroke" (the
    *  adapter's default). "direct" is honoured only when a live endpoint is
    *  registered for the pane; otherwise the adapter uses keystrokes. */

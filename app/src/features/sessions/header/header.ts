@@ -187,18 +187,16 @@ export function createHeader(opts: {
   speedBtn.addEventListener('click', () => opts.onCycleSpeed?.());
 
   const stopBtn = makeIconButton('hand', 'cyc-stop-btn cyc-force-show');
-  stopBtn.title = 'interrupt (ctrl+c)';
+  stopBtn.title = 'stop';
 
   stopBtn.addEventListener('click', () => {
     confirmPopup({
-      title: 'Send Ctrl-C?',
-      description:
-        `Interrupt ${current.name}. Whatever it is doing stops where it is, ` +
-        'and that cannot be undone.',
+      title: `Stop ${current.name}?`,
+      description: 'Whatever it is doing stops where it is, and that cannot be undone.',
       className: 'cyc-confirm-stop',
       buttons: [
         {text: 'Cancel'},
-        {text: 'Send Ctrl-C', danger: true, callback: () => opts.onInterrupt?.()}
+        {text: 'Stop', danger: true, callback: () => opts.onInterrupt?.()}
       ]
     });
   });
