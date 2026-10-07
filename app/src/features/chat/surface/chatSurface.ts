@@ -40,6 +40,7 @@ import {
   logScrollUpUser
 } from './machineScroll';
 import {onHorizontalSwipe} from '@/features/gestures';
+import {installMediaTapTrace} from './mediaTapTrace';
 
 export interface ChatSurfaceDeps {
   onTeardown(d: () => void): void;
@@ -174,6 +175,8 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
   );
   messageListScroll.append(messageListPadTop, messageListInner, messageListPadBottom);
   messageListEl.append(messageListScroll);
+  // tap.media.* field trace for taps on message media (passive, logging only).
+  deps.onTeardown(installMediaTapTrace(messageListEl));
 
   const renderEarlier = () => {
     deps.render();
@@ -417,6 +420,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
 
     deps.onTeardown(
       onHorizontalSwipe(surface, {
+        name: 'chat-back',
         edge: 'left',
         edgeInsetPx: CHAT_EDGE_INSET_PX,
         direction: 1,
@@ -433,6 +437,7 @@ export function createChatSurface(deps: ChatSurfaceDeps) {
     );
     deps.onTeardown(
       onHorizontalSwipe(surface, {
+        name: 'chat-next',
         direction: -1,
         thresholdPct: CHAT_COMMIT_PCT,
         velocityCommit: CHAT_FLICK_VELOCITY,

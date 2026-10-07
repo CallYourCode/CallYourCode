@@ -8,6 +8,7 @@
 // grep token: `gesture wrapper`.
 import {DragGesture} from '@use-gesture/vanilla';
 import type {FullGestureState, UserDragConfig} from '@use-gesture/vanilla';
+import {cyclog} from '@/shared/logging';
 
 // How near the named edge (in CSS px, measured from the target's own box) a drag
 // must START for an edge-gated swipe to be captured at all.
@@ -15,6 +16,10 @@ const DEFAULT_EDGE_INSET_PX = 24;
 // Movement (in px) a drag must travel before it is treated as intentional and
 // before its axis is locked. Matches the old hand-rolled arm slop.
 const DEFAULT_ARM_PX = 12;
+// A run of drags this recogniser never owned (a scroll, a mid-screen start for the
+// edge swipe) logs its first swipe.cancel; repeats of the same reason inside this
+// window are only counted, into `sup` on the next one that logs.
+const QUIET_REPEAT_MS = 30_000;
 
 export interface HorizontalSwipeProgress {
   /** Raw horizontal travel from the gesture origin, in px (sign carries direction). */
@@ -33,6 +38,8 @@ export interface HorizontalSwipeCommit {
 }
 
 export interface HorizontalSwipeOptions {
+  /** Names the owning surface in the swipe.* log lines (e.g. `chat-back`). */
+  name?: string;
   /**
    * Gate the gesture to drags that START within `edgeInsetPx` of this edge of the
    * target box. Omit to accept a horizontal drag beginning anywhere. This is what
@@ -74,6 +81,10 @@ type DragHandlerState = FullGestureState<'drag'>;
 // into it deliberately so a stray first pixel cannot mislock a vertical drag.
 type DragAxisThreshold = {mouse?: number; touch?: number; pen?: number};
 type DragConfigWithAxisThreshold = UserDragConfig & {axisThreshold?: DragAxisThreshold};
+// Read-only peek at the recogniser's private press state, for the swipe.stuck probe.
+type GesturePeek = {
+  _ctrl?: {state?: {drag?: {_pointerActive?: boolean}}; pointerIds?: Set<number>};
+};
 
 /**
  * Attach a horizontal-swipe recogniser to `target` and return a disposer.
@@ -93,6 +104,7 @@ export function onHorizontalSwipe(
   options: HorizontalSwipeOptions
 ): () => void {
   const {
+    name = 'swipe',
     edge,
     edgeInsetPx = DEFAULT_EDGE_INSET_PX,
     direction,
@@ -112,20 +124,55 @@ export function onHorizontalSwipe(
   // Decided once per gesture on its first event, then held for the gesture's life.
   let edgeEligible = true;
 
+  // Diagnostics only (swipe.* lines): one line when this recogniser takes a drag,
+  // one when it lets go, and the reason a drag it never took was left alone.
+  let owned = false;
+  let ownedAt = 0;
+  let startX = 0;
+  let quietReason = '';
+  let quietAt = 0;
+  let quietSkipped = 0;
+  const pointerKind = (event: Event) =>
+    'pointerType' in event ? (event as PointerEvent).pointerType : event.type.slice(0, 5);
+  const endLine = (line: string, fields: Record<string, unknown>) => {
+    owned = false;
+    cyclog(line, {s: name, ...fields, ms: Date.now() - ownedAt});
+  };
+  const quiet = (reason: string, fields: Record<string, unknown> = {}) => {
+    const now = Date.now();
+    if (reason === quietReason && now - quietAt < QUIET_REPEAT_MS) {
+      quietSkipped++;
+      return;
+    }
+    cyclog('swipe.cancel', {s: name, reason, ...fields, sup: quietSkipped || undefined});
+    quietReason = reason;
+    quietAt = now;
+    quietSkipped = 0;
+  };
+
   const handler = (state: DragHandlerState) => {
     const {first, last, movement, swipe, axis, event, initial, cancel, canceled} = state;
 
-    if (canceled) return;
+    if (canceled) {
+      // The library ended a drag this recogniser had taken, without a release.
+      if (owned) endLine('swipe.cancel', {reason: 'canceled', ev: event?.type});
+      return;
+    }
 
     if (first) {
       // `initial` is the pointer position where the drag began; measure it against
       // the target's own left/right so the gate follows the surface, not the page.
       const rect = target.getBoundingClientRect();
+      startX = Math.round(initial[0] - rect.left);
       if (edge === 'left') edgeEligible = initial[0] - rect.left <= edgeInsetPx;
       else if (edge === 'right') edgeEligible = rect.right - initial[0] <= edgeInsetPx;
       else edgeEligible = true;
+      if (!edgeEligible) quiet('off-edge', {x0: startX});
       // A start-of-gesture veto (e.g. an inner horizontal scroller owns the pan).
-      if (edgeEligible && canStart && !canStart(state.target)) edgeEligible = false;
+      if (edgeEligible && canStart && !canStart(state.target)) {
+        edgeEligible = false;
+        quiet('veto', {x0: startX});
+      }
     }
 
     // A drag that did not begin at the gated edge is not ours: drop it so native
@@ -138,13 +185,21 @@ export function onHorizontalSwipe(
     // Axis not locked yet (still under the arm threshold): wait, touching nothing.
     if (!axis) return;
     // Locked vertical: never capture. The browser keeps scrolling natively.
-    if (axis === 'y') return;
+    if (axis === 'y') {
+      if (last) quiet('vertical', {ev: event.type});
+      return;
+    }
 
     const dx = movement[0];
     const dir: -1 | 1 = dx < 0 ? -1 : 1;
 
     // Wrong direction for a single-direction handler: leave it for the sibling.
-    if (direction !== undefined && dir !== direction) return;
+    if (direction !== undefined && dir !== direction) {
+      // A taken drag that came back past its origin ends here with no callback.
+      if (last && owned) endLine('swipe.cancel', {reason: 'reversed', ev: event.type});
+      else if (last) quiet('wrong-dir');
+      return;
+    }
 
     // Now we own a horizontal drag: keep the browser from turning it into text
     // selection or a native fling.
@@ -153,14 +208,27 @@ export function onHorizontalSwipe(
     const width = widthOf();
     const pct = Math.abs(dx) / width;
 
+    if (!owned) {
+      owned = true;
+      ownedAt = Date.now();
+      cyclog('swipe.start', {s: name, dir, x0: startX, pt: pointerKind(event)});
+    }
+
     if (!last) {
       onProgress?.({dx, dir, pct});
       return;
     }
 
     const flick = swipe[0] === dir;
-    if (pct >= thresholdPct || flick) onCommit?.({dir, flick, pct});
-    else onCancel?.();
+    const pctOut = Math.round(pct * 100) / 100;
+    if (pct >= thresholdPct || flick) {
+      endLine('swipe.commit', {dir, flick: flick ? 1 : 0, pct: pctOut, ev: event.type});
+      onCommit?.({dir, flick, pct});
+    } else {
+      const reason = /cancel/.test(event.type) ? event.type : 'short';
+      endLine('swipe.cancel', {reason, pct: pctOut, ev: event.type});
+      onCancel?.();
+    }
   };
 
   const config: DragConfigWithAxisThreshold = {
@@ -183,6 +251,22 @@ export function onHorizontalSwipe(
     swipe: {velocity: velocityCommit, distance: armPx, duration: flickMs}
   };
 
+  // swipe.stuck: a new press that finds the recogniser still holding an earlier
+  // one (its release never arrived) is ignored by the library, and its capture
+  // click filter then eats clicks on this surface. Registered before the
+  // recogniser binds so it reads the state the library is about to act on.
+  let stuckSeen = false;
+  const probe = () => {
+    const ctrl = (gesture as unknown as GesturePeek)._ctrl;
+    const held = !!ctrl?.state?.drag?._pointerActive;
+    if (held && !stuckSeen) cyclog('swipe.stuck', {s: name, ids: ctrl?.pointerIds?.size});
+    stuckSeen = held;
+  };
+  target.addEventListener('pointerdown', probe, {passive: true});
+
   const gesture = new DragGesture(target, handler, config as UserDragConfig);
-  return () => gesture.destroy();
+  return () => {
+    target.removeEventListener('pointerdown', probe);
+    gesture.destroy();
+  };
 }
