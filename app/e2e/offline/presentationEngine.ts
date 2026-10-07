@@ -26,6 +26,9 @@ export type PresentationEngine = {
 export type PresentationEngineOptions = {
   breakSearch?: boolean;
   breakMedia?: boolean;
+  // Also declare the reply-dials plugin's Verbosity slider, so the composer
+  // carries the dial button and its inline panel.
+  dials?: boolean;
 };
 
 // A fixed instant well in the past so every timestamp, day-group header and
@@ -65,6 +68,24 @@ function searchPluginDecl() {
     name: 'Search',
     version: 1,
     panel: {icon: 'search', label: 'Search', needsSession: true, dock: 'full'}
+  };
+}
+
+function dialsPluginDecl() {
+  return {
+    id: 'reply-dials',
+    name: 'Reply dials',
+    version: 1,
+    composer: [
+      {
+        type: 'slider',
+        key: 'verbosity',
+        icon: 'equalizer',
+        label: 'Verbosity',
+        value: 3,
+        steps: [1, 2, 3, 4, 5].map((n) => ({n, name: `Level ${n}`, hint: `reply at level ${n}`}))
+      }
+    ]
   };
 }
 
@@ -207,7 +228,9 @@ export async function startPresentationEngine(
     ws.on('close', () => sockets.delete(ws));
     ws.on('error', () => {});
     ws.send(JSON.stringify({t: 'host', user: 'test', host: 'testbox'}));
-    ws.send(JSON.stringify({t: 'plugins', list: breakSearch ? [] : [searchPluginDecl()]}));
+    const plugins: object[] = breakSearch ? [] : [searchPluginDecl()];
+    if (o.dials) plugins.push(dialsPluginDecl());
+    ws.send(JSON.stringify({t: 'plugins', list: plugins}));
     ws.send(sessionsFrame());
     ws.on('message', (raw) => {
       let f: {t?: string; id?: string};
