@@ -1,5 +1,4 @@
 import {engineObjectUrl} from '../../engine/contract';
-import {cyclog} from '@/shared/logging';
 
 /** True on an iPhone/iPad/iPod, including an iPadOS that reports itself as a
  *  MacIntel with a touch screen. WebKit ignores an `<a download>` on a blob:
@@ -33,62 +32,6 @@ export function canShareFile(name: string, blob: Blob): boolean {
   } catch {
     return false;
   }
-}
-
-/** How saving `blob` should reach the device: the OS share sheet on iOS, else
- *  a download via an `<a download>` link. On iOS there is no other path: WebKit
- *  ignores `<a download>` in a home-screen app and opens the bytes as a page
- *  inside it, with no way back, so a file the share sheet will not take is
- *  'none' there, never a link. Desktop Chrome also reports canShare({files})
- *  but must download straight to disk, never open the share sheet. The share
- *  sheet must be opened from a user gesture, so a caller that has awaited a
- *  fetch settles this only once it has a fresh tap and the bytes in hand. */
-export function saveMethodFor(name: string, blob: Blob): 'share' | 'download' | 'none' {
-  if (!iosLike()) return 'download';
-  return canShareFile(name, blob) ? 'share' : 'none';
-}
-
-/** Save `blob` to the device from within a user gesture: the OS share sheet on
- *  iOS, else an `<a download>` link (desktop needs no gesture for that and must
- *  not open the share sheet). Returns the method actually used; a share the
- *  user dismisses still counts as handled. On iOS a share that fails is
- *  'none': it is never retried as a link to the bytes (see saveMethodFor). */
-export async function shareOrSaveBlob(
-  name: string,
-  blob: Blob
-): Promise<'share' | 'download' | 'none'> {
-  if (iosLike()) {
-    if (!canShareFile(name, blob)) {
-      cyclog('download.share.unavailable', {
-        name,
-        bytes: blob.size,
-        why: 'the iOS share sheet does not take this file, and a link to it would open it inside the app'
-      });
-      return 'none';
-    }
-    const nav = navigator as FileShareNav;
-    try {
-      await nav.share!({files: [fileFor(name, blob)], title: name});
-      cyclog('download.saved', {name, via: 'share', bytes: blob.size});
-      return 'share';
-    } catch (err) {
-      if ((err as {name?: string})?.name === 'AbortError') {
-        cyclog('download.saved', {name, via: 'share-cancelled', bytes: blob.size});
-        return 'share';
-      }
-      cyclog('download.share.failed', {
-        name,
-        err,
-        why:
-          'the OS share sheet threw for a reason other than the user cancelling; ' +
-          'nothing else is tried, a link to the bytes would open them inside the app'
-      });
-      return 'none';
-    }
-  }
-  saveBlob(name, blob);
-  cyclog('download.saved', {name, via: 'download', bytes: blob.size});
-  return 'download';
 }
 
 function triggerDownload(name: string, url: string) {
