@@ -666,6 +666,30 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
   const closePluginDials = (except?: DialPanel) => {
     for (const d of pluginDials) if (d.panel !== except) d.panel.close();
   };
+  // An open dial keeps its natural height. The pill is capped and the text line
+  // does not shrink, so a tall draft squeezes the panel; whatever the panel is
+  // squeezed by is added to --cyc-dial-room, which comes off the text field's cap
+  // (messageComposer.ts), so the draft scrolls instead. Closing gives it back.
+  // The text line can already overrun the pill (its lifted padding is not in the
+  // cap), so the room is read back and topped up in the same pass. The dial
+  // button fits on open, before paint, so the observer only meets later changes.
+  const fitDials = () => {
+    const open = pluginDials.find((d) => d.panel.isOpen())?.panel.el;
+    let room = open ? parseFloat(composerRows.style.getPropertyValue('--cyc-dial-room')) || 0 : 0;
+    for (let pass = 0; pass < 3; pass++) {
+      composerRows.style.setProperty('--cyc-dial-room', `${room}px`);
+      const squeeze = open ? open.scrollHeight - open.clientHeight : 0;
+      if (squeeze <= 0) break;
+      room += squeeze;
+    }
+  };
+  const dialRoom =
+    typeof ResizeObserver === 'undefined'
+      ? undefined
+      : new ResizeObserver((entries) => {
+          for (const e of entries) if (!e.target.isConnected) dialRoom?.unobserve(e.target);
+          fitDials();
+        });
 
   let dialGrabInside = false;
   document.addEventListener(
@@ -731,12 +755,14 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
       panel.el.classList.add('flex-[0_1_auto]', 'min-h-0', 'overflow-y-auto', 'overscroll-contain');
       composerRows.insertBefore(panel.el, blocksRow);
       pluginDials.push({key: w.key, btn, panel});
+      dialRoom?.observe(panel.el);
       btn.addEventListener('click', () => {
         if (isDisabled()) return;
         const willOpen = !panel.isOpen();
         closePluginDials(panel);
         if (willOpen) panel.toggle();
         else panel.close();
+        fitDials();
       });
     }
     return btn;

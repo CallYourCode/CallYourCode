@@ -200,7 +200,7 @@ export function createComposer({
     'div',
     // Important max-height and break-spaces; plaintext bidi per line.
     'cyc-composer-input w-full border-0 bg-transparent p-[0.5rem_0] text-[15px] leading-[var(--cyc-line-height)] outline-none cursor-text select-text [transition:height_0.1s] [unicode-bidi:plaintext] ' +
-      'max-h-[calc(var(--cyc-pill-max)-1rem)]! [white-space:break-spaces]! [word-break:break-word] ' +
+      'max-h-[max(2.5rem,calc(var(--cyc-pill-max)-1rem-var(--cyc-dial-room,0px)))]! [white-space:break-spaces]! [word-break:break-word] ' +
       '[.cyc-composer.cyc-composer-disabled_&]:pointer-events-none [&_pre]:inline [&_pre]:m-0',
     {contenteditable: 'true', dir: 'auto'}
   );
