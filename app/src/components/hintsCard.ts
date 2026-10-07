@@ -27,7 +27,7 @@ const HINTS: {icon: IconName; text: string}[] = [
   },
   {
     icon: 'hand',
-    text: 'The halt button stops a session right now. It is a ctrl+c.'
+    text: 'The halt button stops a session right now.'
   },
 
   {

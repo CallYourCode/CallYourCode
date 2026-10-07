@@ -40,6 +40,7 @@ import { PI_TRANSCRIPT } from "../chat/transcripts.ts";
 import { readPiSubagentRuns } from "./pi-subagent-runs.ts";
 import { augmentPiLaunch, PI_EXTENSION_PATH } from "../adapters/pi-launch.ts";
 import type { HarnessReader } from "./types.ts";
+import { stripPaneControls } from "../terminal/blocked.ts";
 import { isFromApp, type SessionEvent } from "../sessions/session-events.ts";
 
 /* THE pi ACTIVITY TAIL (sessionEvents, poll mode). Until now pi was the ONE
@@ -270,6 +271,24 @@ export const piReader: HarnessReader = {
   // pi's app.interrupt is Escape (keybindings.js); ctrl+c only clears the box,
   // so the app's Stop did nothing to a running pi turn.
   interruptKeys: ["escape"],
+
+  /* pi's Escape does not drop his queued messages, it puts them back into the
+   * input box unsent (interactive-mode restoreQueuedMessagesToEditor, queued
+   * text first, any draft after it). The box is pi-tui's editor: the lines
+   * between the last two rules on the screen. While pi works its spinner sits in
+   * the top rule ("── ⠇ Working ──"), so only a plain top rule (or one carrying
+   * the editor's own "↑ N more" scroll label) reads as idle. */
+  restoredInput(text: string): { text: string; clipped: boolean } | null {
+    const lines = stripPaneControls(text).split("\n").map((l) => l.trimEnd());
+    let bottom = lines.length - 1;
+    while (bottom >= 0 && !lines[bottom].startsWith("─")) bottom--;
+    let top = bottom - 1;
+    while (top >= 0 && !lines[top].startsWith("─")) top--;
+    if (top < 0) return null;
+    const rule = /^─+(?: ↑ (\d+) more ─*)?$/.exec(lines[top]);
+    if (!rule) return null;
+    return { text: lines.slice(top + 1, bottom).join("\n").trim(), clipped: !!rule[1] };
+  },
 
   // PI STREAMS LIVE EVENTS + ITS OWN SESSION ID over a per-pane unix socket
   // (adapters/pi-events.ts). Declaring eventSocket has the adapter's spawn bind

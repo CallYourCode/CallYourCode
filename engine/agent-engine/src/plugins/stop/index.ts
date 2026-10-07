@@ -1,9 +1,10 @@
 /* THE STOP BUTTON AS AN ACTION PLUGIN: the toolbar's interrupt, declared so
  * its confirm is a field rather than only an app special-case.
  *
- * The app still draws the existing Ctrl-C dialog (session name, class,
- * Send Ctrl-C button) so the confirm stays byte-identical. This plugin names
- * that confirm (label + message only; Cancel is the app's).
+ * The app still draws the existing Stop dialog (session name, class,
+ * Stop button) so the confirm stays byte-identical. This plugin names
+ * that confirm (label + message only; Cancel is the app's). The wording names
+ * no key: the interrupt key is per harness (ctrl+c, Escape for pi).
  *
  * H2 BUG FIX: the decl used to say run:"interrupt" with NO rpc map, so a
  * client honoring the decl got a 404; only the app's ws interrupt special-case
@@ -37,7 +38,7 @@ export function stopPlugin(core?: (id: string) => PluginCore): PluginSpec {
       needsSession: true,
       run: "interrupt",
       confirm: {
-        label: "Send Ctrl-C",
+        label: "Stop",
         message: "Whatever it is doing stops where it is, and that cannot be undone.",
       },
     },

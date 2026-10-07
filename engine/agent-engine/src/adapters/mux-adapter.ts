@@ -8,7 +8,7 @@
 // The adapter OWNS its Multiplexer/HerdrClient instance (a fresh HerdrClient by
 // default, injectable in tests). Nothing here imports server.ts.
 
-import { SGR, classifyPaneBox, parseAsk, type PaneBox } from "../terminal/blocked.ts";
+import { SGR, classifyPaneBox, flat, parseAsk, type PaneBox } from "../terminal/blocked.ts";
 import { runDeliveryMachine } from "../chat/delivery-machine.ts";
 import { agentLabel, PREMINT_SOURCE, PARKED_SOURCE, type AgentSessionRef } from "../runtime/agents.ts";
 import { HerdrClient } from "../terminal/herdr.ts";
@@ -530,6 +530,13 @@ export const reEchoSettleMs = (): number =>
  *  command in pane-deliver.ts): two numbers for one measured pause is how they
  *  drift apart. */
 export const deliverSettleMs = settleMs;
+/* How long the Stop waits for a restoring harness (pi) to go idle after its
+ * interrupt key before it gives up on resubmitting the restored queue. pi's
+ * abort settles in about a second; this is only a ceiling. */
+const resubmitWaitMs = (): number => Number(process.env.CYC_RESUBMIT_WAIT_MS) || 10_000;
+/* How many of a pane's most recent keystroke deliveries the Stop may match the
+ * restored box against. */
+const SENT_INPUT_KEEP = 8;
 const CONVERSATION_EVENT_LIMIT = 200;
 const CONVERSATION_EVENT_BYTES = Number(process.env.CYC_ATTACH_EVENT_BYTES) || 16 * 1024 * 1024;
 /** Thrown when the pane is in no state to be typed at. Carries a sentence for
@@ -671,6 +678,9 @@ export class MuxAdapter implements MultiplexerAdapter {
   private muxBound = false;
   private unsubmitted = new Map<string, { deliveryId: string; at: number }>();
   private deliverChain: Promise<void> = Promise.resolve();
+  /* The texts this engine typed into a pane whose reader declares restoredInput
+   * (pi), newest last, kept since the last Stop: what the Stop may resubmit. */
+  private sentInput = new Map<string, string[]>();
   // LANE B: live direct-input endpoints, one per pane that has a pi RPC channel.
   private directEndpoints = new Map<string, DirectInputEndpoint>();
 
@@ -1272,7 +1282,7 @@ export class MuxAdapter implements MultiplexerAdapter {
         return;
       }
     }
-    return deliverToPane({
+    await deliverToPane({
       mux: this.mux,
       unsubmitted: deps?.unsubmitted ?? this.unsubmitted,
       onPaneKeyboard: deps?.onPaneKeyboard ?? ((fn) => this.onPaneKeyboard(fn)),
@@ -1280,12 +1290,62 @@ export class MuxAdapter implements MultiplexerAdapter {
       readScreen: deps?.readScreen ?? ((h) => this.parseScreen(h)),
       canParseScreen: deps?.canParseScreen ?? ((h) => this.canParseScreen(h)),
     }, handle, text, deliveryId, takenAt);
+    const info = this.infoFor(handle);
+    if (info && readerFor(info.kind)?.restoredInput) {
+      const sent = [...(this.sentInput.get(handle) ?? []), text].slice(-SENT_INPUT_KEEP);
+      this.sentInput.set(handle, sent);
+    }
   }
 
   async interrupt(handle: string): Promise<void> {
     const info = this.infoFor(handle);
-    const keys = (info && readerFor(info.kind)?.interruptKeys) || ["ctrl+c"];
-    await this.mux.sendKeys(handle, ...keys);
+    const reader = info ? readerFor(info.kind) : undefined;
+    await this.mux.sendKeys(handle, ...(reader?.interruptKeys || ["ctrl+c"]));
+    if (reader?.restoredInput) await this.resubmitRestored(handle, reader.restoredInput);
+  }
+
+  /* THE QUEUE pi PUTS BACK. Messages he sent while pi worked were typed in and
+   * pi queued them; pi's interrupt (Escape) aborts the turn and moves that queue
+   * into its input box UNSENT, so after Stop they sat there until somebody
+   * pressed Enter in the TUI. Every other harness sends them on. Wait for pi to
+   * go idle, then press Enter ONCE, and only when the box holds nothing but the
+   * engine's own recent deliveries: pi appends a draft typed in the TUI after
+   * the queue, so a box ending in anything else is left alone. A scrolled box
+   * only shows its end, which is where a draft would be. No keyboard queue: a
+   * delivery typing between the read and the Enter rides the same submit, and
+   * its own Enter then lands on an empty box. */
+  private async resubmitRestored(handle: string,
+    read: (text: string) => { text: string; clipped: boolean } | null): Promise<void> {
+    const sent = this.sentInput.get(handle);
+    if (!sent?.length) return;
+    const deadline = Date.now() + resubmitWaitMs();
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, settleMs()));
+      let box: { text: string; clipped: boolean } | null;
+      try {
+        const { text, truncated } = await this.mux.readPane(handle, BOX_READ_LINES);
+        if (truncated) return;
+        box = read(text);
+      } catch {
+        return;
+      }
+      if (!box) continue; // still working
+      // idle: whatever was queued is in the box now or was never there
+      this.sentInput.delete(handle);
+      const have = flat(box.text);
+      if (!have) return;
+      const ours = sent.some((_, i) => {
+        const want = flat(sent.slice(i).join(""));
+        return box.clipped ? want.endsWith(have) : want === have;
+      });
+      if (!ours) {
+        console.log(`[interrupt] ${handle}: the input box holds text this engine did not send; left it unsubmitted`);
+        return;
+      }
+      console.log(`[interrupt] ${handle}: resubmitting the queued messages the interrupt put back in the input box`);
+      await this.mux.sendKeys(handle, "enter");
+      return;
+    }
   }
 
   /* The raw typed-input pass-throughs (see the interface note): the shell-typing

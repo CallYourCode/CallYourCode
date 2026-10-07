@@ -566,7 +566,7 @@ test("the real stop builtin: declares the interrupt action and its confirm", () 
     needsSession: true,
     run: "interrupt",
     confirm: {
-      label: "Send Ctrl-C",
+      label: "Stop",
       message: "Whatever it is doing stops where it is, and that cannot be undone.",
     },
   });
