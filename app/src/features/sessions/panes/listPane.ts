@@ -1376,6 +1376,7 @@ export function createListPane(deps: ListPaneDeps) {
 
     deps.onTeardown(
       onHorizontalSwipe(surface, {
+        name: 'list-tabs',
         thresholdPct: LIST_COMMIT_PCT,
         velocityCommit: LIST_FLICK_VELOCITY,
         armPx: LIST_ARM_PX,
