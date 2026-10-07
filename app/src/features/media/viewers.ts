@@ -3,9 +3,7 @@ import {cyclog} from '@/shared/logging';
 import {sessionMedia, shownKey} from '@/features/chat/content';
 import {localUploadUrl} from '@/features/composer/localUploadUrls';
 import {iosLike} from '@/features/media/downloads';
-import {mediaKindOf} from '@/features/media/binary';
 import {tapDownloadCard} from '@/features/media/downloadCards';
-import {openMediaViewer} from '@/features/media/mediaViewer';
 import {toast} from '../../components/widgets';
 import {openImageViewer, type ViewerItem} from './imageViewer';
 import {openFileViewer} from './fileViewer';
@@ -243,27 +241,22 @@ export function createMediaViewers(deps: MediaViewersDeps) {
 
     if (m.file.fileKind === 'binary') {
       const raw = dataState.mode === 'live' && s ? engine.docUrl(s.id, m.file.docId) + '/raw' : '';
-      const kind = mediaKindOf(m.file.name);
       cyclog('download.tap', {
         name: m.file.name,
         bytes: m.file.size,
-        kind: kind ?? 'binary',
         ios: iosLike(),
-        why: kind
-          ? 'a shown video or audio file opens in the inline player'
-          : iosLike()
-            ? 'a shown file downloads with progress on its card, then opens the iOS save sheet'
-            : "a shown file downloads straight into the browser's own downloads"
+        why: iosLike()
+          ? 'a shown file, video and audio too, downloads with progress on its card, then opens the iOS save sheet'
+          : "a shown file, video and audio too, downloads straight into the browser's own downloads"
       });
       if (!raw) {
         toast('No engine to download from');
         return;
       }
-      // A playable file opens the inline player; anything else is one tap on
-      // its card: the browser's own download (laptop, Android) or the save sheet
-      // (iOS), with the progress on the card. Never a viewer, never a page.
-      if (kind) openMediaViewer(m.file, raw, kind);
-      else tapDownloadCard(m.file, raw);
+      // Any binary, video and audio included, is one tap on its card: the
+      // browser's own download (laptop, Android) or the save sheet (iOS), with
+      // the progress on the card. Never a viewer, never a page.
+      tapDownloadCard(m.file, raw);
       return;
     }
 
