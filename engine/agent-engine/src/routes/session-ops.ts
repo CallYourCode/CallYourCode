@@ -18,7 +18,8 @@ import { nextOrder } from "../chat/order.ts";
 import { restartPane } from "../chat/pane-deliver.ts";
 import { markAllRead, markUnread, unreadOf } from "../sessions/readstate.ts";
 import { restartConfirmed, restartLogsToChat, restartTell } from "../terminal/restart.ts";
-import { adoptAgentId, agentMetas, applySessionSettings, freshAgentId, getManualOrder, isRecentCwd, nameOverrideOf, recentCwds, sessions, setManualOrder, setNameOverride, settingsOf, type Session, type SessionSettings } from "../sessions/session-state.ts";
+import { agentMetas, applySessionSettings, freshAgentId, getManualOrder, isRecentCwd, nameOverrideOf, recentCwds, sessions, setManualOrder, setNameOverride, settingsOf, type Session, type SessionSettings } from "../sessions/session-state.ts";
+import { bindSpawnedPane } from "../sessions/carry.ts";
 import { withAgentEnv } from "../runtime/agent-env.ts";
 import { programToken } from "../adapters/pi-launch.ts";
 import { broadcastSessions, sessionList } from "../sessions/sessions-frame.ts";
@@ -615,8 +616,10 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
         command: withAgentEnv(launch, aid),
       });
       /* Bind the pre-minted id to the fresh handle; reconcile resolves the
-       * pane to this agent (rule 2) and its announce fills the session id. */
-      adoptAgentId(paneId, aid);
+       * pane to this agent (rule 2) and its announce fills the session id.
+       * The poll may have listed the pane while spawn was in flight and keyed
+       * it by a provisional: the spawn's own id takes the handle over it. */
+      bindSpawnedPane(paneId, aid);
       console.log(`[new-session] ${paneId} in ${cwd} (${aid}, ${harness ?? "claude"})`);
       /* `agentId` is the pre-minted STABLE id, returned alongside the transient
        * pane handle. The app matches the new session by this id: the pane handle

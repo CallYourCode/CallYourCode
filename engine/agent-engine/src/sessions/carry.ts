@@ -26,7 +26,7 @@ import { bumpRowsGen } from "../chat/wirecache.ts";
 import { evictContextFor } from "./context-cache.ts";
 import { sessions, restoredChats, restoredLogs, agentMetas, chatStore, metaFor, indexSession,
   sessionIndex, flushAgentSave, getManualOrder, setManualOrder,
-  bindingOf, purgeSessionState, chatRefFor } from "./session-state.ts";
+  bindingOf, markBindingDead, adoptAgentId, purgeSessionState, chatRefFor } from "./session-state.ts";
 import type { ChatMsg } from "../chat/chatmsg.ts";
 import { srcKey, type SessionRec } from "../chat/sessionrec.ts";
 import { rowsBySeq } from "../chat/chatstore.ts";
@@ -120,7 +120,11 @@ export function adoptSession(agentId: string, sessionId: string): boolean {
  *  Fills a NULL id ONLY. A no id yet -> adopt (returns false: not a roll). The
  *  same id already there -> adoptSession no-ops. A DIFFERENT id is left to
  *  reconcile's rollover/link semantics untouched: the socket carries no roll
- *  context, so it must never clobber a live id here. Idempotent with the later
+ *  context, so it must never clobber a live id here. An id the index already
+ *  gives ANOTHER agent (a resumed session, the reopen race) is left to
+ *  reconcile too: carried here it would re-index the id onto the provisional
+ *  the handle happens to be bound to, and its index rule could no longer fold
+ *  that provisional into the agent the id belongs to. Idempotent with the later
  *  reconcile carry, which converges on the same value. Returns the agentId it
  *  carried onto, or null when the handle has no engine bind yet (a foreign or
  *  not-yet-adopted pane: nothing to carry, and nothing invented). */
@@ -130,8 +134,31 @@ export function carryDirectHandleBind(handle: string, sessionId: string): string
   const agentId = b.agentId;
   const cur = metaFor(agentId).sessionId;
   if (cur && cur !== sessionId) return null; // a live, different id: defer to rollover
+  const owner = sessionIndex.get(sessionId);
+  if (owner && owner !== agentId) return null; // another agent's id: reconcile's index rule decides
   adoptSession(agentId, sessionId); // fills the null id, or no-ops the same one
   return agentId;
+}
+
+/** THE SPAWN'S BIND WINS OVER A PROVISIONAL THE POLL MINTED FIRST.
+ *  /new-session binds its agent id (a pre-mint, or the OLD id of a reopen) to
+ *  the handle only once adapter.spawn returns, and herdr's newTab returns only
+ *  after the agent has painted, so a reconcile tick in between can list the
+ *  pane with no binding, key it by a fresh PROVISIONAL and bind the handle to
+ *  that. adoptAgentId never takes a live binding, so the spawn's id was
+ *  dropped: pi's socket then carried its session id onto the provisional and
+ *  the reopened agent stayed dead (k8plus 2026-10-08, reopen-race.test.ts).
+ *  A provisional on the spawned handle is only a placeholder for this very
+ *  spawn, so it folds into the spawn's agent and the handle is re-bound. An
+ *  ESTABLISHED agent on the handle (it has a session id) is never displaced. */
+export function bindSpawnedPane(handle: string, agentId: string): void {
+  const b = bindingOf(handle);
+  const prov = b && b.alive && b.agentId !== agentId ? sessions.get(b.agentId) : undefined;
+  if (prov && prov.alive && prov.muxHandle === handle && agentMetas.get(prov.id)?.sessionId === null) {
+    absorb(prov, agentId);
+    markBindingDead(handle); // the provisional's binding retires, so adoptAgentId takes the handle
+  }
+  adoptAgentId(handle, agentId);
 }
 
 /** FOLD A PROVISIONAL AGENT INTO THE AGENT IT TURNED OUT TO BE. Runs when a
