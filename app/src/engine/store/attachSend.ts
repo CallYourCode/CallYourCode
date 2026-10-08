@@ -439,6 +439,23 @@ function wireFromRows(payload: SendPayload, rows: TransferRow[]): SendPayload | 
   return named;
 }
 
+async function readable(blob: Blob): Promise<boolean> {
+  try {
+    const head = blob.slice(0, 1);
+    if (typeof head.arrayBuffer === 'function') await head.arrayBuffer();
+    else
+      await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = res;
+        r.onerror = () => rej(r.error);
+        r.readAsArrayBuffer(head);
+      });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function failAttach(payload: SendPayload, why: string): {failed: string} {
   const m = findByCid(payload.sessionId, payload.cid);
   if (m) {
@@ -502,6 +519,17 @@ drain.registerExecutor('send-files', async (intent: Intent): Promise<DrainOutcom
     const rec = await clipVault.get(k);
     if (!intents.get(intent.id)) return 'waiting';
     if (!rec) {
+      missing++;
+      continue;
+    }
+    // A vault record can outlive its bytes: WebKit keeps the record while the
+    // blob behind it is gone, and every read throws NotFoundError. Re-queuing
+    // it failed in `enqueue` and left this send 'waiting' forever, holding
+    // every later send of the session (BZ Builder, 2026-10-08). Unreadable
+    // bytes are missing bytes.
+    const ok = await readable(rec.blob);
+    if (!intents.get(intent.id)) return 'waiting';
+    if (!ok) {
       missing++;
       continue;
     }

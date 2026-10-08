@@ -518,6 +518,38 @@ describe('attachments over the transfer queue', () => {
     expect(planted.sent).toHaveLength(0);
   });
 
+  test('reload with kept bytes that can no longer be read: failed, not waiting forever', async () => {
+    // WebKit kept the vault record but its blob's file was gone: every read
+    // threw NotFoundError (BZ Builder, 2026-10-08). The send held the session.
+    const cid = 'cid-dead-bytes';
+    plantIntent({
+      cid,
+      sessionId: SID,
+      ts: 1000,
+      text: 'x',
+      kind: 'text',
+      wire: 'x',
+      transferKeys: ['k-a'],
+      attachMeta: {
+        'k-a': {name: 'shot.png', mime: 'image/png', size: 300, image: true, at: 1, wireAt: 1}
+      }
+    });
+    const dead = png(300);
+    dead.slice = () => {
+      const b = new Blob(['x']);
+      b.arrayBuffer = () => Promise.reject(new DOMException('The object can not be found here.', 'NotFoundError'));
+      return b;
+    };
+    vault.set('k-a', {blob: dead, mime: 'image/png'});
+    await hydrateSends();
+    await flush();
+    const m = s.messages.find((x) => (x as CycEngineMessage).cid === cid) as CycEngineMessage;
+    expect(m.status).toBe('failed');
+    expect(intents.get(cid)?.state).toBe('failed');
+    expect(transfers.enqueue).not.toHaveBeenCalled();
+    expect(planted.sent).toHaveLength(0);
+  });
+
   describe('the intent settles while the executor is reading the vault (defect #7)', () => {
     const racy = (cid: string): SendPayload => ({
       cid,
