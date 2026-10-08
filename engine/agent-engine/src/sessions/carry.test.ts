@@ -358,6 +358,17 @@ test("a DIFFERENT id arriving is not clobbered here: it defers to rollover", asy
   expect(S.sessionBySessionId(U3)).toBeUndefined();       // and U3 was not indexed
 });
 
+test("an id the index gives ANOTHER agent is not carried: reconcile's index rule decides", async () => {
+  await S.loadSessionState(deps);
+  S.sessionStateReady();
+  const OWNER = "ag-fedcba9876543210";
+  adoptSession(OWNER, U2);             // a dead agent that already answers to U2
+  S.adoptAgentId(HANDLE, PI_AID);      // the handle's bound agent has no id yet
+  expect(carryDirectHandleBind(HANDLE, U2)).toBeNull();
+  expect(S.metaFor(PI_AID).sessionId).toBeNull();   // nothing adopted onto the bound agent
+  expect(S.agentIdFor(U2)).toBe(OWNER);             // and the index still names the owner
+});
+
 test("an unbound handle carries nothing: no session is invented", async () => {
   await S.loadSessionState(deps);
   S.sessionStateReady();
