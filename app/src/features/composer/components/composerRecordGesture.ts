@@ -387,6 +387,12 @@ export function createComposerRecordGesture(deps: ComposerRecordGestureDeps) {
       holdTimer = null;
     }
     if (!holding && !locked) return;
+    cyclog('press.end', {
+      end,
+      why,
+      locked,
+      heldMs: pressAt ? Date.now() - pressAt : undefined
+    });
     holding = false;
     locked = false;
     dropCaption();
@@ -414,17 +420,51 @@ export function createComposerRecordGesture(deps: ComposerRecordGestureDeps) {
 
     if (liveWords()) return;
     if (locked) return;
-    if (activePointerId !== null) return;
+    if (activePointerId !== null) {
+      // A press on the mic while a hold is still up for another finger: the
+      // first finger's release never reached the page (2026-10-08, twice on
+      // the owner's iPhone), since it cannot still be on this button. End that
+      // hold as a release so the take is kept and the box frees, and arm
+      // nothing for this tap.
+      if (holding && e.pointerId !== activePointerId) {
+        e.preventDefault();
+        cyclog('press.stale', {
+          heldMs: Date.now() - pressAt,
+          why:
+            'the mic was pressed again while a hold was still up: that hold never saw ' +
+            'its finger lift, so it ends here as a release'
+        });
+        activePointerId = null;
+        endRecording('release', 'stale-press');
+        return;
+      }
+      cyclog('press.down.ignored', {holding, why: 'a press is already being read'});
+      return;
+    }
     e.preventDefault();
     activePointerId = e.pointerId;
 
     liveX = e.clientX;
     pressAt = Date.now();
+    cyclog('press.down', {
+      mode: sendButton.dataset.cycSendMode,
+      empty: isEmpty(),
+      chars: getText().length,
+      blocks: blocks.length,
+      focused: document.activeElement === input,
+      pointer: e.pointerType,
+      target: (e.target as Element | null)?.nodeName
+    });
 
     el.classList.add('cyc-pressing');
     buzz(12);
     holdTimer = setTimeout(() => {
       holdTimer = null;
+      cyclog('press.hold', {
+        afterMs: Date.now() - pressAt,
+        empty: isEmpty(),
+        why: 'no release came within the hold time: this press records'
+      });
       beginRecording(false);
     }, HOLD_MS);
   });
@@ -450,8 +490,29 @@ export function createComposerRecordGesture(deps: ComposerRecordGestureDeps) {
   });
   lockChip.addEventListener('click', lockNow);
 
+  // Edges of a press that is being read, for the case where its pointerup
+  // never comes: they say whether the page saw the touch end at all.
+  const seen = (what: string, e: Event) => {
+    if (activePointerId === null) return;
+    cyclog('press.seen', {
+      what,
+      holding,
+      heldMs: Date.now() - pressAt,
+      own: (e as PointerEvent).pointerId === activePointerId || undefined
+    });
+  };
+  document.addEventListener('lostpointercapture', (e) => {
+    if (e.pointerId === activePointerId) seen('lostpointercapture', e);
+  });
+  document.addEventListener('touchend', (e) => seen('touchend', e));
+  document.addEventListener('touchcancel', (e) => seen('touchcancel', e));
+  window.addEventListener('blur', (e) => seen('blur', e));
+
   document.addEventListener('pointerup', (e) => {
-    if (e.pointerId !== activePointerId) return;
+    if (e.pointerId !== activePointerId) {
+      if (activePointerId !== null) seen('pointerup', e);
+      return;
+    }
     activePointerId = null;
     if (holdTimer) {
       clearTimeout(holdTimer);
@@ -492,7 +553,10 @@ export function createComposerRecordGesture(deps: ComposerRecordGestureDeps) {
   });
 
   document.addEventListener('pointercancel', (e) => {
-    if (e.pointerId !== activePointerId) return;
+    if (e.pointerId !== activePointerId) {
+      if (activePointerId !== null) seen('pointercancel', e);
+      return;
+    }
     activePointerId = null;
     if (holdTimer) {
       clearTimeout(holdTimer);

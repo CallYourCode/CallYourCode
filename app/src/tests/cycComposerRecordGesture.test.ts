@@ -177,6 +177,36 @@ describe('press and hold', () => {
     expect(w.spies.onVoiceEnd).toHaveBeenCalledWith('interrupted');
     expect(w.spies.onVoiceCancel).not.toHaveBeenCalled();
   });
+  test('a hold whose release never came is ended by the next press on the mic, keeping the take', () => {
+    // The owner's phone, 2026-10-08 09:19 and 09:53: a press on the send button
+    // armed a hold, then no pointerup or pointercancel for that finger ever
+    // reached the page. The bar, the lock chip and the mic stayed up and every
+    // later press was refused as a second finger, so only a force-close freed it.
+    const w = makeGesture();
+    w.state.empty = false;
+    w.state.text = 'meant to send this';
+    press(w, {x: 300, y: 600}, 7);
+    vi.advanceTimersByTime(400);
+    expect(w.gesture.recordingOwnsButton()).toBe(true);
+    vi.advanceTimersByTime(6000);
+
+    // The finger is long gone; the user taps the mic again.
+    press(w, {x: 300, y: 600}, 8);
+    expect(w.spies.onVoiceEnd).toHaveBeenCalledWith('release');
+    expect(w.spies.onVoiceCancel).not.toHaveBeenCalled();
+    expect(w.el.hasAttribute('data-cyc-recording')).toBe(false);
+    expect(w.gesture.recordingOwnsButton()).toBe(false);
+    // That tap only ended the stuck take: it neither sends nor arms a new one.
+    release(w, {x: 300, y: 600}, 8);
+    vi.advanceTimersByTime(1000);
+    expect(w.spies.onSend).not.toHaveBeenCalled();
+    expect(w.spies.onVoiceStart).toHaveBeenCalledTimes(1);
+
+    // The box works again: a quick tap sends.
+    press(w, {x: 300, y: 600}, 9);
+    release(w, {x: 300, y: 600}, 9);
+    expect(w.spies.onSend).toHaveBeenCalledTimes(1);
+  });
   test('disabled or voice-off presses never arm a take', () => {
     const w1 = makeGesture({isDisabled: () => true});
     press(w1);

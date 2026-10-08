@@ -1,7 +1,7 @@
 import type {FullConfig, FullResult, Reporter, Suite, TestCase} from '@playwright/test/reporter';
 import {filtered, keyOf} from '../guard-common';
 
-const FLOOR = 224;
+const FLOOR = 225;
 
 // Screenshot hygiene, so a green run can also be believed by `git status`:
 // - toHaveScreenshot baselines live in `<spec>-snapshots/` and only change under

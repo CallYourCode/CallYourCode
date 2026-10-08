@@ -399,6 +399,11 @@ class Pipeline {
     const next = await navigator.mediaDevices.getUserMedia({
       audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}
     });
+    cyclog('mic.reacquire.answered', {
+      ms: Math.round(performance.now() - this.lastReacquireAt),
+      pttDown: this.pttDown,
+      live: this.active?.cid
+    });
     this.unbindTracks?.();
     this.ring.stop();
     if (this.srcNode) {
@@ -482,7 +487,21 @@ class Pipeline {
     if (!stream) return;
     const cleanups: Array<() => void> = [];
     for (const t of stream.getAudioTracks()) {
-      const onDead = () => {
+      const onDead = (e: Event) => {
+        const cap = this.active;
+        if (cap) {
+          cyclog('mic.muted-mid-take', {
+            cid: cap.cid,
+            capture: cap.id,
+            event: e.type,
+            heldMs: Math.round(performance.now() - cap.startedAt),
+            why:
+              'the track went quiet while this take records; re-acquiring now would stop ' +
+              "the take's recorder and lose what it heard, so the take keeps going and " +
+              'the next press re-acquires'
+          });
+          return;
+        }
         void this.ensureLive(this.pttDown);
       };
       t.addEventListener('ended', onDead);
