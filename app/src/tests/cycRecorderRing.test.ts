@@ -1,6 +1,8 @@
 import {afterEach, beforeAll, beforeEach, describe, expect, test, vi} from 'vitest';
 class FakeRecorder {
   static instances: FakeRecorder[] = [];
+  // A recorder whose stop() never answers (no final dataavailable, no onstop).
+  static deaf = false;
   static isTypeSupported(m: string): boolean {
     return m === 'audio/webm;codecs=opus';
   }
@@ -18,6 +20,7 @@ class FakeRecorder {
   stop(): void {
     if (this.state === 'inactive') throw new DOMException('InvalidStateError');
     this.state = 'inactive';
+    if (FakeRecorder.deaf) return;
     this.onstop?.();
   }
 
@@ -33,8 +36,9 @@ type RingModule = typeof import('../audio/recorderRing');
 let RecorderRing: RingModule['RecorderRing'];
 let ROTATE_MS: RingModule['ROTATE_MS'];
 let MIME: RingModule['MIME'];
+let STOP_DEADLINE_MS: RingModule['STOP_DEADLINE_MS'];
 beforeAll(async () => {
-  ({RecorderRing, ROTATE_MS, MIME} = await import('../audio/recorderRing'));
+  ({RecorderRing, ROTATE_MS, MIME, STOP_DEADLINE_MS} = await import('../audio/recorderRing'));
 });
 const stream = {} as MediaStream;
 let clock = 0;
@@ -43,6 +47,7 @@ beforeEach(() => {
   clock = 0;
   vi.spyOn(performance, 'now').mockImplementation(() => clock);
   FakeRecorder.instances = [];
+  FakeRecorder.deaf = false;
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -209,6 +214,24 @@ describe('finish: the linger, the drain, the blob', () => {
     expect(r.draining).toBe(0);
     expect((await pa)?.size).toBe(10);
     expect((await pb)?.size).toBe(20);
+  });
+  test('a recorder that never answers its stop still finishes, with the audio it delivered', async () => {
+    FakeRecorder.deaf = true;
+    const r = ring();
+    const rec = FakeRecorder.instances[0];
+    rec.feed(500);
+    const slot = r.freeze()!;
+    let got: Blob | null | 'pending' = 'pending';
+    void r.finish(slot, 600).then((b) => (got = b));
+    tick(600);
+    expect(rec.state).toBe('inactive');
+    await Promise.resolve();
+    expect(got).toBe('pending');
+    tick(STOP_DEADLINE_MS);
+    await Promise.resolve();
+    expect(got).not.toBe('pending');
+    expect((got as unknown as Blob).size).toBe(500);
+    expect(r.draining).toBe(0);
   });
   test('stopLingering (dispose) stops the drain early; assembly still settles', async () => {
     const r = ring();

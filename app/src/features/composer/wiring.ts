@@ -686,8 +686,18 @@ export function createComposerWiring(deps: ComposerWiringDeps) {
       speaker.pause();
       speaker.setBusy(true, 'press');
       pttHolding = true;
+      const askedAt = performance.now();
+      const wasOpen = !!mic.ready;
       void ensureMic()
         .then(() => {
+          // How long the press waited for the mic (a first getUserMedia on a page
+          // can sit behind the OS permission prompt) and whether the press was
+          // still down when it answered.
+          cyclog('press.mic', {
+            ms: Math.round(performance.now() - askedAt),
+            wasOpen,
+            holding: pttHolding
+          });
           if (pttHolding) pipeline.startPTT();
           else speaker.setBusy(false, 'press');
         })

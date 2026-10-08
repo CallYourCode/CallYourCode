@@ -1,9 +1,15 @@
+import {cyclog} from '@/shared/logging';
+
 export const ROTATE_MS = 2000;
 export const TIMESLICE_MS = 200;
 // Opus voice-note bitrate. Speech is intelligible well below this; a 145 s clip
 // lands under 700 KB (a recorder test asserts it), so no single upload window
 // has to carry megabytes.
 export const AUDIO_BITS_PER_SECOND = 32_000;
+// How long a stopped recorder may take to answer (its last dataavailable and
+// onstop). One that never answers still finishes with the chunks it delivered,
+// so a release never holds the mic, the speaker or the clip open on it.
+export const STOP_DEADLINE_MS = 2000;
 
 export type Slot = {
   rec: MediaRecorder | null;
@@ -133,7 +139,9 @@ export class RecorderRing {
     };
     this.lingering.add(rec);
     return new Promise((resolve) => {
+      let assembled = false;
       const assemble = () => {
+        assembled = true;
         this.lingering.delete(rec);
         resolve(chunks.length ? new Blob(chunks, {type: MIME || 'audio/webm'}) : null);
       };
@@ -144,7 +152,20 @@ export class RecorderRing {
           rec.stop();
         } catch {
           assemble();
+          return;
         }
+        setTimeout(() => {
+          if (assembled) return;
+          cyclog('recorder.stop.timeout', {
+            afterMs: STOP_DEADLINE_MS,
+            chunks: chunks.length,
+            bytes: chunks.reduce((n, c) => n + c.size, 0),
+            why:
+              'the recorder never answered its stop; the clip is assembled from the ' +
+              'chunks it delivered so the release finishes'
+          });
+          assemble();
+        }, STOP_DEADLINE_MS);
       };
       if (lingerMs > 0) setTimeout(stop, lingerMs);
       else stop();
