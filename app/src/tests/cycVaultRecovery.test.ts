@@ -15,8 +15,9 @@ vi.mock('../audio/clipVault', () => ({
     vaultUpdates.push({key, patch});
   })
 }));
+const compositions: Record<string, unknown>[] = [];
 vi.mock('../features/composer/persistence/vault', () => ({
-  list: async (): Promise<unknown[]> => []
+  list: async () => compositions
 }));
 vi.mock('../engine/store', () => ({
   get: (id: string) => ({id}),
@@ -68,19 +69,28 @@ const flush = async () => {
 
 const install = () => {
   const restoreVoiceBlock = vi.fn();
+  const putBlocksBack = vi.fn();
   const vaultKeyOf = new WeakMap<File, string>();
   installVaultRecovery({
-    putBlocksBack: vi.fn(),
+    putBlocksBack,
     restoreVoiceBlock,
     clipCid: new WeakMap(),
     vaultKeyOf
   });
-  return {restoreVoiceBlock, vaultKeyOf};
+  return {restoreVoiceBlock, putBlocksBack, vaultKeyOf};
 };
+
+const bytesOf = (b: Blob) =>
+  new Promise<number[]>((resolve) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve([...new Uint8Array(fr.result as ArrayBuffer)]);
+    fr.readAsArrayBuffer(b);
+  });
 
 describe('vault recovery after a reload', () => {
   beforeEach(() => {
     parked.length = 0;
+    compositions.length = 0;
     toasts.length = 0;
     intentRows.length = 0;
     reclaimed.length = 0;
@@ -163,5 +173,37 @@ describe('vault recovery after a reload', () => {
     await flush();
     expect(restoreVoiceBlock).not.toHaveBeenCalled();
     expect(toasts).toEqual([]);
+  });
+
+  // lost-blobs (2026-10-08): the composer re-saves a restored composition at
+  // once, and in WebKit a File read back from IndexedDB is unreadable
+  // (NotFoundError) after its own row is put again in a new process. The box
+  // must get a copy of the bytes, never the File the vault handed back.
+  test('a restored attachment goes back in the box as a copy of its bytes, not the stored File', async () => {
+    const stored = new File([new Uint8Array([1, 2, 3, 4])], 'IMG_4334.png', {
+      type: 'image/png',
+      lastModified: 1791400000000
+    });
+    compositions.push({
+      sessionId: 's1',
+      blocks: [{kind: 'attach', file: stored}],
+      bytes: stored.size,
+      ts: Date.now()
+    });
+    const {putBlocksBack} = install();
+    await flush();
+    expect(putBlocksBack).toHaveBeenCalledTimes(1);
+    const [session, blocks] = putBlocksBack.mock.calls[0] as [
+      string,
+      {kind: string; staged: {file: File}}[]
+    ];
+    expect(session).toBe('s1');
+    expect(blocks.map((b) => b.kind)).toEqual(['attach']);
+    const file = blocks[0].staged.file;
+    expect(file).not.toBe(stored);
+    expect(file.name).toBe('IMG_4334.png');
+    expect(file.type).toBe('image/png');
+    expect(file.lastModified).toBe(1791400000000);
+    expect(await bytesOf(file)).toEqual([1, 2, 3, 4]);
   });
 });

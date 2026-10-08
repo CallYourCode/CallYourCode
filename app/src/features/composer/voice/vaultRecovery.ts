@@ -21,6 +21,37 @@ export function installVaultRecovery({
   void recoverVault({putBlocksBack, restoreVoiceBlock, clipCid, vaultKeyOf});
 }
 
+/* A File read back from IndexedDB dies when the row holding it is put again
+ * under the same key in a new app process: WebKit then fails every read of it
+ * with NotFoundError "The object can not be found here." (lost-blobs,
+ * 2026-10-08, reproduced in WebKit and iOS Simulator Safari). The composer
+ * re-saves a restored composition at once, so it holds a copy of the bytes,
+ * never the File the vault handed back. */
+async function ownCopy(file: File, sessionId: string): Promise<File> {
+  try {
+    const bytes =
+      typeof file.arrayBuffer === 'function'
+        ? await file.arrayBuffer()
+        : await new Promise<ArrayBuffer>((resolve, reject) => {
+            // a jsdom Blob (the vitest environment) has no arrayBuffer
+            const fr = new FileReader();
+            fr.onload = () => resolve(fr.result as ArrayBuffer);
+            fr.onerror = () => reject(fr.error);
+            fr.readAsArrayBuffer(file);
+          });
+    return new File([bytes], file.name, {type: file.type, lastModified: file.lastModified});
+  } catch (e) {
+    cyclog('composition.vault.unreadable', {
+      session: sessionId,
+      name: file.name,
+      bytes: file.size,
+      err: String(e),
+      why: 'the attachment the vault stored cannot be read back; its chip goes back in the box as is'
+    });
+    return file;
+  }
+}
+
 async function recoverVault({
   putBlocksBack,
   restoreVoiceBlock,
@@ -62,7 +93,7 @@ async function recoverVault({
         blocks.push({
           kind: 'attach',
           staged: {
-            file: block.file,
+            file: await ownCopy(block.file, composition.sessionId),
             upload: null,
             progress: 0,
             done: false,
