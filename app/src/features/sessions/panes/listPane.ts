@@ -847,6 +847,9 @@ export function createListPane(deps: ListPaneDeps) {
       return n > 0 ? `${n} agent${n === 1 ? '' : 's'}` : null;
     },
 
+    // The owner's star, a per-chat setting like mute and the bell.
+    starred: (s) => !!(s as CycEngineSession).settings?.starred,
+
     onOpen: (id) =>
       sessionState.appConversationMode && dataState.mode === 'live'
         ? deps.rowAudioClick(id)
@@ -896,6 +899,17 @@ export function createListPane(deps: ListPaneDeps) {
                   }
                 }
               ]),
+          // Saved with the chat's other settings on the engine, so every
+          // device shows the star; the list order does not change.
+          {
+            icon: s.settings?.starred ? ('starOff' as const) : ('star' as const),
+            text: s.settings?.starred ? 'Unstar' : 'Star',
+            onClick: () => {
+              void engine.setSessionSettings(id, {starred: !s.settings?.starred}).then((ok) => {
+                if (!ok) toast('Could not reach the engine: the star for this chat is unchanged');
+              });
+            }
+          },
           {
             icon: 'edit',
             text: 'Rename',

@@ -76,6 +76,8 @@ export type EngineSessionSettings = {
   muted?: boolean;
   notify?: boolean;
   activity?: boolean;
+  /** The owner's list star: a mark on the row, no global default. */
+  starred?: boolean;
 };
 
 export type EngineSession = {

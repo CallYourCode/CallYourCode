@@ -51,6 +51,7 @@ vi.mock('../engine/store', () => ({
   setMergedListOrder: vi.fn(async () => true),
   setReplyDial: vi.fn(async () => {}),
   setSessionUnread: vi.fn(async () => true),
+  setSessionSettings: vi.fn(async () => true),
   startSession: vi.fn(async () => ({paneId: null, why: 'no'})),
   startSettingsSync: vi.fn()
 }));
@@ -882,6 +883,35 @@ describe('agent chips (own settings toggles, host chip stays merged-only)', () =
     const bare = {id: 'b', name: 'b'} as unknown as CycSession;
     expect(opts.harnessChip(bare)).toBeNull();
     expect(opts.modelChip(bare)).toBeNull();
+  });
+});
+
+describe('the row menu star', () => {
+  const menuFor = (settings?: Record<string, boolean>) => {
+    fake.sessions = [{id: 'a', name: 'a', unread: 0, lastActivity: 1, settings}];
+    mk();
+    const opts = fake.listOpts as unknown as {
+      onRowMenu: (id: string, at: MouseEvent) => void;
+      starred: (s: CycSession) => boolean;
+    };
+    opts.onRowMenu('a', new MouseEvent('contextmenu'));
+    const items = vi.mocked(openMenu).mock.calls[0]![0] as {text: string; onClick(): void}[];
+    return {opts, items};
+  };
+  test('an unstarred row offers Star, which saves starred:true through the settings patch', () => {
+    const {opts, items} = menuFor({});
+    expect(opts.starred(fake.sessions[0] as unknown as CycSession)).toBe(false);
+    expect(items.map((i) => i.text)).toContain('Star');
+    expect(items.map((i) => i.text)).not.toContain('Unstar');
+    items.find((i) => i.text === 'Star')!.onClick();
+    expect(store.setSessionSettings).toHaveBeenCalledWith('a', {starred: true});
+  });
+  test('a starred row offers Unstar, which saves starred:false', () => {
+    const {opts, items} = menuFor({starred: true});
+    expect(opts.starred(fake.sessions[0] as unknown as CycSession)).toBe(true);
+    expect(items.map((i) => i.text)).not.toContain('Star');
+    items.find((i) => i.text === 'Unstar')!.onClick();
+    expect(store.setSessionSettings).toHaveBeenCalledWith('a', {starred: false});
   });
 });
 

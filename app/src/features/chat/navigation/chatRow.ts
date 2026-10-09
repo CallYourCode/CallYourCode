@@ -17,12 +17,28 @@ import {
   SESSION_STATUS,
   SESSION_FILL,
   SESSION_SELECTED_ROW,
+  SESSION_STAR_INK,
+  SESSION_STAR_SELECTED_ROW,
   SESSION_STATE_BADGE_BG
 } from '@/features/sessions/sessionsPaint';
 
 const ROW_STATE: Record<PresentationTheme, string> = {
   day: 'fine:hover:bg-[#f2f2f3]! fine:active:bg-[#f2f2f3]! [&.cyc-drag-active]:bg-[#ffffff]!',
   night: 'fine:hover:bg-[#17171a]! fine:active:bg-[#17171a]! [&.cyc-drag-active]:bg-[#17171a]!'
+};
+
+// A starred row swaps ROW_STATE for these: a soft gold wash at rest and a
+// deeper one on hover, in place of the grey (see SESSION_STAR_INK for why
+// night mixes a warmer amber, a little stronger).
+const STAR_ROW_STATE: Record<PresentationTheme, string> = {
+  day:
+    'bg-[color-mix(in_srgb,#e0a526_10%,var(--cyc-surface))] ' +
+    'fine:hover:bg-[color-mix(in_srgb,#e0a526_15%,var(--cyc-surface))]! ' +
+    'fine:active:bg-[color-mix(in_srgb,#e0a526_15%,var(--cyc-surface))]! [&.cyc-drag-active]:bg-[#ffffff]!',
+  night:
+    'bg-[color-mix(in_srgb,#ffae1a_11%,var(--cyc-surface))] ' +
+    'fine:hover:bg-[color-mix(in_srgb,#ffae1a_16%,var(--cyc-surface))]! ' +
+    'fine:active:bg-[color-mix(in_srgb,#ffae1a_16%,var(--cyc-surface))]! [&.cyc-drag-active]:bg-[#17171a]!'
 };
 
 const AVATAR_CLASS =
@@ -48,6 +64,10 @@ export type ChatRowOpts = {
    *  while the agent has subagents running, so a busy chat never looks idle.
    *  It is the same count the open chat's agents bar shows. */
   subagentsChip?: string;
+
+  /** The owner's star on this chat: a gold star after the name and a gold
+   *  wash on the row. */
+  starred?: boolean;
 
   now?: number;
 };
@@ -162,6 +182,8 @@ const ROW_CHIP_UTILS =
 const SUBTITLE_CLASS =
   'cyc-list-row-subtitle relative pointer-events-none overflow-hidden text-ellipsis whitespace-nowrap min-w-0 flex-[0_1_auto] text-[color:var(--cyc-text-muted)]';
 const MUTE_ICON_UTILS = 'flex-none ms-0.5 text-[1.125rem] text-[var(--cyc-session-quiet-color)]';
+// Filled, not the outline the menu shows; the ink is painted per theme.
+const STAR_ICON_UTILS = 'cyc-list-row-star flex-none ms-1 text-[0.9375rem] [&_svg]:fill-current';
 /* pointer-events-none, like the title and subtitle: the unread badge is
  * repainted by live broadcasts, and a tap that lands ON it while it is being
  * replaced retargets the click to the list background, which reads as
@@ -326,6 +348,11 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
       chips.push(chip);
     }
     chipsWrap.replaceChildren(...chips);
+    if (o.starred) {
+      const star = makeIcon('star', STAR_ICON_UTILS);
+      star.setAttribute('aria-label', 'Starred');
+      kids.push(star);
+    }
     if (ss.muted) kids.push(makeIcon('speakerMuted', 'cyc-session-mute-icon ' + MUTE_ICON_UTILS));
     if (o.notifyOff) {
       const bell = makeIcon(
@@ -357,6 +384,8 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
     '|' +
     (o.modelChip ?? '') +
     '|' +
+    (o.starred ? 1 : 0) +
+    '|' +
     (ss.muted ? 1 : 0) +
     '|' +
     (o.notifyOff ? 1 : 0);
@@ -364,15 +393,25 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
 
   let stateTokens: string[] = [];
   const paintRowState = (theme: PresentationTheme) => {
+    const starred = a.classList.contains('cyc-starred');
     a.classList.remove(...stateTokens);
-    stateTokens = ROW_STATE[theme].split(' ');
+    stateTokens = (starred ? STAR_ROW_STATE : ROW_STATE)[theme].split(' ');
     a.classList.add(...stateTokens);
 
     const active = a.classList.contains('active');
     const muted = a.classList.contains('cyc-muted');
 
-    if (active) a.style.setProperty('background-color', SESSION_SELECTED_ROW[theme], 'important');
+    if (active)
+      a.style.setProperty(
+        'background-color',
+        (starred ? SESSION_STAR_SELECTED_ROW : SESSION_SELECTED_ROW)[theme],
+        'important'
+      );
     else a.style.removeProperty('background-color');
+
+    a.querySelectorAll<HTMLElement>('.cyc-list-row-star').forEach((star) => {
+      star.style.color = SESSION_STAR_INK[theme];
+    });
 
     const unread = a.querySelector<HTMLElement>('.cyc-session-badge-unread');
     if (unread)
@@ -423,6 +462,7 @@ export function chatRow(s: CycSession, opts: ChatRowOpts = {}): HTMLAnchorElemen
     const t = timeOf(ss);
     if (time.textContent !== t) time.textContent = t;
     a.classList.toggle('cyc-muted', !!ss.muted);
+    a.classList.toggle('cyc-starred', !!o.starred);
     a.classList.toggle('cyc-list-row-quiet', !!o.notifyOff);
     a.classList.toggle('active', !!o.active);
     a.classList.toggle('cyc-dead', !!o.dead);

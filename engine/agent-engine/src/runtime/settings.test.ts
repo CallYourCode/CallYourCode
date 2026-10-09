@@ -141,6 +141,31 @@ test("overrides round-trip the wire and survive a restart", async () => {
     .toEqual({ muted: true, notify: false });
 });
 
+test("the list star rides the same patch: broadcast, on disk, back after a restart",
+  async () => {
+    /* The star is a mark on the chat's row, set from any device and seen on
+     * every other one. It is one more key in the same settings record as mute
+     * and the bell, so it gets the same three guarantees. */
+    const c = await boot();
+    const client = c.client();
+    client.clear();
+    const res = await post({ starred: true });
+    expect(res.status).toBe(200);
+    expect((await res.json() as any).settings).toEqual({ starred: true });
+    expect(client.sessionRow(wireId(PANE))?.settings,
+      "the star write broadcast nothing, so his other device never sees it")
+      .toEqual({ starred: true });
+    // a stringly-typed star is refused like any other setting, and keeps the star
+    expect((await post({ starred: "yes" })).status).toBe(400);
+    expect(row().settings).toEqual({ starred: true });
+
+    await until(async () => (await metaForSession(c.root, PANE_SID))?.settings?.starred === true,
+      { what: "the star to reach the agent record on disk" });
+    await c.reset();
+    await until(() => !!c.byHandle(PANE), { what: "the pane after the restart" });
+    expect(row().settings, "the star did not survive the restart").toEqual({ starred: true });
+  });
+
 test("a stored speed override is dropped, not just ignored", async () => {
   /* An ignored key is a second answer waiting to be read again. It is erased at
    * LOAD, so it never reaches the wire, and the next meta save takes it off

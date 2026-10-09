@@ -272,7 +272,7 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
    * sessions frame, and local inspection is `cyc`'s job. Only the POST (the
    * write the app makes over the tunnel) remains below. */
 
-  /* This session's other overrides: mute and the bell.
+  /* This session's other overrides: mute, the bell, and the list star.
    *
    * A partial update: only the keys sent change, `null` clears one back to
    * "follow the global default". The voice override above keeps its own
@@ -282,7 +282,7 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
    * switch now), and a client that sends only those gets the 400 below rather
    * than a silent 200 over a store that kept nothing. */
   if (req.method === "POST" && path.startsWith("/session/") && path.endsWith("/settings")) {
-    /* A session preference (mute / the bell) written by an enrolled device.
+    /* A session preference (mute / the bell / the star) written by an enrolled device.
      * It used to be the one exemption from the localhost gate; it takes the
      * same requireOwner as every other mutating route now (the enrolled device
      * reaches it over the sealed tunnel, the host over loopback), so the
@@ -296,7 +296,7 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
     if (!got.ok) return got.response;
     const body = got.value as Record<string, unknown>;
     const patch: Partial<Record<keyof SessionSettings, boolean | null>> = {};
-    for (const k of ["muted", "notify"] as const) {
+    for (const k of ["muted", "notify", "starred"] as const) {
       if (typeof body[k] === "boolean" || body[k] === null) patch[k] = body[k] as boolean | null;
     }
     if (!Object.keys(patch).length) return json({ ok: false, error: "nothing to set" }, 400);
