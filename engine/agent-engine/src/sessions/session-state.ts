@@ -143,7 +143,9 @@ export function resolveSession(key: string): Session | undefined {
 /* ------------------------------------------------- the ONE per-id record */
 
 export type PhotoRec = { file: string; mime: string; ts: number };
-export type SessionSettings = { muted?: boolean; notify?: boolean };
+/** `starred` is a mark the owner puts on a chat in the list (a star and a
+ *  gold wash on the row); unlike mute and the bell it has no global default. */
+export type SessionSettings = { muted?: boolean; notify?: boolean; starred?: boolean };
 export type SeenRec = { doneSeq: number; seenDoneSeq: number };
 
 /** Everything this engine keeps ABOUT an agent that is not the live Session
@@ -241,7 +243,7 @@ export function photoOf(id: string): string | null {
   return rec ? `/session-photo/${encodeURIComponent(id)}?v=${rec.ts}` : null;
 }
 
-// ---- display: settings (mute + the bell) ----------------------------------
+// ---- display: settings (mute + the bell + the star) ---------------------
 
 export function settingsOf(sessionId: string): SessionSettings {
   return peek(sessionId)?.display.settings ?? {};
@@ -479,6 +481,7 @@ export async function loadSessionState(d: SessionStateDeps): Promise<void> {
       const st: SessionSettings = {};
       if (typeof o.muted === "boolean") st.muted = o.muted;
       if (typeof o.notify === "boolean") st.notify = o.notify;
+      if (typeof o.starred === "boolean") st.starred = o.starred;
       if (Object.keys(st).length) stateOf(id).display.settings = st;
     }
     const r = meta.read;

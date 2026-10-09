@@ -1200,7 +1200,9 @@ export function isMuted(sessionId: string): boolean {
   return !!sessions.get(sessionId)?.muted;
 }
 
-type SessionSettingsPatch = Partial<Record<'muted' | 'notify' | 'activity', boolean | null>>;
+type SessionSettingsPatch = Partial<
+  Record<'muted' | 'notify' | 'activity' | 'starred', boolean | null>
+>;
 
 function patched(base: EngineSessionSettings, patch: SessionSettingsPatch): EngineSessionSettings {
   const next = {...base};

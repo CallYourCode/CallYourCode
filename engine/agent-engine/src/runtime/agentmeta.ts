@@ -56,7 +56,7 @@ export type AgentMeta = {
   name?: string;
   voice?: string;
   photo?: { file: string; mime: string; ts: number };
-  settings?: { muted?: boolean; notify?: boolean };
+  settings?: { muted?: boolean; notify?: boolean; starred?: boolean };
   read?: AgentRead;
   seeded?: boolean;
   /** content-proved predecessors of the current session (lineage.ts) */

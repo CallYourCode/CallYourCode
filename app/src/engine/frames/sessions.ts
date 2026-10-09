@@ -25,6 +25,7 @@ function parseSession(s: any, ctx: FrameContext): EngineSession {
       if (typeof o.muted === 'boolean') es.settings.muted = o.muted;
       if (typeof o.notify === 'boolean') es.settings.notify = o.notify;
       if (typeof o.activity === 'boolean') es.settings.activity = o.activity;
+      if (typeof o.starred === 'boolean') es.settings.starred = o.starred;
     }
 
     es.photo = typeof s.photo === 'string' && s.photo ? ctx.engineObjectUrl(s.photo) : null;

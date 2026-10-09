@@ -246,6 +246,7 @@ export function createRenderHub(deps: RenderHubDeps) {
       es.heardTs ?? 0, // row audio badge speakable vs finished
       engine.activityMark(s) ?? '', // the dot the row is handed (folds the global toggle too)
       engine.effectiveNotify(es) ? 1 : 0, // notifyOff bell (per-session pref + global default)
+      es.settings?.starred ? 1 : 0, // the list star + gold wash
       mergeTabs() ? (tabLabelOf(s.id) ?? '') : '', // merged-tabs chip
       mergeTabs() ? 1 : 0, // the merged gate the HOST chip paints under
       (rowChipShown('harness') ? 2 : 0) + (rowChipShown('model') ? 1 : 0), // the settings toggles the harness/model chips paint under
