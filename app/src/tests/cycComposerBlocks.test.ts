@@ -1,15 +1,32 @@
 import {beforeEach, describe, expect, test, vi} from 'vitest';
-vi.hoisted(() => {
+const {toast, cyclog} = vi.hoisted(() => {
   (globalThis as any).indexedDB = {open: () => ({})};
+  return {toast: vi.fn(), cyclog: vi.fn()};
 });
+vi.mock('../components/widgets', () => ({toast}));
+vi.mock('../shared/logging', async (orig) => ({
+  ...(await orig<typeof import('../shared/logging')>()),
+  cyclog
+}));
 import {
   createComposerBlocks,
   type ComposerBlocksDeps
 } from '../features/composer/components/composerBlocks';
 
+// jsdom's Blob has no arrayBuffer(); read through FileReader as browsers would.
+Blob.prototype.arrayBuffer ??= function (this: Blob) {
+  return new Promise<ArrayBuffer>((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result as ArrayBuffer);
+    r.onerror = () => rej(r.error);
+    r.readAsArrayBuffer(this);
+  });
+};
 beforeEach(() => {
   (URL as any).createObjectURL = vi.fn(() => 'blob:test');
   (URL as any).revokeObjectURL = vi.fn();
+  toast.mockClear();
+  cyclog.mockClear();
 });
 function makeBlocks(over: Partial<ComposerBlocksDeps> = {}) {
   const input = document.createElement('div');
@@ -105,6 +122,71 @@ describe('attachments', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(chip.classList.contains('cyc-attach-failed')).toBe(false);
+  });
+});
+describe('picking a file', () => {
+  const pick = (picker: HTMLInputElement, files: File[]) => {
+    Object.defineProperty(picker, 'files', {value: files, configurable: true});
+    picker.dispatchEvent(new Event('change'));
+  };
+  const picked = () => cyclog.mock.calls.filter(([event]) => event === 'attach.picked');
+  const unreadable = (name = 'IMG_0001.jpg') => {
+    const f = new File(['xyz'], name, {type: 'image/jpeg'});
+    f.arrayBuffer = () =>
+      Promise.reject(
+        new DOMException(
+          'The requested file could not be read, typically due to permission problems',
+          'NotReadableError'
+        )
+      );
+    return f;
+  };
+  test('a readable photo is logged and staged as before', async () => {
+    const {api} = makeBlocks();
+    pick(api.imagePicker, [png('holiday.png')]);
+    await vi.waitFor(() => expect(picked()).toHaveLength(1));
+    const fields = picked()[0][1];
+    expect(fields).toMatchObject({
+      picker: 'image',
+      nameLen: 11,
+      ext: 'png',
+      type: 'image/png',
+      size: 1,
+      sliceBytes: 1,
+      bytesRead: 1,
+      sizeMatch: true,
+      readOk: true
+    });
+    expect(fields).not.toHaveProperty('err');
+    expect(JSON.stringify(fields)).not.toContain('holiday');
+    expect(api.staged()).toHaveLength(1);
+    const chip = api.blocksRow.querySelector('.cyc-attach-chip');
+    expect(chip.querySelector('.cyc-attach-name').textContent).toBe('holiday.png');
+    expect(chip.classList.contains('cyc-attach-failed')).toBe(false);
+    expect(toast).not.toHaveBeenCalled();
+  });
+  test('a photo whose bytes cannot be read is logged, not staged, and the toast says so', async () => {
+    const {api} = makeBlocks();
+    pick(api.imagePicker, [unreadable(), png()]);
+    await vi.waitFor(() => expect(picked()).toHaveLength(2));
+    const bad = picked().find(([, f]) => f.readOk === false)[1];
+    expect(bad).toMatchObject({picker: 'image', ext: 'jpg', size: 3, readOk: false});
+    expect(bad.err).toMatch(/^NotReadableError: The requested file could not be read/);
+    expect(bad).not.toHaveProperty('bytesRead');
+    expect(api.staged().map((s) => s.file.name)).toEqual(['shot.png']);
+    expect(api.blocksRow.querySelectorAll('.cyc-attach-chip')).toHaveLength(1);
+    expect(toast).toHaveBeenCalledTimes(1);
+    expect(toast.mock.calls[0][0]).toBe(
+      "This photo can't be read on this phone. Try picking it with File instead."
+    );
+  });
+  test('an unreadable file from the File picker does not point back at File', async () => {
+    const {api} = makeBlocks();
+    pick(api.filePicker, [unreadable('scan.jpg')]);
+    await vi.waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+    expect(picked()[0][1]).toMatchObject({picker: 'file', readOk: false});
+    expect(api.staged()).toHaveLength(0);
+    expect(toast.mock.calls[0][0]).toBe("This file can't be read on this phone.");
   });
 });
 describe('quotes and replies', () => {

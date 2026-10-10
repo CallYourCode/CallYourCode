@@ -20,6 +20,8 @@ import {openMenu, openSheet, type CycMenuItem} from '../../../components/popupMe
 import {touchCapable} from '@/shared/capabilities';
 import {WebAudioClip} from '../../../audio/webAudioClip';
 import {isHeic, heicToJpegForUpload} from '@/features/media/heic';
+import {cyclog} from '@/shared/logging';
+import {toast} from '../../../components/widgets';
 import {
   COMPOSER_ICON_TRANSITION,
   type ComposerBlock,
@@ -30,6 +32,42 @@ import {
 } from './composerModel';
 
 const SHEET_MAX_WIDTH = 900;
+
+// A picked file larger than this only gets the one-byte probe, not a full read.
+const FULL_READ_MAX = 50 * 1024 * 1024;
+
+// Some Android Chrome pickers hand over a File whose bytes cannot be read at
+// all (NotReadableError), which only surfaced later as a vault and upload
+// failure. Read it once at pick time, log what came back, and report whether
+// the bytes are there.
+const probePickedFile = async (f: File, picker: 'image' | 'file'): Promise<boolean> => {
+  const dot = f.name.lastIndexOf('.');
+  const fields: Record<string, unknown> = {
+    picker,
+    nameLen: f.name.length,
+    ext: dot > 0 ? f.name.slice(dot + 1).toLowerCase().slice(0, 8) : '',
+    type: f.type,
+    size: f.size,
+    ageS: f.lastModified ? Math.round((Date.now() - f.lastModified) / 1000) : null
+  };
+  let readOk = false;
+  try {
+    fields.sliceBytes = (await f.slice(0, 1).arrayBuffer()).byteLength;
+    if (f.size > FULL_READ_MAX) {
+      fields.full = 'skipped';
+    } else {
+      const bytesRead = (await f.arrayBuffer()).byteLength;
+      fields.bytesRead = bytesRead;
+      fields.sizeMatch = bytesRead === f.size;
+    }
+    readOk = true;
+  } catch (e) {
+    fields.err =
+      e instanceof Error ? `${e.name}: ${e.message}`.slice(0, 120) : String(e).slice(0, 120);
+  }
+  cyclog('attach.picked', {...fields, readOk});
+  return readOk;
+};
 
 // Chip fills. `!` beats the base light-secondary utility.
 const CHIP_BG_PRIMARY: Record<PresentationTheme, string> = {
@@ -599,17 +637,29 @@ export function createComposerBlocks(deps: ComposerBlocksDeps) {
     }
   };
 
-  const takeFile = (picker: HTMLInputElement) => {
+  const takeFile = async (picker: HTMLInputElement) => {
     const files = Array.from(picker.files ?? []);
     picker.value = '';
     if (!files.length) return;
 
-    for (const f of files) stage(f);
+    const from = picker === imagePicker ? 'image' : 'file';
+    const readable = await Promise.all(files.map((f) => probePickedFile(f, from)));
+    files.forEach((f, i) => {
+      if (readable[i]) stage(f);
+    });
+    if (readable.includes(false)) {
+      toast(
+        from === 'image'
+          ? "This photo can't be read on this phone. Try picking it with File instead."
+          : "This file can't be read on this phone.",
+        6000
+      );
+    }
 
     if (!touchCapable) input.focus({preventScroll: true});
   };
-  filePicker.addEventListener('change', () => takeFile(filePicker));
-  imagePicker.addEventListener('change', () => takeFile(imagePicker));
+  filePicker.addEventListener('change', () => void takeFile(filePicker));
+  imagePicker.addEventListener('change', () => void takeFile(imagePicker));
 
   const attachItems = (): CycMenuItem[] => [
     {icon: 'image', text: 'Photo or Video', onClick: () => imagePicker.click()},
