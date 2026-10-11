@@ -20,7 +20,12 @@ import {
 import {openMenu} from '@/components/popupMenu';
 import {createHintsCard} from '@/components/hintsCard';
 import RowSortable from '@/features/sessions/controls/rowSort';
-import {applyCycTheme, currentCycTheme, type CycThemeName} from '@/features/settings/preferences';
+import {
+  applyCycTheme,
+  currentCycTheme,
+  storedCycTheme,
+  type CycThemeChoice
+} from '@/features/settings/preferences';
 import {
   KEYMAP,
   binding as keyBinding,
@@ -129,17 +134,28 @@ export function createSettingsPane(deps: SettingsPaneDeps) {
 
   const settingsHeader = paneHeader('Settings', () => deps.setSettingsOpen(false)).el;
 
+  // Match device theme ON: the Theme toggle shows the effective theme, disabled.
+  const followingDevice = storedCycTheme() === 'auto';
+  const deviceToggle = toggle({
+    checked: followingDevice,
+    onChange: (checked) => setTheme(checked ? 'auto' : currentCycTheme())
+  });
   const nightToggle = toggle({
     checked: currentCycTheme() === 'night',
+    disabled: followingDevice,
     onChange: (checked) => setTheme(checked ? 'night' : 'day')
   });
 
-  function setTheme(name: CycThemeName) {
-    applyCycTheme(name);
-    nightToggle.set(name === 'night');
-
-    deps.paintPluginCards();
+  function setTheme(choice: CycThemeChoice) {
+    applyCycTheme(choice);
+    deviceToggle.set(choice === 'auto');
+    nightToggle.setDisabled(choice === 'auto');
   }
+  // Every theme change, including a device flip while auto, lands here.
+  registerThemePainter(settingsPane, (theme) => {
+    nightToggle.set(theme === 'night');
+    deps.paintPluginCards();
+  });
 
   const saveFailed = () => toast('Not saved: nothing was changed');
 
@@ -723,6 +739,13 @@ export function createSettingsPane(deps: SettingsPaneDeps) {
   };
   rebuildToolbarSettings();
 
+  const deviceThemeRow = srow({
+    icon: 'phone',
+    title: 'Match device theme',
+    subtitle: 'follows this phone or computer',
+    rightContent: deviceToggle.el
+  });
+
   const themeRow = srow({
     icon: 'darkMode',
     title: 'Theme',
@@ -902,6 +925,7 @@ export function createSettingsPane(deps: SettingsPaneDeps) {
   const thisDeviceSection = settingsCard(
     {heading: 'Settings'},
     pushRow,
+    deviceThemeRow,
     themeRow,
     sortRow,
     mergeRow,

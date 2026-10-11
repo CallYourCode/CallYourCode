@@ -3,6 +3,8 @@ import {setPresentationTheme} from '@/components/presentation';
 import {closeForClear} from '@/engine/store/rows/rowStore';
 
 export type CycThemeName = 'day' | 'night';
+// 'auto' follows the device's prefers-color-scheme, live.
+export type CycThemeChoice = CycThemeName | 'auto';
 type Rgb = [number, number, number];
 const hexToRgb = (hex: string): Rgb => {
   const n = parseInt(hex.replace('#', ''), 16);
@@ -114,7 +116,36 @@ function extraVars(name: CycThemeName): {
     '--cyc-overflow-active': p.scrollActive
   };
 }
-export function applyCycTheme(name: CycThemeName, element: HTMLElement = document.documentElement) {
+const DEVICE_DARK = '(prefers-color-scheme: dark)';
+let deviceQuery: MediaQueryList | null = null;
+const onDeviceChange = () => applyCycTheme('auto');
+export const deviceCycTheme = (): CycThemeName => {
+  try {
+    return window.matchMedia(DEVICE_DARK).matches ? 'night' : 'day';
+  } catch {
+    return 'day';
+  }
+};
+// While the choice is 'auto', an OS light/dark switch re-runs applyCycTheme so
+// every theme painter repaints at once; any other choice drops the listener.
+function followDevice(on: boolean) {
+  if (on && !deviceQuery) {
+    try {
+      deviceQuery = window.matchMedia(DEVICE_DARK);
+      deviceQuery.addEventListener?.('change', onDeviceChange);
+    } catch {
+      deviceQuery = null;
+    }
+  } else if (!on && deviceQuery) {
+    deviceQuery.removeEventListener?.('change', onDeviceChange);
+    deviceQuery = null;
+  }
+}
+export function applyCycTheme(
+  choice: CycThemeChoice,
+  element: HTMLElement = document.documentElement
+) {
+  const name = choice === 'auto' ? deviceCycTheme() : choice;
   const vars = {...compatVars(name), ...extraVars(name)};
   for (const k in vars) element.style.setProperty(k, vars[k]);
   const {highlight} = PALETTE[name];
@@ -126,15 +157,16 @@ export function applyCycTheme(name: CycThemeName, element: HTMLElement = documen
   setPresentationTheme(name);
   paintAllChatWallpapers(dark);
   try {
-    localStorage.setItem('cyc-skin', name);
+    localStorage.setItem('cyc-skin', choice);
   } catch {}
+  followDevice(choice === 'auto');
 }
 export const currentCycTheme = (): CycThemeName =>
   document.documentElement.dataset.theme === 'dark' ? 'night' : 'day';
-export const storedCycTheme = (): CycThemeName | null => {
+export const storedCycTheme = (): CycThemeChoice | null => {
   try {
     const v = localStorage.getItem('cyc-skin');
-    return v === 'day' || v === 'night' ? v : null;
+    return v === 'day' || v === 'night' || v === 'auto' ? v : null;
   } catch {
     return null;
   }
