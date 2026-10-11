@@ -1,7 +1,7 @@
 import glyphsAUrl from '../assets/glyphs-a.svg?url';
 import {installCodeBlockActions} from '@/features/code/viewer';
 import {installCodeCopy} from '@/features/code/viewer';
-import {applyCycTheme, currentCycTheme, storedCycTheme} from '@/features/settings/preferences';
+import {applyCycTheme, storedCycTheme} from '@/features/settings/preferences';
 import {installPresentationReactivity} from '../components/presentation';
 import {keyboardInsetFrom} from './keyboardInset';
 import {toast} from '../components/widgets';
@@ -190,7 +190,8 @@ export function installShell(root: HTMLElement): () => void {
     }
   }
 
-  applyCycTheme(storedCycTheme() ?? currentCycTheme());
+  // Nothing stored (a fresh device) starts on Match device theme.
+  applyCycTheme(storedCycTheme() ?? 'auto');
 
   // painters repaint on resize and pointer changes. The shell owns this for the
   // life of the page.
