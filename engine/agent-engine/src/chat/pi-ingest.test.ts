@@ -22,6 +22,7 @@ let sessions: Map<string, IngestSession>;
 let appended: SessionRec[];
 let broadcasts: number;
 let liveCb: ((b: OverlayBatch) => void) | null;
+let logged: { event: string; fields: Record<string, unknown> }[];
 
 function mkPiSession(): IngestSession {
   // a pi pane: no claudeSessionId, keyed by its harness id
@@ -38,6 +39,7 @@ beforeEach(() => {
   appended = [];
   broadcasts = 0;
   liveCb = null;
+  logged = [];
   resetChatlog();
   resetIngest();
   initChatlog({
@@ -62,7 +64,7 @@ beforeEach(() => {
     transcriptFile: () => ({ path: "/fake/pi.jsonl", sessionId: SID }),
     tailOf: () => undefined,
     setTail: () => {},
-    log: () => {},
+    log: (event, fields) => { logged.push({ event, fields }); },
     now: () => 5_000,
   });
 });
@@ -191,6 +193,17 @@ describe("a status frame drives working/idle", () => {
   test("an identity (pi.session) frame is not a log row", () => {
     const s = mkPiSession();
     expect(applyPiFrame("ag-pi", { t: "pi.session", sessionId: "x", cwd: "/w", model: "grok-4.6" })).toBe(false);
+    expect(s.log.length).toBe(0);
+  });
+});
+
+describe("a compaction.guarded frame is a journal line", () => {
+  test("it logs compaction.guarded with the agent and the numbers, and adds no row", () => {
+    const s = mkPiSession();
+    expect(applyPiFrame("ag-pi",
+      { t: "pi.event", kind: "compaction.guarded", tokens: 20000, window: 200000, reserve: 200000 })).toBe(false);
+    expect(logged).toEqual([{ event: "compaction.guarded",
+      fields: { agent: "pi", tokens: 20000, window: 200000, reserve: 200000 } }]);
     expect(s.log.length).toBe(0);
   });
 });

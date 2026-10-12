@@ -16,6 +16,7 @@
 //     kind:"prompt"|"reply"  text            a user/assistant message
 //     kind:"tool"            tool, text      a tool call
 //     kind:"status"          status          "working" | "idle"
+//     kind:"compaction.guarded" tokens, window, reserve   an early compaction cancelled
 //
 // STABLE IDS. A message/tool frame carries `id`, the SAME durable id pi writes
 // to the transcript record, so the engine consumer dedupes a frame against the
@@ -316,6 +317,32 @@ function ownsPane(argv, stdoutIsTTY) {
 // a test seam: CYC_PI_OWNS_PANE=1 stands in for the pane's terminal
 const ownsThisPane = () => process.env.CYC_PI_OWNS_PANE === "1" || ownsPane();
 
+/** THE COMPACTION GUARD. pi compacts on threshold when tokens > window -
+ *  reserveTokens, and reserveTokens is an absolute number per model key in
+ *  ~/.pi/agent/settings.json. The owner's claude-bridge reserve of 200000 is
+ *  right on a 1M window but makes the same model on its 200K fallback window
+ *  compact at 0 tokens, every turn. So a THRESHOLD compaction below 60% of the
+ *  model's real window is a mis-set threshold, not a full context: cancel it.
+ *  Never manual (/compact) or overflow (the provider said it is full). An
+ *  unknown window decides nothing. Answers the report fields to cancel, or null. */
+const GUARD_MIN_FILL = 0.6;
+
+function compactionGuard(event, ctx) {
+  if (!event || event.reason !== "threshold") return null;
+  const prep = event.preparation || {};
+  const tokens = Number(prep.tokensBefore);
+  let window = 0;
+  try {
+    window = Number(ctx && ctx.model && ctx.model.contextWindow);
+  } catch {
+    return null; // a stale ctx getter throws: unknown window
+  }
+  if (!Number.isFinite(window) || window <= 0 || !Number.isFinite(tokens)) return null;
+  if (tokens >= window * GUARD_MIN_FILL) return null;
+  const reserve = prep.settings ? prep.settings.reserveTokens : undefined;
+  return { tokens, window, reserve: reserve == null ? null : reserve };
+}
+
 /** The extension factory pi calls with its API. Exported as default AND as a
  *  named `activate` so a test can drive it against a stub pi without pi. */
 function activate(pi, deps) {
@@ -379,6 +406,32 @@ function activate(pi, deps) {
     // an old pi without tool_call veto: no guard, no crash
   }
 
+  /* THE COMPACTION GUARD (compactionGuard above). Registered for every pi,
+   * pane owner or subagent child: any of them can compact early. The engine
+   * report rides the event socket once it is up (reportGuard, set below). */
+  let reportGuard = null;
+  try {
+    pi.on("session_before_compact", (event, ctx) => {
+      try {
+        const g = compactionGuard(event, ctx);
+        if (!g) return undefined;
+        try {
+          process.stderr.write(
+            `[cyc] compaction.guarded: threshold compaction at ${g.tokens} tokens is under 60% of the ${g.window} window (reserve ${g.reserve}), cancelled\n`,
+          );
+        } catch {
+          // no stderr: still cancel
+        }
+        if (reportGuard) reportGuard(g);
+        return { cancel: true };
+      } catch {
+        return undefined; // the guard must never take pi down
+      }
+    });
+  } catch {
+    // an old pi without session_before_compact: no guard, no crash
+  }
+
   const sockPath = process.env.CYC_PI_EVENT_SOCK;
   if (!sockPath) {
     /* NOT LAUNCHED BY CYC (a plain `pi` typed into a pane, loading this file
@@ -429,6 +482,10 @@ function activate(pi, deps) {
     void announceSession(sessionId, cwd, undefined, frame.model);
   });
   onModelSelect(on);
+
+  reportGuard = (g) => {
+    if (ownsThisPane()) sink.send({ t: "pi.event", kind: "compaction.guarded", ts: Date.now(), ...g });
+  };
 
   // live working/idle: the agent loop is the turn. turn_start opens it,
   // agent_end closes it. The consumer feeds these to the same jsonl-status
@@ -506,6 +563,7 @@ module.exports._internal = {
   BODY_CAP,
   announceSession,
   announcedSessions,
+  compactionGuard,
   ANNOUNCE_RETRY_MS,
   ANNOUNCE_TIMEOUT_MS,
 };

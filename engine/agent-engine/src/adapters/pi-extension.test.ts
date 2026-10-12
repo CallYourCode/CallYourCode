@@ -240,7 +240,7 @@ describe("the pi output extension", () => {
     try {
       const pi = stubPi();
       activate(pi as any);
-      expect([...pi.handlers.keys()]).toEqual(["tool_call", "session_start", "model_select"]);
+      expect([...pi.handlers.keys()]).toEqual(["tool_call", "session_before_compact", "session_start", "model_select"]);
       pi.emit("session_start", { type: "session_start", reason: "startup" }, ctxFor());
       const body = await posted;
       expect(posts).toHaveLength(1);
@@ -508,6 +508,72 @@ describe("the foreground guard (claude's enforce-bash-async, ported)", () => {
     activate(pi as any);
     expect((pi.handlers.get("tool_call") as any)({ toolName: "read", input: { path: "/x" } }, {})).toBeUndefined();
     expect(fire(pi, {})).toBeUndefined();
+  });
+});
+
+
+/* THE COMPACTION GUARD. pi compacts on threshold at tokens > window - reserve,
+ * and the owner's claude-bridge reserve (200000) is absolute: right on a 1M
+ * window, compact-at-zero on a 200K one. A threshold compaction under 60% of
+ * the model's real window is cancelled and reported; manual, overflow and an
+ * unknown window are never touched. */
+describe("the compaction guard", () => {
+  const ctxWin = (contextWindow?: number) => ({ ...ctxFor(), model: { id: "m", contextWindow } });
+  const prep = (tokensBefore: number) => ({ tokensBefore, settings: { enabled: true, reserveTokens: 200000, keepRecentTokens: 20000 } });
+
+  /** Activate with a connected fake sink and a captured stderr, fire one
+   *  session_before_compact, answer the handler's return + what was reported. */
+  function fire(event: unknown, ctx: unknown) {
+    process.env.CYC_PI_EVENT_SOCK = "unused-with-a-fake-sink";
+    const sent: any[] = [];
+    let onConnect: (() => void) | undefined;
+    const pi = stubPi();
+    activate(pi as any, {
+      makeSink: (_p, cb) => { onConnect = cb; return { send: (f: unknown) => { sent.push(f); }, close() {} }; },
+    });
+    onConnect?.();
+    const errs: string[] = [];
+    const realWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => { errs.push(String(chunk)); return true; }) as typeof process.stderr.write;
+    let out: unknown;
+    try {
+      out = (pi.handlers.get("session_before_compact") as (e: unknown, c: unknown) => unknown)(event, ctx);
+    } finally {
+      process.stderr.write = realWrite;
+    }
+    return { out, guarded: sent.filter((f) => f.kind === "compaction.guarded"), errs };
+  }
+
+  test("threshold at 10% of a 200K window is cancelled and reported", () => {
+    const r = fire({ type: "session_before_compact", reason: "threshold", preparation: prep(20000) }, ctxWin(200000));
+    expect(r.out).toEqual({ cancel: true });
+    expect(r.guarded).toHaveLength(1);
+    expect(r.guarded[0]).toMatchObject({ t: "pi.event", kind: "compaction.guarded", tokens: 20000, window: 200000, reserve: 200000 });
+    expect(r.errs.join("")).toContain("compaction.guarded");
+  });
+
+  test("threshold at 80% of 1M and at 94% of 272k is allowed", () => {
+    for (const [tokens, window] of [[800000, 1000000], [255680, 272000]]) {
+      const r = fire({ type: "session_before_compact", reason: "threshold", preparation: prep(tokens) }, ctxWin(window));
+      expect(r.out).toBeUndefined();
+      expect(r.guarded).toHaveLength(0);
+      expect(r.errs).toHaveLength(0);
+    }
+  });
+
+  test("overflow and manual are never cancelled, even at 10%", () => {
+    for (const reason of ["overflow", "manual"]) {
+      const r = fire({ type: "session_before_compact", reason, preparation: prep(20000) }, ctxWin(200000));
+      expect(r.out).toBeUndefined();
+      expect(r.guarded).toHaveLength(0);
+    }
+  });
+
+  test("an unknown window decides nothing", () => {
+    const ev = { type: "session_before_compact", reason: "threshold", preparation: prep(20000) };
+    expect(fire(ev, ctxWin(undefined)).out).toBeUndefined();
+    expect(fire(ev, { ...ctxFor(), model: undefined }).out).toBeUndefined();
+    expect(fire(ev, { get model(): unknown { throw new Error("stale"); } }).out).toBeUndefined();
   });
 });
 

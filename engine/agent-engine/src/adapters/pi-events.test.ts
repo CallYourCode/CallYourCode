@@ -21,6 +21,9 @@ describe("parsePiFrame", () => {
       .toMatchObject({ t: "pi.session", sessionId: "s1" });
     expect(parsePiFrame(`{"t":"pi.event","kind":"reply","id":"u1","text":"hi"}`))
       .toMatchObject({ t: "pi.event", kind: "reply" });
+    const guarded = parsePiFrame(`{"t":"pi.event","kind":"compaction.guarded","tokens":20000,"window":200000,"reserve":200000}`);
+    expect(guarded).toMatchObject({ kind: "compaction.guarded", tokens: 20000 });
+    expect(piFrameToEvent(guarded!)).toBeNull(); // a journal line, never a row
     expect(parsePiFrame("")).toBeNull();
     expect(parsePiFrame("not json")).toBeNull();
     expect(parsePiFrame(`{"t":"pi.event","kind":"bogus"}`)).toBeNull();

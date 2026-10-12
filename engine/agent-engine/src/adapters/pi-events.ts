@@ -34,12 +34,16 @@ export type PiSessionFrame = {
 /** One renderable row, or a status edge. */
 export type PiEventFrame = {
   t: "pi.event";
-  kind: "prompt" | "reply" | "tool" | "status";
+  kind: "prompt" | "reply" | "tool" | "status" | "compaction.guarded";
   id?: string;
   ts?: number;
   text?: string;
   tool?: string;
   status?: "working" | "idle";
+  /** compaction.guarded: the cancelled threshold compaction's numbers */
+  tokens?: number;
+  window?: number;
+  reserve?: number | null;
 };
 
 export type PiFrame = PiSessionFrame | PiEventFrame;
@@ -60,7 +64,8 @@ export function parsePiFrame(line: string): PiFrame | null {
   if (tag === "pi.session") return obj as PiSessionFrame;
   if (tag === "pi.event") {
     const kind = (obj as { kind?: unknown }).kind;
-    if (kind === "prompt" || kind === "reply" || kind === "tool" || kind === "status") {
+    if (kind === "prompt" || kind === "reply" || kind === "tool" || kind === "status" ||
+        kind === "compaction.guarded") {
       return obj as PiEventFrame;
     }
   }
@@ -78,7 +83,7 @@ function cap(text: string, n: number): string {
  *  toolCallId) falls back to a per-frame synthetic id that still renders. */
 export function piFrameToEvent(frame: PiFrame): SessionEvent | null {
   if (frame.t !== "pi.event") return null;
-  if (frame.kind === "status") return null;
+  if (frame.kind === "status" || frame.kind === "compaction.guarded") return null;
   const ts = typeof frame.ts === "number" ? frame.ts : Date.now();
   const kind = frame.kind;
   const raw = typeof frame.text === "string" ? frame.text : "";

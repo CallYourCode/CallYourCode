@@ -208,6 +208,12 @@ export function applyPiFrame(id: string, frame: PiFrame): boolean {
   const d = D();
   const s = d.sessionOf(id);
   if (!s || !s.alive) return false;
+  // the extension cancelled a mis-set early compaction (cyc-output.js
+  // compactionGuard): a journal line, not a row
+  if (frame.t === "pi.event" && frame.kind === "compaction.guarded") {
+    d.log("compaction.guarded", { agent: s.agent.id, tokens: frame.tokens, window: frame.window, reserve: frame.reserve });
+    return false;
+  }
   const sid = sidOf(s);
   if (!sid) return false;
   const status = piFrameStatus(frame);
