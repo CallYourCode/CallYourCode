@@ -288,11 +288,9 @@ function modelOf(ctx) {
   }
 }
 
-// Non-context data, persisted by Pi rather than bespoke session-file IO.
-// Existing saved sessions append synchronously; a brand-new session can keep
-// entries in memory until its first assistant message. Once persisted, the
-// snapshot survives engine restarts without a socket. Pi owns both the window
-// and projected tokens. Never substitute billing totals or a model table.
+// Durable, non-context data: survives engine restarts and works without a
+// socket. Pi owns both the effective window (including overrides) and the
+// projected token estimate. Never substitute billing totals or a model table.
 const CONTEXT_ENTRY = "cyc-context";
 function reportContext(pi, ctx) {
   if (typeof pi.appendEntry !== "function") return;
@@ -465,10 +463,6 @@ function activate(pi, deps) {
 
   // These boundaries run after Pi has persisted/rebuilt context. In particular
   // message_end fires BEFORE persistence, so it cannot supply a fresh reading.
-  // session_start also covers /reload, but installed Pi's native CJS import
-  // cache can retain an OLD factory after deployment despite a reload success
-  // notice. Such processes need a safe quit/resume once children are finished;
-  // another reload or a paid turn cannot hotload this reporting code.
   for (const event of ["turn_end", "session_compact", "session_tree", "agent_before_settle"]) {
     on(event, (_event, ctx) => reportContext(pi, ctx));
   }

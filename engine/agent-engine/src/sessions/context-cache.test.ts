@@ -11,7 +11,7 @@
  */
 
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { manualClock } from "../runtime/clock.ts";
@@ -149,33 +149,6 @@ test("a grown file is re-read and the new answer replaces the old", async () => 
   expect(contextPctOf(session)).toBe(77);
   expect(modelOf(session)).toBe("Opus 5");
   expect(modelAcronymOf(session)).toBe("O5");
-});
-
-test("a durable Pi reload snapshot refreshes the stat cache without another message", async () => {
-  const { PI_TRANSCRIPT } = await import("../chat/transcripts.ts");
-  const piSession: CtxSession = { ...session, id: "pi-reload", agent: { id: "pi" }, harnessSessionId: null };
-  const history = [
-    { type: "model_change", provider: "scratch", modelId: "scratch-model" },
-    { type: "message", message: { role: "assistant", provider: "scratch", model: "scratch-model",
-      usage: { input: 136000, output: 0, cacheRead: 0, cacheWrite: 0 } } },
-  ].map(entry => JSON.stringify(entry)).join("\n") + "\n";
-  writeFileSync(path, history);
-  let reads = 0;
-  resetForTest();
-  initContextCache({
-    sessions: () => [piSession], transcriptFile: () => ({ path }),
-    contextRead: async () => { reads++; return { pct: await PI_TRANSCRIPT.contextPct(path), model: await PI_TRANSCRIPT.model(path) }; },
-    claudeTranscriptPath: () => null, claudeContextRead: async () => null, claudeTitleRead: async () => null,
-    broadcastSessions: () => {}, clock: manualClock(),
-  });
-  await pollOnce(); expect(contextPctOf(piSession)).toBeNull();
-  await pollOnce(); expect(reads).toBe(1);
-  // Models/messages stay untouched. Only Pi's non-context snapshot grows the
-  // file, as the real CLI does at session_start on an already-saved session.
-  appendFileSync(path, JSON.stringify({ type: "custom", customType: "cyc-context",
-    data: { version: 1, provider: "scratch", modelId: "scratch-model", contextWindow: 272000, tokens: 136000 } }) + "\n");
-  await pollOnce(); expect(contextPctOf(piSession)).toBe(50); expect(reads).toBe(2);
-  await pollOnce(); expect(reads).toBe(2);
 });
 
 test("Pi snapshot growth, engine restart, and equal-size resume files remain fresh", async () => {
