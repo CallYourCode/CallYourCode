@@ -7,15 +7,15 @@
  * self-contained HTML+CSS fragment the app drops into a no-token iframe.
  *
  * WHAT STAYS CORE, drawn once so the line is not blurred: limits.ts keeps the
- * polling, the machine-wide lease and the threshold alerts. This plugin only
- * READS the last good answer (limitsNow(false), the same cached number the poll
- * serves) and paints it. It never fetches, never alerts, never writes.
+ * Claude polling, the machine-wide lease and the threshold crossings. This
+ * plugin paints that report or active Pi Codex weekly usage via an injected
+ * read-only reader, and owns an engine-scoped source preference through RPC.
+ * The existing Claude alert poll remains independent of the display source.
  *
- * NO SCRIPT RUNS IN THE CARD, by construction: the app frames it with
- * sandbox="" and a CSP of `default-src 'none'; style-src 'unsafe-inline';
- * img-src data:`, so the fragment below is HTML and inline CSS and nothing
- * else. Every interactive part (the refresh button, the host chips) is app
- * chrome around the frame; there is nothing clickable inside it.
+ * THE CARD FRAGMENT CONTAINS NO SCRIPT: it is HTML and inline CSS only.
+ * The app's existing sandbox measurement bridge and permissions stay unchanged.
+ * Every interactive part (the refresh button, the host chips) is app chrome
+ * around the frame; there is nothing clickable inside it.
  *
  * The wording is PORTED, not redesigned: untilText, the severity thresholds
  * (>=80 hot, >=50 warm), and the freshness sentences are the app's own strings
@@ -42,6 +42,7 @@ import { realClock, type Clock } from "../../runtime/clock.ts";
 export type UsageWindow = { label: string; pct: number; resetsAt: string | null; severity?: "normal" | "warning" | "critical" };
 export type UsageReport = {
   ok: boolean; email?: string; plan?: string; windows?: UsageWindow[]; fetchedAt: number;
+  provider?: "codex"; accountId?: string;
   error?: string; reason?: "signed-out" | "throttled" | "network" | "unknown"; stale?: boolean;
 };
 type UsageAlert = { label: string; pct: number; threshold: number; resetsAt: string | null };
@@ -225,7 +226,8 @@ export function renderUsageCard(report: UsageReport, now: number): { html: strin
   if (report.ok) {
     // the head is the account alone; the age line is app chrome now (#577), so
     // the right of this row is deliberately empty for the app to sit it there
-    const who = report.email ? `<span class="uc-who">${esc(report.email)}</span>` : "";
+    const label = report.provider === "codex" ? `Codex · ${report.email ?? report.accountId ?? "active Pi account"}` : report.email;
+    const who = label ? `<span class="uc-who">${esc(label)}</span>` : "";
     const windows = report.windows ?? [];
     const bars = windows.map((w) => barHtml(w, now)).join("");
     inner = `<div class="uc"><div class="uc-head">${who}</div>` +
@@ -249,8 +251,9 @@ export function renderUsageCard(report: UsageReport, now: number): { html: strin
     const reason = report.reason;
     const isThrottled = reason === "throttled" || (reason === undefined && throttled(report));
     const signedOut = reason === "signed-out";
-    const whoText = signedOut ? "not signed in" : isThrottled ? "could not check" : "can't check right now";
-    const msg = signedOut ? (report.error ?? "no limits available")
+    const headline = signedOut ? "not signed in" : isThrottled ? "could not check" : "can't check right now";
+    const whoText = report.provider === "codex" ? `Codex · ${report.email ?? report.accountId ?? headline}` : headline;
+    const msg = report.provider === "codex" ? (report.error ?? "Codex usage unavailable") : signedOut ? (report.error ?? "no limits available")
       : isThrottled ? "our check for these numbers was throttled"
       : "could not reach the usage service, showing nothing new";
     inner = `<div class="uc"><div class="uc-head"><span class="uc-who uc-err">${esc(whoText)}</span></div>` +
@@ -271,8 +274,9 @@ export function renderUsageCard(report: UsageReport, now: number): { html: strin
  * when the engine has no email to key on (logged out): nothing to fold. */
 export function usageDedupe(report: UsageReport | null): string | null {
   const email = report?.email;
-  if (!email) return null;
-  return createHash("sha256").update(email.toLowerCase()).digest("hex").slice(0, 16);
+  if (!email && !(report?.provider === "codex" && report.accountId)) return null;
+  const key = report?.provider === "codex" ? `codex:weekly:${report.accountId ?? email!.toLowerCase()}` : email!.toLowerCase();
+  return createHash("sha256").update(key).digest("hex").slice(0, 16);
 }
 
 /* SERVING THE CARD IS DECOUPLED FROM RECOMPUTING THE USAGE (#602).
@@ -321,7 +325,45 @@ async function foldUsageOverHarnesses(core: (id: string) => PluginCore, force: b
   throw new Error(NO_ACTIVE_HARNESS);
 }
 
+export type CodexUsageReader = { identity(): string; read(force: boolean): Promise<UsageReport> };
+type UsageProvider = "claude" | "codex";
+let selectedSource: UsageProvider = "claude";
+let codexReader: CodexUsageReader | null = null;
+let activeIdentity: string | null = null;
+let generation = 0;
+let preferenceQueue: Promise<unknown> = Promise.resolve();
+
+function invalidateUsage(): void {
+  generation++;
+  cachedReport = null; lastReport = null; lastRefreshAt = 0;
+  lastRefreshError = null; inflightRefresh = null;
+}
+function applySource(source: UsageProvider): void {
+  if (source === selectedSource) return;
+  selectedSource = source; activeIdentity = null; invalidateUsage();
+}
+async function readPreference(): Promise<{ source: UsageProvider }> {
+  const read = preferenceQueue.then(async () => {
+    if (usageCore) {
+      const value = await usageCore("usage-card").store().get("source") as { source?: unknown } | null;
+      applySource(value?.source === "codex" ? "codex" : "claude");
+    }
+    return { source: selectedSource };
+  });
+  preferenceQueue = read.catch(() => {});
+  return read;
+}
+function checkCodexIdentity(): void {
+  if (selectedSource !== "codex") return;
+  const key = codexReader?.identity() ?? "unavailable";
+  if (key !== activeIdentity) { activeIdentity = key; invalidateUsage(); }
+}
+
 async function loadUsage(force: boolean): Promise<UsageReport> {
+  if (selectedSource === "codex") {
+    if (!codexReader) return { ok: false, provider: "codex", error: "Codex usage reader unavailable", fetchedAt: NaN };
+    return codexReader.read(force);
+  }
   if (usageSource) return usageSource(force);
   if (!usageCore) throw new Error("usage core not wired on this engine");
   return foldUsageOverHarnesses(usageCore, force);
@@ -350,14 +392,14 @@ function isUsageReport(value: unknown): value is UsageReport {
 function loadPersistedUsageCache(): UsageReport | null {
   try {
     const report: unknown = JSON.parse(readFileSync(cacheFile(), "utf8"));
-    return isUsageReport(report) && report.ok ? report : null;
+    return selectedSource === "claude" && isUsageReport(report) && report.ok && !report.provider ? report : null;
   } catch {
     return null;
   }
 }
 
 function persistUsageCache(report: UsageReport): void {
-  if (!report.ok) return;
+  if (!report.ok || selectedSource !== "claude") return;
   try {
     mkdirPrivateSync(dirname(cacheFile()));
     writeAtomicPrivateSync(cacheFile(), JSON.stringify(report));
@@ -397,9 +439,12 @@ const COLD: UsageReport = { ok: false, error: "checking usage", reason: "unknown
  * which is the whole point (an errored upstream must not empty the card). */
 export function refreshUsageCache(force = false): Promise<void> {
   if (inflightRefresh) return inflightRefresh; // share the read already running
-  inflightRefresh = (async () => {
+  const epoch = generation;
+  const identity = activeIdentity;
+  const flight = (async () => {
     try {
       const report = await loadUsage(force);
+      if (epoch !== generation || (selectedSource === "codex" && codexReader?.identity() !== identity)) return;
       cachedReport = report;
       lastReport = report;
       persistUsageCache(report);
@@ -407,12 +452,13 @@ export function refreshUsageCache(force = false): Promise<void> {
       lastRefreshError = null;
     } catch (e) {
       /* keep cachedReport as it was: a broken recompute is not a reason to blank */
-      lastRefreshError = e instanceof Error ? e.message : String(e);
+      if (epoch === generation) lastRefreshError = e instanceof Error ? e.message : String(e);
     } finally {
-      inflightRefresh = null;
+      if (epoch === generation) inflightRefresh = null;
     }
   })();
-  return inflightRefresh;
+  inflightRefresh = flight;
+  return flight;
 }
 
 /* Kick a background recompute if one is due: never while another is running, and
@@ -517,7 +563,8 @@ function limitPhrase(label: string): string {
 export async function pollLimitsOnce(core: (id: string) => PluginCore, deps: UsagePollDeps): Promise<void> {
   let report: UsageReport;
   try {
-    report = await loadUsage(false);
+    // Alert thresholds remain Claude-owned, independent of the card preference.
+    report = usageSource ? await usageSource(false) : await foldUsageOverHarnesses(core, false);
   } catch (e) {
     console.warn("[limits] poll failed:", (e as Error)?.message);
     return;
@@ -565,6 +612,15 @@ const usageCard: PluginSpec["card"] = {
   title: "Plan usage",
   refreshFloorS: REFRESH_FLOOR_S,
   render: async (opts) => {
+    await readPreference();
+    checkCodexIdentity();
+    if (selectedSource === "codex") {
+      // The external cache is cheap to read and authoritative on every poll,
+      // including expiry/errors. The reader caches only the absent-cache GET.
+      await refreshBounded(opts?.force === true, opts?.force ? forceTimeoutMs : coldWaitMs);
+      checkCodexIdentity();
+      return renderUsageCard(cachedReport ?? { ...COLD, provider: "codex" }, Date.now());
+    }
     if (opts?.force) {
       // THE REFRESH BUTTON: go upstream and let the RESPONSE carry the new
       // numbers. It bypasses the poll floor (the floor throttles poll bursts,
@@ -588,7 +644,7 @@ const usageCard: PluginSpec["card"] = {
     }
     return renderUsageCard(cachedReport ?? COLD, Date.now());
   },
-  dedupe: () => usageDedupe(lastReport),
+  dedupe: () => { checkCodexIdentity(); return usageDedupe(lastReport); },
 };
 
 /* THE PLUGIN, AS A FACTORY (crons-shaped). `core` is the typed PluginCore the
@@ -604,9 +660,27 @@ const usageCard: PluginSpec["card"] = {
  * cycle it was already in (nextPollAt; limits.ts's persisted last reading makes
  * the first poll after a restart free). The first poll is immediate, and being
  * unforced it usually costs nothing at all. */
-export function usageCardPlugin(core?: (id: string) => PluginCore, poll?: UsagePollDeps): PluginSpec {
+export function usageCardPlugin(core?: (id: string) => PluginCore, poll?: UsagePollDeps, codex?: CodexUsageReader): PluginSpec {
   if (core) usageCore = core;
-  const spec: PluginSpec = { id: "usage-card", name: "Plan usage", version: 1, card: usageCard };
+  if (codex) codexReader = codex;
+  const spec: PluginSpec = { id: "usage-card", name: "Plan usage", version: 1, card: usageCard,
+    rpc: {
+      "get-source": async () => readPreference(),
+      "set-source": async (_ctx, args) => {
+        const source = (args as { source?: unknown } | null)?.source;
+        if (source !== "claude" && source !== "codex")
+          throw Object.assign(new Error("source must be claude or codex"), { status: 400 });
+        const set = preferenceQueue.then(async () => {
+          if (!usageCore) throw new Error("usage core not wired on this engine");
+          await usageCore("usage-card").store().put("source", { source });
+          applySource(source);
+          return { source };
+        });
+        preferenceQueue = set.catch(() => {});
+        return set;
+      },
+    },
+  };
   if (!poll || !core) return spec;
 
   const clock = poll.clock ?? realClock;
@@ -639,7 +713,7 @@ export function usageCardPlugin(core?: (id: string) => PluginCore, poll?: UsageP
  * the real `claude` usage. Not used by the engine. */
 export const __usageCardTest = {
   setSource(fn: UsageSource | null): void { usageSource = fn; },
-  reset(): void { usageSource = null; usageCore = null; cachedReport = null; lastReport = null; lastRefreshAt = 0; inflightRefresh = null; lastRefreshError = null; forceTimeoutMs = FORCE_TIMEOUT_MS; coldWaitMs = COLD_WAIT_MS; },
+  reset(): void { generation++; selectedSource = "claude"; codexReader = null; activeIdentity = null; preferenceQueue = Promise.resolve(); usageSource = null; usageCore = null; cachedReport = null; lastReport = null; lastRefreshAt = 0; inflightRefresh = null; lastRefreshError = null; forceTimeoutMs = FORCE_TIMEOUT_MS; coldWaitMs = COLD_WAIT_MS; },
   setCacheFile(path: string): void { cacheFileOverride = path; },
   setForceTimeout(ms: number): void { forceTimeoutMs = ms; },
   setColdWait(ms: number): void { coldWaitMs = ms; },

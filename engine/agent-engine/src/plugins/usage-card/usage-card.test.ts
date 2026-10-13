@@ -563,6 +563,7 @@ function fakeCore(opts: {
   const usageCalls: UsageCall[] = [];
   const notified: EngineNotify[] = [];
   const core = {
+    store: () => ({ get: async () => null }),
     harnesses: () => opts.harnesses,
     usage: async (kind: string, force = false) => { usageCalls.push({ kind, force }); return opts.usage(kind); },
     notifyEngine: async (n: EngineNotify) => { notified.push(n); },
