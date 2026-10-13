@@ -3,13 +3,13 @@
  * so its numbers stay the ones that module already computes. pi/codex/opencode
  * each read their own on-disk format and answer null where the file cannot.
  * Context FAILS OPEN (2026-09-02): tokens come off the harness's own record and
- * the window is the harness's reported one where it writes one (codex), else
- * `contextWindowFor(model)`, the 1M default. Null only when there is no usage
- * record to read at all. */
+ * the window is the harness's reported one where it writes one (codex), or
+ * pi's model configuration, else `contextWindowFor(model)`, the 1M default.
+ * Null only when there is no usage record to read at all. */
 
 import { join, normalize } from "node:path";
 import { homedir } from "node:os";
-import { readdirSync, statSync, type Dirent } from "node:fs";
+import { readFileSync, readdirSync, statSync, type Dirent } from "node:fs";
 import type { AgentSessionRef } from "../runtime/agents.ts";
 import { streamLinesForward } from "../sessions/session-events.ts";
 import { claudeReader, contextWindowFor } from "../readers/claude.ts";
@@ -156,15 +156,48 @@ function piText(content: unknown): string {
   return firstText(bits.join("\n"));
 }
 
+// Read only model metadata. Never load Pi's runtime, which can refresh catalogs
+// or execute credential commands. Re-read on demand only when the mtime changes.
+const piModelFiles = new Map<string, { mtime: number | null; data: any }>();
+function piModelFile(path: string): any {
+  let mtime: number | null = null;
+  try { mtime = statSync(path).mtimeMs; } catch { /* Missing config uses the fallback. */ }
+  const cached = piModelFiles.get(path);
+  if (cached && cached.mtime === mtime) return cached.data;
+  let data: any = null;
+  if (mtime !== null) {
+    try { data = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, "")); } catch { /* Invalid config uses the fallback. */ }
+  }
+  piModelFiles.set(path, { mtime, data });
+  return data;
+}
+
+function piContextWindow(provider: string | null, model: string | null): number {
+  const fallback = contextWindowFor(model ?? "");
+  if (!provider || !model) return fallback;
+  const agent = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+  const catalog = piModelFile(join(agent, "models-store.json"))?.[provider];
+  const config = piModelFile(join(agent, "models.json"))?.providers?.[provider];
+  const find = (models: any) => Array.isArray(models) ? models.find((m) => m?.id === model) : undefined;
+  const stored = find(catalog?.models);
+  const custom = find(config?.models);
+  if (!stored && !custom) return fallback; // Pi ignores modelOverrides for unknown IDs.
+  // Pi custom model definitions default to 128k; modelOverrides are topmost.
+  const window = config?.modelOverrides?.[model]?.contextWindow
+    ?? (custom ? custom.contextWindow ?? 128_000 : stored.contextWindow);
+  return typeof window === "number" && Number.isFinite(window) && window > 0 ? window : fallback;
+}
+
 /* Walk complete pi records newest-first. Like the forward reader, ignore a
  * torn final line. Keep byte fragments until a spanning record is complete so
  * UTF-8 boundaries and large tool outputs are decoded only once. Stop as soon
  * as the requested facts are found, rather than parsing the entire history. */
-async function piLatest(path: string, needUsage: boolean): Promise<{ tokens: number; model: string | null }> {
+async function piLatest(path: string, needUsage: boolean): Promise<{ tokens: number; model: string | null; provider: string | null }> {
   let tokens = 0;
   let model: string | null = null;
+  let provider: string | null = null;
   const f = Bun.file(path);
-  if (!(await f.exists())) return { tokens, model };
+  if (!(await f.exists())) return { tokens, model, provider };
   const decoder = new TextDecoder();
   const block = 256 * 1024;
   let end = f.size;
@@ -183,8 +216,13 @@ async function piLatest(path: string, needUsage: boolean): Promise<{ tokens: num
     if (!rec) return false;
     const m = rec.type === "message" && rec.message?.role === "assistant" ? rec.message : null;
     if (model === null) {
-      if (m && typeof m.model === "string" && m.model) model = m.model;
-      else if (rec.type === "model_change" && typeof rec.modelId === "string" && rec.modelId) model = rec.modelId;
+      if (m && typeof m.model === "string" && m.model) {
+        model = m.model;
+        provider = typeof m.provider === "string" ? m.provider : null;
+      } else if (rec.type === "model_change" && typeof rec.modelId === "string" && rec.modelId) {
+        model = rec.modelId;
+        provider = typeof rec.provider === "string" ? rec.provider : null;
+      }
     }
     if (needUsage && tokens === 0 && m?.usage && typeof m.usage === "object") {
       const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
@@ -198,7 +236,7 @@ async function piLatest(path: string, needUsage: boolean): Promise<{ tokens: num
     let lineEnd = chunk.length;
     for (let i = chunk.length - 1; i >= 0; i--) {
       if (chunk[i] !== 0x0a) continue;
-      if (complete && visit(chunk.subarray(i + 1, lineEnd))) return { tokens, model };
+      if (complete && visit(chunk.subarray(i + 1, lineEnd))) return { tokens, model, provider };
       complete = true;
       lineEnd = i;
     }
@@ -208,7 +246,7 @@ async function piLatest(path: string, needUsage: boolean): Promise<{ tokens: num
     if (end > 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
   if (complete) visit(new Uint8Array(0));
-  return { tokens, model };
+  return { tokens, model, provider };
 }
 
 export const PI_TRANSCRIPT: TranscriptSupport = {
@@ -229,13 +267,12 @@ export const PI_TRANSCRIPT: TranscriptSupport = {
    * `cacheWrite`, `output`, `reasoning`, `totalTokens`. What was IN CONTEXT for
    * that request is input + cacheRead + cacheWrite, the same three-way sum the
    * claude reader makes (output is what the model wrote, counted next turn).
-   * pi writes no context window into the session file (none in the fixture, none
-   * in testbench/), so the window is `contextWindowFor(model)`: the 1M default
-   * since 2026-09-02 (fail open), the newest model_change/assistant model as the
-   * key. No assistant turn yet answers null. */
+   * pi writes no context window into the session file, so look up the newest
+   * model_change/assistant provider and model in Pi's read-only model config.
+   * Unknown models keep `contextWindowFor(model)`. No usage yet answers null. */
   async contextPct(path) {
-    const { tokens, model } = await piLatest(path, true);
-    return pctUsed(tokens, contextWindowFor(model ?? ""));
+    const { tokens, model, provider } = await piLatest(path, true);
+    return pctUsed(tokens, piContextWindow(provider, model));
   },
   async model(path) {
     return (await piLatest(path, false)).model;
