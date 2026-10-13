@@ -156,6 +156,61 @@ function piText(content: unknown): string {
   return firstText(bits.join("\n"));
 }
 
+/* Walk complete pi records newest-first. Like the forward reader, ignore a
+ * torn final line. Keep byte fragments until a spanning record is complete so
+ * UTF-8 boundaries and large tool outputs are decoded only once. Stop as soon
+ * as the requested facts are found, rather than parsing the entire history. */
+async function piLatest(path: string, needUsage: boolean): Promise<{ tokens: number; model: string | null }> {
+  let tokens = 0;
+  let model: string | null = null;
+  const f = Bun.file(path);
+  if (!(await f.exists())) return { tokens, model };
+  const decoder = new TextDecoder();
+  const block = 256 * 1024;
+  let end = f.size;
+  let complete = false;
+  let parts: Uint8Array[] = [];
+  const visit = (head: Uint8Array): boolean => {
+    let bytes = head;
+    if (parts.length) {
+      bytes = new Uint8Array(head.length + parts.reduce((n, p) => n + p.length, 0));
+      bytes.set(head);
+      let at = head.length;
+      for (const p of parts) { bytes.set(p, at); at += p.length; }
+      parts = [];
+    }
+    const rec = parseJson(decoder.decode(bytes));
+    if (!rec) return false;
+    const m = rec.type === "message" && rec.message?.role === "assistant" ? rec.message : null;
+    if (model === null) {
+      if (m && typeof m.model === "string" && m.model) model = m.model;
+      else if (rec.type === "model_change" && typeof rec.modelId === "string" && rec.modelId) model = rec.modelId;
+    }
+    if (needUsage && tokens === 0 && m?.usage && typeof m.usage === "object") {
+      const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+      tokens = n(m.usage.input) + n(m.usage.cacheRead) + n(m.usage.cacheWrite);
+    }
+    return model !== null && (!needUsage || tokens > 0);
+  };
+  while (end > 0) {
+    const start = Math.max(0, end - block);
+    const chunk = new Uint8Array(await f.slice(start, end).arrayBuffer());
+    let lineEnd = chunk.length;
+    for (let i = chunk.length - 1; i >= 0; i--) {
+      if (chunk[i] !== 0x0a) continue;
+      if (complete && visit(chunk.subarray(i + 1, lineEnd))) return { tokens, model };
+      complete = true;
+      lineEnd = i;
+    }
+    if (complete && lineEnd > 0) parts.unshift(chunk.subarray(0, lineEnd));
+    end = start;
+    // Sparse transcripts still return the old answer, without monopolising the loop.
+    if (end > 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  if (complete) visit(new Uint8Array(0));
+  return { tokens, model };
+}
+
 export const PI_TRANSCRIPT: TranscriptSupport = {
   locate: piLocate,
   turnEdge(line) {
@@ -179,37 +234,11 @@ export const PI_TRANSCRIPT: TranscriptSupport = {
    * since 2026-09-02 (fail open), the newest model_change/assistant model as the
    * key. No assistant turn yet answers null. */
   async contextPct(path) {
-    let tokens = 0;
-    let model = "";
-    await eachLine(path, (line) => {
-      const rec = parseJson(line);
-      if (!rec) return;
-      if (rec.type === "model_change" && typeof rec.modelId === "string" && rec.modelId) model = rec.modelId;
-      const m = rec.message;
-      if (rec.type !== "message" || m?.role !== "assistant") return;
-      if (typeof m.model === "string" && m.model) model = m.model;
-      const u = m.usage;
-      if (!u || typeof u !== "object") return;
-      const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
-      const t = n(u.input) + n(u.cacheRead) + n(u.cacheWrite);
-      if (t > 0) tokens = t;
-    });
-    return pctUsed(tokens, contextWindowFor(model));
+    const { tokens, model } = await piLatest(path, true);
+    return pctUsed(tokens, contextWindowFor(model ?? ""));
   },
   async model(path) {
-    let model: string | null = null;
-    await eachLine(path, (line) => {
-      const rec = parseJson(line);
-      if (!rec) return;
-      if (rec.type === "model_change" && typeof rec.modelId === "string" && rec.modelId) {
-        model = rec.modelId;
-      }
-      const m = rec.message;
-      if (rec.type === "message" && m?.role === "assistant" && typeof m.model === "string" && m.model) {
-        model = m.model;
-      }
-    });
-    return model;
+    return (await piLatest(path, false)).model;
   },
   async messages(path) {
     const out: TranscriptMessage[] = [];
