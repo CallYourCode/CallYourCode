@@ -13,7 +13,8 @@
  * ctrl+c rather than a claude-only hook. Both are the shipped modules over a
  * FakeHerdr and a REAL MuxAdapter; no engine process anywhere.
  *
- * ENV IS SET AT FILE SCOPE, once, and restored: PI_SESSIONS_DIR and CODEX_HOME
+ * ENV IS SET AT FILE SCOPE, once, and restored: PI_SESSIONS_DIR,
+ * PI_CODING_AGENT_DIR and CODEX_HOME
  * are read per call by the readers, so the wiring below points them at this
  * file's own tmp trees and nothing here can ever reach a real one.
  *
@@ -87,8 +88,10 @@ beforeAll(async () => {
   await writeFile(codexPath, await Bun.file(CODEX_FIXTURE).text());
 
   prev.PI_SESSIONS_DIR = process.env.PI_SESSIONS_DIR;
+  prev.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
   prev.CODEX_HOME = process.env.CODEX_HOME;
   process.env.PI_SESSIONS_DIR = piHome;
+  process.env.PI_CODING_AGENT_DIR = piHome; // No host catalog in fallback fixtures.
   process.env.CODEX_HOME = codexHome;
 });
 
