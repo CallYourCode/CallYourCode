@@ -116,7 +116,12 @@ export async function pluginRoutes(ctx: RoutesCtx, req: Request, url: URL, path:
     const cached = cardCache.get(id);
     // a refresh inside the floor is throttled to the last body; a plain poll (and
     // a refresh past the floor, and a cold cache) renders fresh
-    if (refresh && cached && Date.now() - cached.at < floorMs) {
+    let sameIdentity = !spec.card.dedupe;
+    try {
+      if (spec.card.dedupe) sameIdentity = (spec.card.dedupe() ?? null) ===
+        ((cached?.body as { dedupe?: string } | undefined)?.dedupe ?? null);
+    } catch { /* A broken identity hook must not reuse an unverified body. */ }
+    if (refresh && cached && sameIdentity && Date.now() - cached.at < floorMs) {
       return json(cached.body, 200);
     }
     try {
@@ -203,6 +208,9 @@ export async function pluginRoutes(ctx: RoutesCtx, req: Request, url: URL, path:
         ? envMs("CYC_PLUGIN_HOOK_MS", spec.rpcTimeoutMs[op])
         : hookDeadlineMs();
       const result = await withTimeout(fn({ session, agent }, payload?.args), opTimeout, `plugin ${id} rpc ${op}`);
+      // RPC may change a card's durable configuration. Never throttle the next
+      // refresh to a body rendered before that change.
+      cardCache.delete(id);
       const wire = JSON.stringify({ ok: true, result });
       if (byteLen(wire) > RPC_REPLY_MAX_BYTES) {
         ctx.log("plugin.rpc.oversize", { id, op, bytes: byteLen(wire) });

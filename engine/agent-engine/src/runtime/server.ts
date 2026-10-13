@@ -39,6 +39,7 @@ import { binaryOnPath } from "./which.ts";
 import { makeCapabilityDispatch } from "./capability-dispatch.ts";
 import { makeHarnessCaps } from "./harness-caps.ts";
 import { limitsNow, takeAlerts, nextPollAt, pollPhaseMs, LIMITS_POLL_MS } from "../storage/limits.ts";
+import { makeCodexUsageReader } from "../storage/codex-usage.ts";
 import type { AgentLifecycle } from "../readers/types.ts";
 import type { SockData } from "../transport/sock.ts";
 import { clients, nextClientCid, send, broadcast } from "../transport/wire.ts";
@@ -983,6 +984,7 @@ const pluginCore = (id: string): PluginCore => makePluginCore(id, hostWiring, pl
 
 const PLUGINS: PluginSpec[] = loadPlugins({
   core: pluginCore,
+  codexUsage: makeCodexUsageReader(),
   /* The usage card's limits poll: the plugin OWNS its ticker now (it runs the
    * grid loop through its own clock). A threshold crossing goes out as an
    * engine-level sealed push via core.notifyEngine, so no push seam is wired
