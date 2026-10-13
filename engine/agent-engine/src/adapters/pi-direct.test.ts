@@ -97,9 +97,9 @@ test("piReader: reads the conversation, context, and working/idle edges from the
   expect(piReader.turnEdge(toolLine)).toBe("working");
   expect(piReader.turnEdge(doneLine)).toBe("idle");
 
-  // context is a number off the newest assistant usage (input+cacheRead+cacheWrite
-  // against the model window); 5502 / 1M floors to 0 but is a number, not null
-  expect(await piReader.contextPct(piPath)).toBe(0);
+  // Historical transcripts have no effective runtime window. Do not apply a
+  // Claude-derived default to Pi; the updated extension supplies the snapshot.
+  expect(await piReader.contextPct(piPath)).toBeNull();
 });
 
 /* ----------------------------------------------- 3. friendly model + launch/resume + input method */

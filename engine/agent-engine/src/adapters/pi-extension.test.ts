@@ -121,8 +121,14 @@ const ctxFor = (leafId?: string) => ({
 // :10101; the announce is fail-silent, so a refused port is a no-op. Tests
 // that assert the POST override AGENT_PORT at their own capture server.
 let prevAgentPort: string | undefined;
-beforeAll(() => { prevAgentPort = process.env.AGENT_PORT; process.env.AGENT_PORT = "1"; });
+let prevEngineUrl: string | undefined;
+beforeAll(() => {
+  prevAgentPort = process.env.AGENT_PORT; process.env.AGENT_PORT = "1";
+  prevEngineUrl = process.env.CYC_ENGINE_URL; delete process.env.CYC_ENGINE_URL;
+});
 afterAll(() => {
+  if (prevEngineUrl === undefined) delete process.env.CYC_ENGINE_URL;
+  else process.env.CYC_ENGINE_URL = prevEngineUrl;
   if (prevAgentPort === undefined) delete process.env.AGENT_PORT;
   else process.env.AGENT_PORT = prevAgentPort;
 });
@@ -240,7 +246,7 @@ describe("the pi output extension", () => {
     try {
       const pi = stubPi();
       activate(pi as any);
-      expect([...pi.handlers.keys()]).toEqual(["tool_call", "session_before_compact", "session_start", "model_select"]);
+      expect([...pi.handlers.keys()]).toEqual(["tool_call", "session_before_compact", "turn_end", "session_compact", "session_tree", "agent_before_settle", "session_start", "model_select", "agent_end"]);
       pi.emit("session_start", { type: "session_start", reason: "startup" }, ctxFor());
       const body = await posted;
       expect(posts).toHaveLength(1);
@@ -612,4 +618,74 @@ test("a pi on pipes (a subagent child) neither announces nor streams", async () 
     server.stop(true);
     announce.announcedSessions.clear();
   }
+});
+
+describe("durable Pi context reporting", () => {
+  function setup() {
+    delete process.env.CYC_PI_EVENT_SOCK;
+    const pi = stubPi();
+    const entries: any[] = [];
+    let leaf: any;
+    let tokens: number | null = 136000;
+    let model = { provider: "openai-codex", id: "gpt-6.1-sol", contextWindow: 272000 };
+    const ctx = {
+      ...ctxFor(),
+      get model() { return model; },
+      getContextUsage: () => ({ tokens, contextWindow: model.contextWindow }),
+      sessionManager: {
+        getSessionId: () => "scratch-context",
+        getEntries: () => entries,
+        getLeafEntry: () => leaf,
+      },
+    };
+    const api = { ...pi, appendEntry(customType: string, data: any) {
+      leaf = { type: "custom", id: String(entries.length), customType, data };
+      entries.push(leaf);
+    } };
+    activate(api as any);
+    return { pi, ctx, entries,
+      setTokens: (n: number | null) => { tokens = n; },
+      setModel: (m: typeof model) => { model = m; },
+      moveLeaf: () => { leaf = { id: "another-branch" }; },
+    };
+  }
+  test("reports effective window and Pi tokens without socket; dedupes reload and settled boundaries", () => {
+    const s = setup();
+    s.pi.emit("session_start", {}, s.ctx);
+    expect(s.entries[0]).toMatchObject({ customType: "cyc-context", data: {
+      provider: "openai-codex", modelId: "gpt-6.1-sol", contextWindow: 272000, tokens: 136000,
+    } });
+    for (const event of ["session_start", "turn_end", "agent_end", "agent_before_settle"]) s.pi.emit(event, {}, s.ctx);
+    expect(s.entries).toHaveLength(1);
+    s.setModel({ ...s.ctx.model, contextWindow: 1000000 });
+    s.pi.emit("model_select", {}, s.ctx);
+    expect(s.entries.at(-1).data.contextWindow).toBe(1000000);
+    s.setModel({ ...s.ctx.model, provider: "other-account" });
+    s.pi.emit("model_select", {}, s.ctx);
+    expect(s.entries.at(-1).data.provider).toBe("other-account");
+    s.setTokens(null);
+    s.pi.emit("session_compact", {}, s.ctx);
+    expect(s.entries.at(-1).data.tokens).toBeNull();
+    s.setTokens(27200);
+    s.pi.emit("turn_end", {}, s.ctx);
+    expect(s.entries.at(-1).data.tokens).toBe(27200);
+    const n = s.entries.length;
+    s.moveLeaf();
+    s.pi.emit("session_tree", {}, s.ctx);
+    expect(s.entries).toHaveLength(n + 1); // equal numbers, different physical branch
+  });
+  test("a direct child cannot write parent metadata", () => {
+    const s = setup();
+    delete process.env.CYC_PI_OWNS_PANE;
+    try {
+      for (const event of ["session_start", "model_select", "turn_end", "agent_end", "session_compact", "session_tree"]) s.pi.emit(event, {}, s.ctx);
+      expect(s.entries).toEqual([]);
+    } finally { process.env.CYC_PI_OWNS_PANE = "1"; }
+  });
+  test("unknown or incompatible runtime context stays unknown rather than inferred", () => {
+    const s = setup();
+    const ctx = { ...s.ctx, model: { ...s.ctx.model, contextWindow: 0 }, getContextUsage: () => ({ tokens: 136000, contextWindow: 272000 }) };
+    s.pi.emit("session_start", {}, ctx);
+    expect(s.entries[0].data).toMatchObject({ contextWindow: null, tokens: null });
+  });
 });

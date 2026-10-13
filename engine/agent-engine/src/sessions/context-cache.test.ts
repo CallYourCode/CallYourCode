@@ -150,3 +150,37 @@ test("a grown file is re-read and the new answer replaces the old", async () => 
   expect(modelOf(session)).toBe("Opus 5");
   expect(modelAcronymOf(session)).toBe("O5");
 });
+
+test("Pi snapshot growth, engine restart, and equal-size resume files remain fresh", async () => {
+  const { PI_TRANSCRIPT } = await import("../chat/transcripts.ts");
+  const piSession: CtxSession = { ...session, id: "pi-context", agent: { id: "pi" }, harnessSessionId: null };
+  const snapshot = (tokens: number | null) => JSON.stringify({ type: "custom", customType: "cyc-context",
+    data: { version: 1, provider: "openai-codex", modelId: "gpt-6.1-sol", contextWindow: 272000, tokens } }) + "\n";
+  const first = join(root, "first.jsonl");
+  const second = join(root, "second.jsonl");
+  writeFileSync(first, snapshot(136000));
+  // Same file size, another account/session, different reading.
+  writeFileSync(second, snapshot(272000));
+  let located: { path: string } | null = { path: first };
+  let reads = 0;
+  const wire = () => initContextCache({
+    sessions: () => [piSession],
+    transcriptFile: () => located,
+    contextRead: async () => { reads++; return { pct: await PI_TRANSCRIPT.contextPct(located!.path), model: await PI_TRANSCRIPT.model(located!.path) }; },
+    claudeTranscriptPath: () => null, claudeContextRead: async () => null, claudeTitleRead: async () => null,
+    broadcastSessions: () => {}, clock: manualClock(),
+  });
+  resetForTest(); wire();
+  await pollOnce(); expect(contextPctOf(piSession)).toBe(50);
+  await pollOnce(); expect(reads).toBe(1);
+  located = { path: second };
+  await pollOnce(); expect(contextPctOf(piSession)).toBe(100);
+  writeFileSync(second, snapshot(272000) + JSON.stringify({ type: "compaction" }) + "\n" + snapshot(null));
+  await pollOnce(); expect(contextPctOf(piSession)).toBeNull();
+  writeFileSync(second, snapshot(272000) + snapshot(136000));
+  await pollOnce(); expect(contextPctOf(piSession)).toBe(50);
+  resetForTest(); wire();
+  await pollOnce(); expect(contextPctOf(piSession)).toBe(50);
+  located = null;
+  await pollOnce(); expect(contextPctOf(piSession)).toBeNull();
+});

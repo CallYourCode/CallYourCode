@@ -5,7 +5,8 @@
  * Context FAILS OPEN (2026-09-02): tokens come off the harness's own record and
  * the window is the harness's reported one where it writes one (codex), else
  * `contextWindowFor(model)`, the 1M default. Null only when there is no usage
- * record to read at all. */
+ * record to read at all. Pi instead requires its runtime context snapshot; an
+ * unknown effective window must not masquerade as Claude's default. */
 
 import { join, normalize } from "node:path";
 import { homedir } from "node:os";
@@ -169,32 +170,30 @@ export const PI_TRANSCRIPT: TranscriptSupport = {
     if (stop === "stop" || stop === "error" || stop === "length") return "idle";
     return "working";
   },
-  /* THE NEWEST ASSISTANT MESSAGE'S USAGE, read off the fixture shape
-   * (fixtures/pi-session.jsonl): `message.usage` carries `input`, `cacheRead`,
-   * `cacheWrite`, `output`, `reasoning`, `totalTokens`. What was IN CONTEXT for
-   * that request is input + cacheRead + cacheWrite, the same three-way sum the
-   * claude reader makes (output is what the model wrote, counted next turn).
-   * pi writes no context window into the session file (none in the fixture, none
-   * in testbench/), so the window is `contextWindowFor(model)`: the 1M default
-   * since 2026-09-02 (fail open), the newest model_change/assistant model as the
-   * key. No assistant turn yet answers null. */
+  // The extension persists Pi's actual projected context reading at existing
+  // lifecycle boundaries. Tokens and effective window are one provider/model
+  // scoped snapshot, not cumulative billing or Claude's fallback window.
+  // Old sessions stay unknown until loaded by the updated extension (/reload).
   async contextPct(path) {
-    let tokens = 0;
-    let model = "";
+    let pct: number | null = null;
     await eachLine(path, (line) => {
       const rec = parseJson(line);
       if (!rec) return;
-      if (rec.type === "model_change" && typeof rec.modelId === "string" && rec.modelId) model = rec.modelId;
-      const m = rec.message;
-      if (rec.type !== "message" || m?.role !== "assistant") return;
-      if (typeof m.model === "string" && m.model) model = m.model;
-      const u = m.usage;
-      if (!u || typeof u !== "object") return;
-      const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
-      const t = n(u.input) + n(u.cacheRead) + n(u.cacheWrite);
-      if (t > 0) tokens = t;
+      if (rec.type === "custom" && rec.customType === "cyc-context") {
+        const d = rec.data;
+        const valid = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+        pct = d?.version === 1 && typeof d.provider === "string" && !!d.provider
+          && typeof d.modelId === "string" && !!d.modelId
+          && valid(d.tokens) && d.tokens >= 0 && valid(d.contextWindow) && d.contextWindow > 0
+          ? Math.max(0, Math.min(100, Math.floor(d.tokens / d.contextWindow * 100))) : null;
+        return;
+      }
+      // Never retain a pre-compaction/pre-switch/old-turn estimate indefinitely
+      // if the extension is missing or a newer boundary has not yet reported.
+      if (["session", "model_change", "compaction", "branch_summary", "context_edit", "custom_message"].includes(rec.type)
+        || rec.type === "message") pct = null;
     });
-    return pctUsed(tokens, contextWindowFor(model));
+    return pct;
   },
   async model(path) {
     let model: string | null = null;
@@ -204,6 +203,8 @@ export const PI_TRANSCRIPT: TranscriptSupport = {
       if (rec.type === "model_change" && typeof rec.modelId === "string" && rec.modelId) {
         model = rec.modelId;
       }
+      if (rec.type === "custom" && rec.customType === "cyc-context" && rec.data?.version === 1
+        && typeof rec.data.modelId === "string" && rec.data.modelId) model = rec.data.modelId;
       const m = rec.message;
       if (rec.type === "message" && m?.role === "assistant" && typeof m.model === "string" && m.model) {
         model = m.model;
