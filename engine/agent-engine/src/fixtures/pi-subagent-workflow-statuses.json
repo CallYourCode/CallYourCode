@@ -1,0 +1,128 @@
+[
+  {
+    "runId": "2145580d-aafb-4be7-9ce2-86d13ca0233c",
+    "sessionId": "/home/shikher/.pi/agent/sessions/--home-shikher-projects-personal-vlc-reskin--/2026-10-12T16-22-18-764Z_01a130ec-0d8b-7547-8a1c-5708891002c0.jsonl",
+    "mode": "single",
+    "state": "running",
+    "pid": 2517145,
+    "parentWorkflowRunId": "4c1b17b3-fb1c-4b3e-b2a3-e3c3caec0d88",
+    "startedAt": 1791906623744,
+    "lastUpdate": 1791908874147,
+    "totalTokens": {
+      "total": 375910
+    },
+    "steps": [
+      {
+        "agent": "verifier",
+        "sessionName": "verifier: Read-only independent Lane 2.5 review in explicit isolate...",
+        "model": "openai-codex/gpt-6.1-sol:high",
+        "status": "running"
+      }
+    ]
+  },
+  {
+    "runId": "4c1b17b3-fb1c-4b3e-b2a3-e3c3caec0d88",
+    "sessionId": "/home/shikher/.pi/agent/sessions/--home-shikher-projects-personal-vlc-reskin--/2026-10-12T16-22-18-764Z_01a130ec-0d8b-7547-8a1c-5708891002c0.jsonl",
+    "mode": "workflow",
+    "state": "running",
+    "pid": 1048838,
+    "startedAt": 1791900851958,
+    "lastUpdate": 1791906623178,
+    "steps": [
+      {
+        "agent": "builder",
+        "sessionName": "builder: Implement Lane 2.5 in your explicit isolated cwd /home/sh...",
+        "status": "completed"
+      },
+      {
+        "agent": "builder",
+        "sessionName": "builder: Implement ONLY Lane 4.1 settings SHELL in explicit isolat...",
+        "status": "failed"
+      },
+      {
+        "agent": "verifier",
+        "sessionName": "verifier: Read-only independent Lane 2.5 review in explicit isolate...",
+        "status": "running"
+      }
+    ]
+  },
+  {
+    "runId": "70a7dd90-9270-47c7-9ddd-c0ee9459b140",
+    "sessionId": "/home/shikher/.pi/agent/sessions/--home-shikher-projects-personal-vlc-reskin--/2026-10-12T16-22-18-764Z_01a130ec-0d8b-7547-8a1c-5708891002c0.jsonl",
+    "mode": "single",
+    "state": "running",
+    "pid": 2436663,
+    "parentWorkflowRunId": "cee32571-96c3-4280-94ba-963c4ae6921d",
+    "startedAt": 1791903411437,
+    "lastUpdate": 1791908871922,
+    "totalTokens": {
+      "total": 590476
+    },
+    "steps": [
+      {
+        "agent": "builder",
+        "sessionName": "builder: Implement bounded Phase3.1a LIBRARY NAVIGATION ONLY in is...",
+        "model": "openai-codex/gpt-6.1-sol:high",
+        "status": "running"
+      }
+    ]
+  },
+  {
+    "runId": "cee32571-96c3-4280-94ba-963c4ae6921d",
+    "sessionId": "/home/shikher/.pi/agent/sessions/--home-shikher-projects-personal-vlc-reskin--/2026-10-12T16-22-18-764Z_01a130ec-0d8b-7547-8a1c-5708891002c0.jsonl",
+    "mode": "workflow",
+    "state": "running",
+    "pid": 1048838,
+    "startedAt": 1791903410788,
+    "lastUpdate": 1791903410853,
+    "steps": [
+      {
+        "agent": "builder",
+        "sessionName": "builder: Implement bounded Phase3.1a LIBRARY NAVIGATION ONLY in is...",
+        "status": "running"
+      }
+    ]
+  },
+  {
+    "runId": "d5198b51-f149-46ef-a1cf-1cde2932c7e3",
+    "sessionId": "/home/shikher/.pi/agent/sessions/--home-shikher-projects-personal-vlc-reskin--/2026-10-12T16-22-18-764Z_01a130ec-0d8b-7547-8a1c-5708891002c0.jsonl",
+    "mode": "workflow",
+    "state": "running",
+    "pid": 1048838,
+    "startedAt": 1791901586317,
+    "lastUpdate": 1791908341806,
+    "steps": [
+      {
+        "agent": "builder",
+        "sessionName": "settings41-retry1-build: Resume settings shell after provider error",
+        "status": "completed"
+      },
+      {
+        "agent": "verifier",
+        "sessionName": "verifier: Fresh independent 4.1 settings SHELL review in /home/shik...",
+        "status": "running"
+      }
+    ]
+  },
+  {
+    "runId": "d9655818-5ad4-4304-8254-8b34d4b51f48",
+    "sessionId": "/home/shikher/.pi/agent/sessions/--home-shikher-projects-personal-vlc-reskin--/2026-10-12T16-22-18-764Z_01a130ec-0d8b-7547-8a1c-5708891002c0.jsonl",
+    "mode": "single",
+    "state": "running",
+    "pid": 2553853,
+    "parentWorkflowRunId": "d5198b51-f149-46ef-a1cf-1cde2932c7e3",
+    "startedAt": 1791908342566,
+    "lastUpdate": 1791908872344,
+    "totalTokens": {
+      "total": 86111
+    },
+    "steps": [
+      {
+        "agent": "verifier",
+        "sessionName": "verifier: Fresh independent 4.1 settings SHELL review in /home/shik...",
+        "model": "openai-codex/gpt-6.1-sol:high",
+        "status": "running"
+      }
+    ]
+  }
+]

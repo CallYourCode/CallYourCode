@@ -29,7 +29,7 @@ export function piSubagentsRoot(env: Record<string, string | undefined> = proces
 
 type Step = { agent?: string; sessionName?: string; model?: string };
 type Status = {
-  runId?: string; sessionId?: string; state?: string; pid?: number;
+  runId?: string; sessionId?: string; mode?: string; state?: string; pid?: number;
   startedAt?: number; endedAt?: number; lastUpdate?: number;
   steps?: Step[]; totalTokens?: { total?: number };
 };
@@ -44,9 +44,12 @@ function tokensLabel(n: unknown): string | null {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n));
 }
 
-/** The bar row for one status.json, or null when it is not this session's. */
+/** The bar row for one subagent status.json, or null when it is not this session's subagent. */
 export function runFromStatus(s: Status, sessionPath: string, now: number, alive = pidAlive): AgentRun | null {
   if (!s || s.sessionId !== sessionPath || typeof s.runId !== "string") return null;
+  // Workflow wrappers use the parent pi pid, not a subagent runner. Their
+  // children have their own status.json rows, including after completion.
+  if (s.mode === "workflow") return null;
   const startedAt = typeof s.startedAt === "number" ? s.startedAt : null;
   if (startedAt === null) return null;
   const step = (Array.isArray(s.steps) && s.steps[0]) || {};

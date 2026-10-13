@@ -1,11 +1,12 @@
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  piSubagentRunsCached, readPiSubagentRuns, refreshPiSubagentCache,
+  piSubagentRunsCached, piSubagentRunsFresh, readPiSubagentRuns, refreshPiSubagentCache,
   resetPiSubagentCacheForTest, runFromStatus,
 } from "./pi-subagent-runs.ts";
+import { runningCount } from "../sessions/subagent-count.ts";
 
 const SESSION = "/home/me/.pi/agent/sessions/--home-me-proj--/2026-09-24_01a0.jsonl";
 const NOW = 1_790_262_500_000;
@@ -75,6 +76,61 @@ function seedIn(r: string, runId: string, over: Record<string, unknown> = {}): s
   writeFileSync(p, JSON.stringify(status(runId, over)));
   return p;
 }
+
+// Relevant fields copied read-only from six VLC Reskin status.json files on
+// 2026-10-13. Workflow pids were the parent pi pid, not subagent runners.
+const workflowStatuses = JSON.parse(readFileSync(
+  new URL("../fixtures/pi-subagent-workflow-statuses.json", import.meta.url), "utf8",
+)) as Array<Parameters<typeof runFromStatus>[0] & { mode: string; parentWorkflowRunId?: string }>;
+const WORKFLOW_SESSION = workflowStatuses[0]!.sessionId!;
+const WORKFLOW_NOW = 1_791_908_900_000;
+
+test("three real subagents plus their workflow wrappers give three bar rows and three running", async () => {
+  const r = freshRoot();
+  try {
+    for (const s of workflowStatuses) {
+      const d = join(r, "async-subagent-runs", s.runId!);
+      mkdirSync(d, { recursive: true });
+      // Preserve the real shapes, but use our own live pid for a stable test.
+      writeFileSync(join(d, "status.json"), JSON.stringify({ ...s, pid: process.pid }));
+    }
+    const children = workflowStatuses.filter((s) => s.mode === "single");
+    expect(children.map((s) => s.parentWorkflowRunId).sort()).toEqual(
+      workflowStatuses.filter((s) => s.mode === "workflow").map((s) => s.runId).sort(),
+    );
+    const rows = await readPiSubagentRuns(WORKFLOW_SESSION, r, WORKFLOW_NOW);
+    expect(runningCount(rows)).toBe(3);
+    expect(rows.map((row) => row.agentId)).toEqual(
+      children.sort((a, b) => a.startedAt! - b.startedAt!).map((s) => s.runId!),
+    );
+    await refreshPiSubagentCache(r, WORKFLOW_NOW);
+    expect(piSubagentRunsCached(WORKFLOW_SESSION, WORKFLOW_NOW)).toEqual(rows);
+    expect(await piSubagentRunsFresh(WORKFLOW_SESSION, r, WORKFLOW_NOW)).toEqual(rows);
+  } finally {
+    rmSync(r, { recursive: true, force: true });
+  }
+});
+
+test("a workflow before its child starts and a finished workflow are never subagent rows", () => {
+  const wrapper = workflowStatuses.find((s) => s.mode === "workflow")!;
+  // A wrapper alone does not imply a child runner has started.
+  expect(runFromStatus(wrapper, WORKFLOW_SESSION, WORKFLOW_NOW, () => true)).toBeNull();
+  expect(runFromStatus({ ...wrapper, state: "complete", endedAt: WORKFLOW_NOW - 1_000 },
+    WORKFLOW_SESSION, WORKFLOW_NOW, () => true)).toBeNull();
+  // Its finished child still has a recent row, just not a running count.
+  const child = workflowStatuses.find((s) => s.mode === "single")!;
+  const row = runFromStatus({ ...child, state: "complete", endedAt: WORKFLOW_NOW - 1_000 },
+    WORKFLOW_SESSION, WORKFLOW_NOW, () => true)!;
+  expect(row.agentId).toBe(child.runId!);
+  expect(row.endedTs).toBe(WORKFLOW_NOW - 1_000);
+  expect(runningCount([row])).toBe(0);
+});
+
+test("a plain single run with no workflow remains a subagent row", () => {
+  const row = runFromStatus(status("plain-single", { mode: "single" }), SESSION, NOW, () => true);
+  expect(row?.agentId).toBe("plain-single");
+  expect(row?.endedTs).toBeNull();
+});
 
 test("cache: identical output to the uncached read, per session, across runs", async () => {
   const r = freshRoot();
