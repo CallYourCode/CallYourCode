@@ -110,12 +110,12 @@ import { resolveRelayUrl, RelayLink } from "../transport/relay.ts";
  * is spelled by position:
  *
  *   1. env + identity, data tree, E2E keys, RTC stack
- *   2. discovery/enrolment (announce) + the relay link
+ *   2. discovery/enrolment (announce) + construct the relay link
  *   3. stores: uploads, clips, session state (agent metas + chat replay)
  *   4. module wiring (initX seams), boot sweeps
  *   5. plugins (the deps bags for view plugins, the minimal host for crons)
  *   6. services + the route table context
- *   7. reconcile subscription -> adapter.start() -> Bun.serve
+ *   7. client wiring -> relay.start() -> reconcile subscription -> adapter.start()
  *   8. tail: hook state, the meta-save gate flip, the boot log line
  */
 await boot();
@@ -332,7 +332,6 @@ const relayLink = new RelayLink({
   log: (event, fields) => LOG.line(event, fields ?? {}),
   onPipe: (pipe, conn) => mintRtcClient(pipe, relaySignalSock(conn)),
 });
-relayLink.start();
 
 /* Presence first (presence.ts): notify asks it, and its one call back into
  * notify -- "the grace expired, flush what is owed" -- is this onAway seam. */
@@ -1278,8 +1277,10 @@ function voiceGate(cap: "stt" | "tts"): string | null {
 // that they are ignored (every agent-stamped pane is listed now); agents.ts.
 warnRetiredEnv();
 
-/* The rtc client glue (reachedAddrOf, onSignalOffer, mintRtcClient) lives in
- * rtc-glue.ts (L4). */
+/* Wire the glue before the local listener can accept an offer. The outbound
+ * relay starts below, after the rest of the client wiring is ready too. */
+initRtcGlue({ e2e: E2E_STATE, engineUser: ENGINE_USER, engineHost: ENGINE_HOST,
+  log: (e, f) => LOG.line(e, f) });
 
 const server = Bun.serve<SockData>({
   port: PORT,
@@ -1476,8 +1477,6 @@ initFrames({
   terminalViewer: () => adapter.capabilities().terminalViewer,
   log: (e, f) => LOG.line(e, f),
 });
-initRtcGlue({ e2e: E2E_STATE, engineUser: ENGINE_USER, engineHost: ENGINE_HOST,
-  log: (e, f) => LOG.line(e, f) });
 /* Call-mode voice: the sealed-DC control (fp binding, call start/stop/speak). The
  * media path (Opus/RTP) rides the reciprocated track; this only logs and, by
  * default, sources call-mode TTS from the configured voice engine. */
@@ -1496,6 +1495,7 @@ initTunnel({
  * LIVE binding to a third party's session id (the 2026-09-18 aiusage-grok
  * bug). Wired here, once the session-state maps and lineage it reads exist. */
 setLiveBindGuard(liveBindGuard);
+relayLink.start();
 
 /* The reconcile subscribes right before the adapter starts, once every module's deps are wired: a mux
  * snapshot arriving mid-boot must not land on an uninitialised module
