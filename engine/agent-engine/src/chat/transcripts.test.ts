@@ -36,7 +36,6 @@ import { HARNESS_CWD } from "../test-utils/fake-herdr.ts";
 import { tmpDir } from "../test-utils/tmp.ts";
 import { until } from "../test-utils/wait.ts";
 import { dispatchClientFrame } from "../transport/frames.ts";
-import { pollOnce as pollContextOnce } from "../sessions/context-cache.ts";
 
 const PI_FIXTURE = new URL("../fixtures/pi-session.jsonl", import.meta.url).pathname;
 const CODEX_FIXTURE = new URL("../fixtures/codex-rollout.jsonl", import.meta.url).pathname;
@@ -114,9 +113,12 @@ test("pi fixture: messages, model, clean-null context, working/idle edges", asyn
   expect(msgs.some((m) => m.role === "claude" && m.text.includes("TranscriptSupport"))).toBe(true);
 
   expect(await PI_TRANSCRIPT.model(located!.path)).toBe("grok-4.6");
-  // This older captured session predates the runtime snapshot. Its window is
-  // unknown, not the Claude-derived 1M default.
-  expect(await PI_TRANSCRIPT.contextPct(located!.path)).toBeNull();
+  /* FAIL OPEN (2026-09-02): the fixture's one assistant message carries
+   * usage {input:7082, cacheRead:512, cacheWrite:0}; 7,594 in context against
+   * the 1M default (pi writes no window into the file) floors to 0, a number,
+   * not the old "no window, no answer" null. */
+  expect(await PI_TRANSCRIPT.contextPct(located!.path),
+    "pi tokens against the 1M default: 7594 / 1M floors to 0").toBe(0);
 
   const user = lines.find((l) => l.includes('"role":"user"'))!;
   const tool = lines.find((l) => l.includes("toolUse"))!;
@@ -176,8 +178,26 @@ test("opencode fixture: messages, model, clean-null context, working/idle edges"
  * to land on a digit (the captured fixtures are tiny sessions that floor to 0).
  * Fail open (2026-09-02): tokens off the harness's record, window off
  * contextWindowFor (1M default, the harness's own where it reports one). */
-test("pi: a historical transcript without a runtime window stays unknown", async () => {
-  expect(await PI_TRANSCRIPT.contextPct(piPath)).toBeNull();
+test("pi: the newest assistant usage against the 1M default, and null with no usage", async () => {
+  const dir = await tmpDir("cyc-pi-ctx-");
+  const rec = (input: number, cacheRead: number) => JSON.stringify({
+    type: "message", id: "m", timestamp: "2026-08-17T15:32:45.015Z",
+    message: { role: "assistant", content: [{ type: "text", text: "ok" }], model: "grok-4.6",
+      usage: { input, output: 90, cacheRead, cacheWrite: 0, reasoning: 28, totalTokens: input + cacheRead + 90 } },
+  });
+  const model = JSON.stringify({ type: "model_change", id: "a", timestamp: "2026-08-17T15:31:14.968Z", provider: "xai", modelId: "grok-4.6" });
+  const path = join(dir, "s.jsonl");
+  await writeFile(path, [model, rec(100_000, 0), rec(200_000, 50_000)].join("\n") + "\n");
+  expect(await PI_TRANSCRIPT.contextPct(path), "newest wins: 250k of 1M").toBe(25);
+  const claude = join(dir, "c.jsonl");
+  await writeFile(claude, [
+    JSON.stringify({ type: "model_change", id: "a", timestamp: "t", provider: "anthropic", modelId: "claude-haiku-4-5-20251001" }),
+    rec(100_000, 0).replace('"model":"grok-4.6"', '"model":"claude-haiku-4-5-20251001"'),
+  ].join("\n") + "\n");
+  expect(await PI_TRANSCRIPT.contextPct(claude), "pi on haiku takes haiku's 200k override").toBe(50);
+  const empty = join(dir, "e.jsonl");
+  await writeFile(empty, model + "\n");
+  expect(await PI_TRANSCRIPT.contextPct(empty), "no assistant usage yet is no reading").toBeNull();
 });
 
 test("opencode: the newest assistant tokens, the session row as fallback, 1M default", async () => {
@@ -290,23 +310,10 @@ test("a pi pane's model and context ride the sessions contract", async () => {
 
   const row = listOf(client).find((s) => s.id === wireId("w1:p1"));
   expect(row.agentId, "the row does not say which coding agent it is").toBe("pi");
-  expect(row.contextPct, "an old pi session with no runtime window is unknown").toBeNull();
+  expect(row.contextPct, "pi tokens against the 1M default ride the row: 7594 / 1M floors to 0").toBe(0);
   // the overlay gate (wire name kept for the app): pi now declares an activity
   // tail, so its row advertises its harness id and the app paints its rows.
   expect(row.claudeSessionId, "the pi row must open the app's session-row overlay").toBe(PI_ID);
-
-  const report = async (contextWindow: number, tokens: number | null) => {
-    appendFileSync(piPanePath, JSON.stringify({ type: "custom", customType: "cyc-context",
-      data: { version: 1, provider: "openai-codex", modelId: "gpt-6.1-sol", contextWindow, tokens } }) + "\n");
-    await pollContextOnce();
-    c.hello(client);
-    return listOf(client).find((s) => s.id === wireId("w1:p1"))?.contextPct;
-  };
-  expect(await report(272000, 136000)).toBe(50);
-  expect(await report(1000000, 136000)).toBe(13);
-  expect(await report(272000, null)).toBeNull();
-  // Restore the shared historical fixture for the later tail tests.
-  await writeFile(piPanePath, await Bun.file(PI_FIXTURE).text());
 });
 
 test("a pi pane's conversation enters the chat stream; non-turns do not", async () => {

@@ -63,7 +63,7 @@ type CtxDeps = {
   clock?: Clock;
 };
 
-const contextByKey = new Map<string, { size: number; path?: string; pct: number | null; modelId: string | null; modelName?: string | null; modelAcronym?: string | null }>();
+const contextByKey = new Map<string, { size: number; pct: number | null; modelId: string | null; modelName?: string | null; modelAcronym?: string | null }>();
 const claudeTitleByKey = new Map<string, { size: number; title: string | null }>();
 
 let deps: CtxDeps | null = null;
@@ -172,13 +172,13 @@ export async function refreshContext(s: CtxSession): Promise<boolean> {
     return !had || had.pct !== pct || had.modelId !== modelId;
   }
   const located = deps.transcriptFile(s.muxHandle);
+  if (!located) return false;
   const key = contextKey(s);
-  if (!located) return contextByKey.delete(key);
   const size = Bun.file(statPathOf(located.path)).size;
   const had = contextByKey.get(key);
   // an announced model switch is news even when the transcript has not grown
   const live = located.sessionId ? liveModelOf(located.sessionId) : null;
-  if (had && had.path === located.path && had.size === size && (live === null || live === had.modelId)) return false;
+  if (had && had.size === size && (live === null || live === had.modelId)) return false;
   const read = await deps.contextRead(s.muxHandle);
   if (!read) return false;
   // The generic read hands back the transcript's RAW model id (a pi pane on the
@@ -186,7 +186,7 @@ export async function refreshContext(s: CtxSession): Promise<boolean> {
   // exactly as the claude branch stores an already-mapped name, so the sessions
   // list never prints a raw id where every other row prints "Fable 5".
   const modelName = read.model === null ? null : modelDisplayName(read.model);
-  contextByKey.set(key, { size, path: located.path, pct: read.pct, modelId: read.model, modelName });
+  contextByKey.set(key, { size, pct: read.pct, modelId: read.model, modelName });
   return !had || had.pct !== read.pct || had.modelName !== modelName;
 }
 

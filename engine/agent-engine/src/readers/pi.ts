@@ -219,8 +219,8 @@ export const piReader: HarnessReader = {
   // working; a stop/error/length stop reason is idle.
   turnEdge: PI_TRANSCRIPT.turnEdge,
 
-  // Pi's durable runtime snapshot: projected tokens / effective model window.
-  // Unknown for older sessions without the extension or after compaction.
+  // Newest assistant usage (input+cacheRead+cacheWrite) against the model's
+  // window; null only when no assistant turn has been written yet.
   contextPct: PI_TRANSCRIPT.contextPct,
 
   // pi's own model id (raw), like codex/opencode; friendly-named downstream.

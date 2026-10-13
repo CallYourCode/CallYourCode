@@ -288,41 +288,12 @@ function modelOf(ctx) {
   }
 }
 
-// Durable, non-context data: survives engine restarts and works without a
-// socket. Pi owns both the effective window (including overrides) and the
-// projected token estimate. Never substitute billing totals or a model table.
-const CONTEXT_ENTRY = "cyc-context";
-function reportContext(pi, ctx) {
-  if (typeof pi.appendEntry !== "function") return;
-  const model = ctx && ctx.model;
-  if (!model || typeof model.provider !== "string" || typeof model.id !== "string") return;
-  const usage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
-  const valid = (n) => typeof n === "number" && Number.isFinite(n);
-  const data = {
-    version: 1,
-    provider: model.provider,
-    modelId: model.id,
-    contextWindow: valid(model.contextWindow) && model.contextWindow > 0 ? model.contextWindow : null,
-    tokens: usage && usage.contextWindow === model.contextWindow && valid(usage.tokens) && usage.tokens >= 0 ? usage.tokens : null,
-  };
-  // Deduplicate only at the current physical leaf. Reloading unchanged data
-  // needs no write; tree navigation must write even if its numbers are equal,
-  // so a file reader sees the new active branch rather than the abandoned one.
-  const sm = ctx.sessionManager;
-  const entries = sm && typeof sm.getEntries === "function" ? sm.getEntries() : [];
-  const last = entries[entries.length - 1];
-  if (last && last.id === leafId(ctx) && last.type === "custom" && last.customType === CONTEXT_ENTRY
-    && JSON.stringify(last.data) === JSON.stringify(data)) return;
-  pi.appendEntry(CONTEXT_ENTRY, data);
-}
-
 /** A model switch re-announces, so the app's model chip follows the running
  *  model instead of waiting for the next reply to land in the transcript. */
-function onModelSelect(on, pi) {
+function onModelSelect(on) {
   on("model_select", (event, ctx) => {
     const m = event && event.model && typeof event.model.id === "string" ? event.model.id : modelOf(ctx);
     void announceSession(sessionIdOf(ctx), cwdOf(ctx), undefined, m, true);
-    reportContext(pi, ctx);
   });
 }
 
@@ -461,12 +432,6 @@ function activate(pi, deps) {
     // an old pi without session_before_compact: no guard, no crash
   }
 
-  // These boundaries run after Pi has persisted/rebuilt context. In particular
-  // message_end fires BEFORE persistence, so it cannot supply a fresh reading.
-  for (const event of ["turn_end", "session_compact", "session_tree", "agent_before_settle"]) {
-    on(event, (_event, ctx) => reportContext(pi, ctx));
-  }
-
   const sockPath = process.env.CYC_PI_EVENT_SOCK;
   if (!sockPath) {
     /* NOT LAUNCHED BY CYC (a plain `pi` typed into a pane, loading this file
@@ -476,10 +441,8 @@ function activate(pi, deps) {
      * HTTP POST, independent of the socket, so it runs here too. */
     on("session_start", (_event, ctx) => {
       void announceSession(sessionIdOf(ctx), cwdOf(ctx), undefined, modelOf(ctx));
-      reportContext(pi, ctx);
     });
-    onModelSelect(on, pi);
-    on("agent_end", (_event, ctx) => reportContext(pi, ctx));
+    onModelSelect(on);
     return;
   }
 
@@ -517,9 +480,8 @@ function activate(pi, deps) {
     // the same race-free way claude/codex/opencode capture theirs. Fire-and-
     // forget, fail-silent; the socket re-send above is the backstop.
     void announceSession(sessionId, cwd, undefined, frame.model);
-    reportContext(pi, ctx);
   });
-  onModelSelect(on, pi);
+  onModelSelect(on);
 
   reportGuard = (g) => {
     if (ownsThisPane()) sink.send({ t: "pi.event", kind: "compaction.guarded", ts: Date.now(), ...g });
@@ -531,9 +493,8 @@ function activate(pi, deps) {
   on("turn_start", () => {
     sink.send({ t: "pi.event", kind: "status", status: "working", ts: Date.now() });
   });
-  on("agent_end", (_event, ctx) => {
+  on("agent_end", () => {
     sink.send({ t: "pi.event", kind: "status", status: "idle", ts: Date.now() });
-    reportContext(pi, ctx);
   });
 
   // a finalized message -> a prompt/reply row. id is the durable leaf id.
