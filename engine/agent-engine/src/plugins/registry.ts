@@ -25,7 +25,7 @@
  *   bun test agent-engine/src/plugins/registry.test.ts
  */
 
-import { usageCardPlugin, type UsagePollDeps, type CodexUsageReader } from "./usage-card/index.ts";
+import { usageCardPlugin, type UsagePollDeps, type CodexUsageReader, type UsageReader } from "./usage-card/index.ts";
 import { cronsPlugin } from "./crons/index.ts";
 import { searchPlugin } from "./search/index.ts";
 import { modelIndicatorPlugin, type ModelDeps } from "./model-indicator/index.ts";
@@ -227,7 +227,7 @@ export function declarePlugins(specs: readonly PluginSpec[]): PluginDecl[] {
  * (platform/core.ts): a migrated plugin takes it instead of a bespoke deps bag, and
  * its bag key leaves this type as it moves. End state: { core,
  * crons, dials } -- crons keeps its minimal host, dials the sanctioned residual. */
-export type PluginContext = { core?: (id: string) => PluginCore; crons?: boolean; usage?: UsagePollDeps; codexUsage?: CodexUsageReader; search?: boolean; model?: ModelDeps; persona?: boolean; dials?: DialsDeps; ctx?: boolean; stop?: boolean };
+export type PluginContext = { core?: (id: string) => PluginCore; crons?: boolean; usage?: UsagePollDeps; codexUsage?: CodexUsageReader; grokUsage?: UsageReader; search?: boolean; model?: ModelDeps; persona?: boolean; dials?: DialsDeps; ctx?: boolean; stop?: boolean };
 
 export function loadPlugins(ctx: PluginContext = {}): PluginSpec[] {
   /* Kill switch: with CYC_PLUGINS_OFF=1 the engine declares no plugins. This is
@@ -255,7 +255,7 @@ export function loadPlugins(ctx: PluginContext = {}): PluginSpec[] {
    * core.usage(kind, force)) AND owns its own limits-poll ticker when the root
    * wires the poll seam. A bare loadPlugins() (tests) leaves both null and gets
    * the card renderer with no loop. */
-  builtins.push(usageCardPlugin(ctx.core, ctx.usage, ctx.codexUsage));
+  builtins.push(usageCardPlugin(ctx.core, ctx.usage, ctx.codexUsage, ctx.grokUsage));
   /* Crons takes its four host verbs off the typed core (its narrowed slice of
    * the contract), not a separate PluginHost handle. Gated on the core being
    * wired: a bare loadPlugins() leaves the schedules vertical off, exactly as

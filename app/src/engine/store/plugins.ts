@@ -56,6 +56,7 @@ export async function pluginCardOf(
 ): Promise<{
   ok: boolean;
   html?: string;
+  source?: string;
   ageMs?: number | null;
   height?: number;
   dedupe?: string;
@@ -72,6 +73,7 @@ export async function pluginCardOf(
     const body = (await res.json().catch((): null => null)) as {
       ok?: boolean;
       html?: string;
+      source?: string;
       ageMs?: number | null;
       height?: number;
       dedupe?: string;
@@ -89,6 +91,7 @@ export async function pluginCardOf(
         ok: true,
         html,
         ageMs,
+        ...(typeof body.source === 'string' ? {source: body.source} : {}),
         ...(typeof body.height === 'number' ? {height: body.height} : {}),
         ...(dedupe ? {dedupe} : {}),
         ...(typeof body.stale === 'boolean' ? {stale: body.stale} : {}),

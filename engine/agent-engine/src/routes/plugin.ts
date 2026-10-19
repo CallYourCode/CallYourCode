@@ -142,7 +142,7 @@ export async function pluginRoutes(ctx: RoutesCtx, req: Request, url: URL, path:
       // the two freshness booleans, copied through for the app's age line (#577)
       const stale = out?.stale === true;
       const throttled = out?.throttled === true;
-      const body = { ok: true, html, ageMs, ...(height != null ? { height } : {}),
+      const body = { ok: true, html, ageMs, ...(typeof out.source === "string" ? { source: out.source } : {}), ...(height != null ? { height } : {}),
         ...(stale ? { stale } : {}), ...(throttled ? { throttled } : {}), ...(dedupe ? { dedupe } : {}) };
       cardCache.set(id, { at: Date.now(), body });
       return json(body, 200);

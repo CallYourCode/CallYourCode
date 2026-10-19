@@ -4,7 +4,9 @@ import type {ReadMarker} from '../engine/store/readState';
 import type {CycMessage, CycSession} from '../types';
 
 type Msg = CycMessage & {msgId?: string; mid?: string; seq?: number};
-function msg(over: Omit<Partial<Msg>, 'id'> & {id?: number}): Msg {
+// Legacy mixed-log fixtures include status records in the message list.
+// Keep that compatibility shape local to this helper, not the production type.
+function msg(over: Omit<Partial<Msg>, 'id' | 'kind'> & {id?: number; kind?: Msg['kind'] | 'status'}): Msg {
   return {
     role: 'claude',
     kind: 'text',

@@ -164,7 +164,7 @@ export type PluginSpec = {
      * floor) tells the card to re-derive its data from source. Without it the
      * usage card's render read the cache unconditionally, so the refresh button
      * re-fetched the SAME account's stale numbers and looked dead (#570). */
-    render: (opts?: { force?: boolean }) => Promise<{ html: string; ageMs: number | null; height?: number;
+    render: (opts?: { force?: boolean }) => Promise<{ html: string; ageMs: number | null; height?: number; source?: string;
       /* WHY the numbers are old, for the app's age line (#577). Only the usage
        * card sets these; the app turns `stale` into "(retrying)" and `throttled`
        * into "(check throttled)" and dims the face. Absent means neither. */

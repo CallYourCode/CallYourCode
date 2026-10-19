@@ -42,7 +42,7 @@ import { realClock, type Clock } from "../../runtime/clock.ts";
 export type UsageWindow = { label: string; pct: number; resetsAt: string | null; severity?: "normal" | "warning" | "critical" };
 export type UsageReport = {
   ok: boolean; email?: string; plan?: string; windows?: UsageWindow[]; fetchedAt: number;
-  provider?: "codex"; accountId?: string;
+  provider?: "codex" | "grok"; accountId?: string;
   error?: string; reason?: "signed-out" | "throttled" | "network" | "unknown"; stale?: boolean;
 };
 type UsageAlert = { label: string; pct: number; threshold: number; resetsAt: string | null };
@@ -163,7 +163,8 @@ const STYLE =
   // app/src/components/pluginCard.ts (whenEl end-8, chip bg + px-1, max-w-[12rem]).
   // Padding, not height, so the row's vertical alignment (email/age/refresh as
   // one 22px row) is unchanged.
-  `.uc-head{display:flex;align-items:center;gap:6px;height:22px;padding-right:5.5rem}` +
+  // Variant C app chrome: 75px strip + 7px clearance, matching start-2 / frame inset.
+  `.uc-head{display:flex;align-items:center;gap:6px;height:22px;padding-right:5.5rem;padding-left:5.125rem}` +
   `.uc-who{font-weight:500;color:var(--cyc-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}` +
   `.uc-who.uc-err{font-weight:500}` +
   // one grid so every bar is the same length (the native rule): name, track, pct, reset
@@ -226,7 +227,7 @@ export function renderUsageCard(report: UsageReport, now: number): { html: strin
   if (report.ok) {
     // the head is the account alone; the age line is app chrome now (#577), so
     // the right of this row is deliberately empty for the app to sit it there
-    const label = report.provider === "codex" ? `Codex · ${report.email ?? report.accountId ?? "active Pi account"}` : report.email;
+    const label = report.provider === "grok" ? "Grok" : report.provider === "codex" ? `Codex · ${report.email ?? report.accountId ?? "active Pi account"}` : report.email;
     const who = label ? `<span class="uc-who">${esc(label)}</span>` : "";
     const windows = report.windows ?? [];
     const bars = windows.map((w) => barHtml(w, now)).join("");
@@ -252,8 +253,8 @@ export function renderUsageCard(report: UsageReport, now: number): { html: strin
     const isThrottled = reason === "throttled" || (reason === undefined && throttled(report));
     const signedOut = reason === "signed-out";
     const headline = signedOut ? "not signed in" : isThrottled ? "could not check" : "can't check right now";
-    const whoText = report.provider === "codex" ? `Codex · ${report.email ?? report.accountId ?? headline}` : headline;
-    const msg = report.provider === "codex" ? (report.error ?? "Codex usage unavailable") : signedOut ? (report.error ?? "no limits available")
+    const whoText = report.provider === "grok" ? "Grok" : report.provider === "codex" ? `Codex · ${report.email ?? report.accountId ?? headline}` : headline;
+    const msg = report.provider === "grok" ? (report.error ?? "Grok usage unavailable") : report.provider === "codex" ? (report.error ?? "Codex usage unavailable") : signedOut ? (report.error ?? "no limits available")
       : isThrottled ? "our check for these numbers was throttled"
       : "could not reach the usage service, showing nothing new";
     inner = `<div class="uc"><div class="uc-head"><span class="uc-who uc-err">${esc(whoText)}</span></div>` +
@@ -325,10 +326,14 @@ async function foldUsageOverHarnesses(core: (id: string) => PluginCore, force: b
   throw new Error(NO_ACTIVE_HARNESS);
 }
 
-export type CodexUsageReader = { identity(): string; read(force: boolean): Promise<UsageReport> };
-type UsageProvider = "claude" | "codex";
+export type UsageReader = { identity(): string; read(force: boolean): Promise<UsageReport> };
+export type CodexUsageReader = UsageReader;
+type UsageProvider = "claude" | "codex" | "grok";
+const isUsageProvider = (value: unknown): value is UsageProvider => value === "claude" || value === "codex" || value === "grok";
 let selectedSource: UsageProvider = "claude";
 let codexReader: CodexUsageReader | null = null;
+let grokReader: UsageReader | null = null;
+const selectedReader = () => selectedSource === "codex" ? codexReader : selectedSource === "grok" ? grokReader : null;
 let activeIdentity: string | null = null;
 let generation = 0;
 let preferenceQueue: Promise<unknown> = Promise.resolve();
@@ -346,23 +351,24 @@ async function readPreference(): Promise<{ source: UsageProvider }> {
   const read = preferenceQueue.then(async () => {
     if (usageCore) {
       const value = await usageCore("usage-card").store().get("source") as { source?: unknown } | null;
-      applySource(value?.source === "codex" ? "codex" : "claude");
+      applySource(isUsageProvider(value?.source) ? value.source : "claude");
     }
     return { source: selectedSource };
   });
   preferenceQueue = read.catch(() => {});
   return read;
 }
-function checkCodexIdentity(): void {
-  if (selectedSource !== "codex") return;
-  const key = codexReader?.identity() ?? "unavailable";
+function checkReaderIdentity(): void {
+  if (selectedSource === "claude") return;
+  const key = selectedReader()?.identity() ?? "unavailable";
   if (key !== activeIdentity) { activeIdentity = key; invalidateUsage(); }
 }
 
 async function loadUsage(force: boolean): Promise<UsageReport> {
-  if (selectedSource === "codex") {
-    if (!codexReader) return { ok: false, provider: "codex", error: "Codex usage reader unavailable", fetchedAt: NaN };
-    return codexReader.read(force);
+  if (selectedSource !== "claude") {
+    const reader = selectedReader();
+    if (!reader) return { ok: false, provider: selectedSource, error: `${selectedSource} usage reader unavailable`, fetchedAt: NaN };
+    return reader.read(force);
   }
   if (usageSource) return usageSource(force);
   if (!usageCore) throw new Error("usage core not wired on this engine");
@@ -444,7 +450,7 @@ export function refreshUsageCache(force = false): Promise<void> {
   const flight = (async () => {
     try {
       const report = await loadUsage(force);
-      if (epoch !== generation || (selectedSource === "codex" && codexReader?.identity() !== identity)) return;
+      if (epoch !== generation || (selectedSource !== "claude" && selectedReader()?.identity() !== identity)) return;
       cachedReport = report;
       lastReport = report;
       persistUsageCache(report);
@@ -608,18 +614,17 @@ function refuseWhenNoUsageEver(): void {
 
 /* The card surface (render/dedupe) reads the module cache; identical whether or
  * not this engine runs the poll loop, so it is one object both factory paths use. */
-const usageCard: PluginSpec["card"] = {
+const selectedCard: NonNullable<PluginSpec["card"]> = {
   title: "Plan usage",
   refreshFloorS: REFRESH_FLOOR_S,
   render: async (opts) => {
-    await readPreference();
-    checkCodexIdentity();
-    if (selectedSource === "codex") {
+    checkReaderIdentity();
+    if (selectedSource !== "claude") {
       // The external cache is cheap to read and authoritative on every poll,
       // including expiry/errors. The reader caches only the absent-cache GET.
       await refreshBounded(opts?.force === true, opts?.force ? forceTimeoutMs : coldWaitMs);
-      checkCodexIdentity();
-      return renderUsageCard(cachedReport ?? { ...COLD, provider: "codex" }, Date.now());
+      checkReaderIdentity();
+      return renderUsageCard(cachedReport ?? { ...COLD, provider: selectedSource }, Date.now());
     }
     if (opts?.force) {
       // THE REFRESH BUTTON: go upstream and let the RESPONSE carry the new
@@ -644,7 +649,20 @@ const usageCard: PluginSpec["card"] = {
     }
     return renderUsageCard(cachedReport ?? COLD, Date.now());
   },
-  dedupe: () => { checkCodexIdentity(); return usageDedupe(lastReport); },
+  dedupe: () => { checkReaderIdentity(); return usageDedupe(lastReport); },
+};
+
+// Attach the preference that produced the face, never a later choice from a racing RPC.
+const usageCard: PluginSpec["card"] = {
+  ...selectedCard,
+  render: async (opts) => {
+    for (;;) {
+      await readPreference();
+      const source = selectedSource;
+      const out = await selectedCard.render(opts);
+      if (source === selectedSource) return { ...out, source };
+    }
+  },
 };
 
 /* THE PLUGIN, AS A FACTORY (crons-shaped). `core` is the typed PluginCore the
@@ -660,16 +678,17 @@ const usageCard: PluginSpec["card"] = {
  * cycle it was already in (nextPollAt; limits.ts's persisted last reading makes
  * the first poll after a restart free). The first poll is immediate, and being
  * unforced it usually costs nothing at all. */
-export function usageCardPlugin(core?: (id: string) => PluginCore, poll?: UsagePollDeps, codex?: CodexUsageReader): PluginSpec {
+export function usageCardPlugin(core?: (id: string) => PluginCore, poll?: UsagePollDeps, codex?: CodexUsageReader, grok?: UsageReader): PluginSpec {
   if (core) usageCore = core;
   if (codex) codexReader = codex;
+  if (grok) grokReader = grok;
   const spec: PluginSpec = { id: "usage-card", name: "Plan usage", version: 1, card: usageCard,
     rpc: {
       "get-source": async () => readPreference(),
       "set-source": async (_ctx, args) => {
         const source = (args as { source?: unknown } | null)?.source;
-        if (source !== "claude" && source !== "codex")
-          throw Object.assign(new Error("source must be claude or codex"), { status: 400 });
+        if (!isUsageProvider(source))
+          throw Object.assign(new Error("source must be claude, codex or grok"), { status: 400 });
         const set = preferenceQueue.then(async () => {
           if (!usageCore) throw new Error("usage core not wired on this engine");
           await usageCore("usage-card").store().put("source", { source });
@@ -713,7 +732,7 @@ export function usageCardPlugin(core?: (id: string) => PluginCore, poll?: UsageP
  * the real `claude` usage. Not used by the engine. */
 export const __usageCardTest = {
   setSource(fn: UsageSource | null): void { usageSource = fn; },
-  reset(): void { generation++; selectedSource = "claude"; codexReader = null; activeIdentity = null; preferenceQueue = Promise.resolve(); usageSource = null; usageCore = null; cachedReport = null; lastReport = null; lastRefreshAt = 0; inflightRefresh = null; lastRefreshError = null; forceTimeoutMs = FORCE_TIMEOUT_MS; coldWaitMs = COLD_WAIT_MS; },
+  reset(): void { generation++; selectedSource = "claude"; codexReader = null; grokReader = null; activeIdentity = null; preferenceQueue = Promise.resolve(); usageSource = null; usageCore = null; cachedReport = null; lastReport = null; lastRefreshAt = 0; inflightRefresh = null; lastRefreshError = null; forceTimeoutMs = FORCE_TIMEOUT_MS; coldWaitMs = COLD_WAIT_MS; },
   setCacheFile(path: string): void { cacheFileOverride = path; },
   setForceTimeout(ms: number): void { forceTimeoutMs = ms; },
   setColdWait(ms: number): void { coldWaitMs = ms; },

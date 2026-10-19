@@ -744,13 +744,14 @@ test("card route: renders the plugin's html with ageMs and dedupe", async () => 
   let n = 0;
   const s = serve([{ id, name: "Card", version: 1, card: { title: "C", refreshFloorS: 5,
     dedupe: () => "fixture-key",
-    render: async () => ({ html: `<b>fixture card ${++n}</b>`, ageMs: 1234 }) } }]);
+    render: async () => ({ html: `<b>fixture card ${++n}</b>`, ageMs: 1234, source: "grok" }) } }]);
   const r = await s.get(`/plugin/${id}/card`);
   expect(r.status).toBe(200);
   const j = await r.json() as any;
   expect(j.ok).toBe(true);
   expect(j.html).toContain("fixture card");
   expect(j.ageMs).toBe(1234);
+  expect(j.source).toBe("grok");
   expect(j.dedupe).toBe("fixture-key");
 });
 
