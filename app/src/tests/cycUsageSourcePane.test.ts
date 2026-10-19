@@ -100,10 +100,16 @@ test('grouped card switches its answer engine, paints optimistically, then settl
     )
   );
 });
-test('disabled DeepSeek sends no RPC and old answers render without any strip', async () => {
+test('dim DeepSeek selects through RPC and old answers render without any strip', async () => {
+  fake.rpc.mockResolvedValue({ok: true});
   const {pane, container} = await mount();
   container.querySelector<HTMLButtonElement>('[data-source="deepseek"]')!.click();
-  expect(fake.rpc).not.toHaveBeenCalled();
+  await vi.waitFor(() =>
+    expect(fake.rpc).toHaveBeenCalledWith('b', 'usage-card', 'set-source', null, {
+      source: 'deepseek'
+    })
+  );
+  await vi.waitFor(() => expect(fake.fetch).toHaveBeenLastCalledWith('b', 'usage-card', true));
   delete fake.replies.a.source;
   delete fake.replies.b.source;
   await pane.refreshUsage();

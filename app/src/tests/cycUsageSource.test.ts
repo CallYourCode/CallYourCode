@@ -3,14 +3,15 @@ import {createPluginCard} from '../components/pluginCard';
 
 describe('usage source strip', () => {
   afterEach(() => document.body.replaceChildren());
-  test('active rotates through enabled sources, dim jumps, DeepSeek is inert', () => {
+  test('active rotates through four sources and every dim logo jumps directly', () => {
     const onSourceChange = vi.fn();
     const card = createPluginCard('Plan usage', () => {});
     document.body.append(card.el);
     for (const [source, next] of [
       ['claude', 'codex'],
       ['codex', 'grok'],
-      ['grok', 'claude']
+      ['grok', 'deepseek'],
+      ['deepseek', 'claude']
     ] as const) {
       card.update({html: '<b>usage</b>', source, onSourceChange});
       const active = card.el.querySelector<HTMLButtonElement>(`[data-source="${source}"]`)!;
@@ -20,12 +21,12 @@ describe('usage source strip', () => {
     }
     card.el.querySelector<HTMLButtonElement>('[data-source="codex"]')!.click();
     expect(onSourceChange).toHaveBeenLastCalledWith('codex');
-    onSourceChange.mockClear();
-    const disabled = card.el.querySelector<HTMLButtonElement>('[data-source="deepseek"]')!;
-    expect(disabled.getAttribute('aria-disabled')).toBe('true');
-    expect(disabled.disabled).toBe(true);
-    disabled.click();
-    expect(onSourceChange).not.toHaveBeenCalled();
+    card.update({html: '<b>usage</b>', source: 'claude', onSourceChange});
+    const deepseek = card.el.querySelector<HTMLButtonElement>('[data-source="deepseek"]')!;
+    expect(deepseek.disabled).toBe(false);
+    expect(deepseek.hasAttribute('aria-disabled')).toBe(false);
+    deepseek.click();
+    expect(onSourceChange).toHaveBeenLastCalledWith('deepseek');
     card.destroy();
   });
   test('old engine without source keeps its face and has no switcher', () => {
