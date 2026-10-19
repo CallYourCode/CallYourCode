@@ -1,3 +1,4 @@
+import {createUsageSourceStrip, type UsageSource} from './usageSourceStrip';
 import {h} from '../components/domHelpers';
 import {BTN_HOVER_UTILS, makeIcon} from '../components/iconGlyphs';
 import {beatKey, logSkip, readBeat, sameBeat} from './cardBeat';
@@ -21,6 +22,8 @@ const REFRESH_SPIN_MIN_MS = 400;
 
 type PluginCardUpdate = {
   html: string | null;
+  source?: UsageSource;
+  onSourceChange?: (source: UsageSource) => void;
   hosts?: string[];
   loading?: boolean;
   error?: string;
@@ -72,7 +75,7 @@ export function createPluginCard(title: string, onRefresh: () => void | Promise<
   const hostsRow = h('div', 'cyc-plugincard-hosts cyc-off flex flex-wrap gap-1 mt-[0.1875rem]');
   // Absolute top-end corner box, small 1.375rem glyph, secondary ink -- was the
   // un-layered `.cyc-plugincard-refresh` rule. This raw producer bypasses makeIconButton(), so
-  
+
   // !justify-center` centre the glyph and `!p-2` keeps the 0.5rem padding (font-size,
   // ink and position are overridden below).
   const refresh = h(
@@ -129,7 +132,9 @@ export function createPluginCard(title: string, onRefresh: () => void | Promise<
     ].join(' ')
   );
   const body = h('div', 'cyc-plugincard-body relative mt-0');
-  el.append(refresh, whenEl, hostsRow, body);
+  const sourceStrip = createUsageSourceStrip();
+  // Host chips follow the face so the top overlays stay on its head in grouped cards too.
+  el.append(refresh, whenEl, sourceStrip.el, body, hostsRow);
 
   let active: FrameState | null = null;
   let candidate: FrameState | null = null;
@@ -378,6 +383,7 @@ export function createPluginCard(title: string, onRefresh: () => void | Promise<
   const update = (u: PluginCardUpdate) => {
     parked = false;
     lastU = u;
+    sourceStrip.update(u.source, u.onSourceChange);
     const height = clampedHeight(u.height);
     const theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
     paintHosts(u.hosts);

@@ -1,3 +1,4 @@
+import {isUsageSource, type UsageSource} from '../../../components/usageSourceStrip';
 import * as engine from '../../../engine/store';
 import {createPluginCard, type PluginCard} from '../../../components/pluginCard';
 import {freshnessLabel, takenAtFrom, USAGE_AGING_MS} from '../../../engine/limitsAge';
@@ -18,6 +19,7 @@ export function createPluginCardsPane(deps: PluginCardsDeps) {
 
   type UsageAnswer = {
     html: string;
+    source?: UsageSource;
     height: number | null;
     dedupe: string | null;
     takenAt: number | null;
@@ -31,6 +33,11 @@ export function createPluginCardsPane(deps: PluginCardsDeps) {
 
     inflight: boolean;
     forcedAt: number;
+    version: number;
+    fetchVersion: number;
+    pendingSource?: UsageSource;
+    switchError?: string;
+    switchQueue: Promise<void>;
   };
   const pluginCards = new Map<string, PluginCard>();
   const usageByEngine = new Map<string, UsageState>();
@@ -54,7 +61,10 @@ export function createPluginCardsPane(deps: PluginCardsDeps) {
         receivedAt: 0,
         lastError: null,
         inflight: false,
-        forcedAt: 0
+        forcedAt: 0,
+        version: 0,
+        fetchVersion: 0,
+        switchQueue: Promise.resolve()
       };
       usageByEngine.set(key, s);
     }
@@ -64,27 +74,34 @@ export function createPluginCardsPane(deps: PluginCardsDeps) {
   const declaredFloorMs = (key: string): number =>
     (engine.pluginsOf(key).find((p) => p.id === PLUGIN_USAGE_ID)?.card?.refreshFloorS ?? 5) * 1000;
 
-  async function fetchPluginCards(force = false) {
+  async function fetchPluginCards(force = false, target?: string) {
     if (dataState.mode !== 'live') return;
-    const engines = engine.cardEngines(PLUGIN_USAGE_ID);
+    const engines = engine
+      .cardEngines(PLUGIN_USAGE_ID)
+      .filter((e) => !target || e.engineKey === target);
     const active = activeEngineKey();
     pluginCardsBusy = true;
     try {
       await Promise.all(
         engines.map(async ({engineKey}) => {
           const st = ensureUsage(engineKey);
-          let doForce = force && engineKey === active;
-          if (doForce) {
+          const version = st.version;
+          const fetchVersion = ++st.fetchVersion;
+          let doForce = force && (target ? engineKey === target : engineKey === active);
+          if (doForce && !target) {
             if (Date.now() - st.forcedAt < declaredFloorMs(engineKey)) doForce = false;
             else st.forcedAt = Date.now();
           }
           st.inflight = true;
           const ans = await engine.pluginCardOf(engineKey, PLUGIN_USAGE_ID, doForce);
           const now = Date.now();
+          if (st.fetchVersion !== fetchVersion) return;
           st.inflight = false;
+          if (st.version !== version) return;
           if (ans.ok) {
             st.answer = {
               html: ans.html ?? '',
+              source: isUsageSource(ans.source) ? ans.source : undefined,
               height: typeof ans.height === 'number' ? ans.height : null,
               dedupe: ans.dedupe ?? null,
               takenAt: takenAtFrom(ans.ageMs, now),
@@ -103,6 +120,31 @@ export function createPluginCardsPane(deps: PluginCardsDeps) {
       paintLimits();
     }
   }
+
+  const changeSource = (engineKey: string, source: UsageSource) => {
+    const st = ensureUsage(engineKey);
+    const version = ++st.version;
+    st.pendingSource = source;
+    st.switchError = undefined;
+    paintLimits();
+    // Serialize quick taps per engine so the last intent is also the last durable write.
+    st.switchQueue = st.switchQueue.then(async () => {
+      try {
+        const answer = await engine.pluginRpc(engineKey, PLUGIN_USAGE_ID, 'set-source', null, {
+          source
+        });
+        if (!answer.ok) throw new Error(answer.message ?? 'could not switch usage source');
+        if (st.version === version) await fetchPluginCards(true, engineKey);
+      } catch (error) {
+        if (st.version === version) st.switchError = (error as Error).message;
+      } finally {
+        if (st.version === version) {
+          st.pendingSource = undefined;
+          paintLimits();
+        }
+      }
+    });
+  };
 
   const paintPluginCards = (): void => {
     const liveTabKeys = new Set(engine.tabs().map((t) => t.engineKey));
@@ -128,6 +170,7 @@ export function createPluginCardsPane(deps: PluginCardsDeps) {
     const now = Date.now();
     type Group = {
       key: string;
+      engineKey: string;
       title: string;
       hosts: string[];
       answer: UsageAnswer;
@@ -146,6 +189,7 @@ export function createPluginCardsPane(deps: PluginCardsDeps) {
           'Plan usage';
         g = {
           key: gkey,
+          engineKey,
           title,
           hosts: [],
           answer: null,
@@ -164,6 +208,7 @@ export function createPluginCardsPane(deps: PluginCardsDeps) {
           (a.takenAt != null && (g.answer.takenAt == null || a.takenAt > g.answer.takenAt))
         ) {
           g.answer = a;
+          g.engineKey = engineKey;
         }
       } else if (failed) {
         g.neverError = g.neverError ?? st!.lastError;
@@ -222,6 +267,7 @@ export function createPluginCardsPane(deps: PluginCardsDeps) {
       const a = g.answer;
       const hosts = g.hosts.length > 1 ? g.hosts : [];
       if (a) {
+        const st = ensureUsage(g.engineKey);
         const aging = a.stale || (a.takenAt != null && now - a.takenAt >= USAGE_AGING_MS);
         const unreachable = g.everyFailed;
         const age = freshnessLabel({
@@ -234,11 +280,15 @@ export function createPluginCardsPane(deps: PluginCardsDeps) {
         });
         card.update({
           html: a.html,
+          source: st.pendingSource ?? a.source,
+          onSourceChange: (source) => changeSource(g.engineKey, source),
           hosts,
           ...(a.height != null ? {height: a.height} : {}),
           when: age,
           aging: aging || unreachable,
-          errorLine: unreachable ? `engine unreachable, showing ${age || 'old numbers'}` : undefined
+          errorLine:
+            st.switchError ??
+            (unreachable ? `engine unreachable, showing ${age || 'old numbers'}` : undefined)
         });
       } else {
         const loading = g.loading && !g.neverError;

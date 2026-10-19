@@ -4,7 +4,19 @@ The engine's `usage-card` plugin defaults to `claude`, retaining the existing
 Claude card, all Claude windows, freshness, refresh and alert behavior.
 `codex` displays only the **weekly** limit of the active Pi Codex account.
 This is a display preference, not an account switch or credential operation.
-There are no UI controls or window settings.
+The app draws variant C's four round provider glyphs as chrome outside the
+sandboxed face. The selected logo is colored and larger; the others are dim grey.
+Tap the active logo to rotate `claude -> codex -> grok -> claude`, or a dim enabled
+logo to jump directly. DeepSeek is visible but disabled (including keyboard and
+synthetic clicks), has `aria-disabled`, and is not in the rotation. No DeepSeek
+reader, API call, key lookup or credential configuration is implemented.
+
+The app updates the logo optimistically, serializes quick taps per engine, calls
+`set-source`, then forces a fetch from that engine and settles to its answer.
+Grouped host cards target the engine whose freshest answer is displayed, not
+necessarily the selected tab. Card answers now include `source`; answers from
+older engines without this field still render, without a switcher. No frame
+scripts or sandbox permissions were added.
 
 ## Agent API
 
@@ -30,8 +42,9 @@ curl --unix-socket "${CYC_ENGINE_SOCK:-$HOME/.callyourcode/engine.sock}" -H 'Con
   -d '{"args":{"source":"codex"}}' http://localhost/plugin/usage-card/rpc/set-source
 ```
 
-Show Claude again by replacing `codex` with `claude`. No other source is accepted.
-The reply is `{"ok":true,"result":{"source":"codex"}}` (or `claude`).
+Replace `codex` with `claude` or `grok` for the other enabled sources.
+Unknown values, including `deepseek`, return 400.
+The reply is `{"ok":true,"result":{"source":"codex"}}` (or the selected source).
 The existing `GET /plugin/usage-card/card` returns the selected card; ordinary
 app polling observes changes without reloading the app. `?refresh=1` retains
 the existing refresh floor. Successful RPC invalidates the route's old card
@@ -71,3 +84,21 @@ and never writes the external monitor cache.
 
 Claude threshold alerts remain Claude-owned and independent of display source.
 This change adds no Codex alerts or swapping automation.
+
+
+## Grok reader configuration
+
+Set this on the engine process before the parent restarts it:
+
+```sh
+CYC_GROK_USAGE_CACHE=/home/shikher/skills/pi-agent/work/.grok-usage-cache.json
+```
+
+The engine only reads this file, which another agent maintains. No default path
+or HTTP fallback is assumed. Schema: `{ "ts": 1792413019.17, "weekly_pct": 0,
+"reset": "October 24, 22:43" }`. `ts` is Unix seconds and dates the card.
+A reset is local time in the engine's timezone, without a year: choose the next
+valid occurrence, including across December/January. The account label is just
+`Grok`; no account name is invented. Missing/unreadable, malformed, future-dated
+or older-than-30-minute readings show a clear failure with no percentage.
+There are no writes to the monitor cache, token operations or Grok alerts.
