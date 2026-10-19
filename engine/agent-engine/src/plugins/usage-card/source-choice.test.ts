@@ -71,7 +71,7 @@ test("source switch invalidates an in-flight Claude read and does not overwrite 
   expect((await plugin.card!.render()).html).toContain("17%");
   release({ ok: true, email: "claude@example.test", fetchedAt: Date.now() }); await old;
   expect(__usageCardTest.cache()!.email).toBe("codex@example.test");
-  await expect(plugin.rpc!["set-source"]({ session: null, agent: null }, { source: "deepseek" })).rejects.toThrow("source must be");
+  await expect(plugin.rpc!["set-source"]({ session: null, agent: null }, { source: "unknown" })).rejects.toThrow("source must be");
 });
 
 test("authorized RPC and immediate forced card bypass pre-change route cache; active identity change also bypasses", async () => {
@@ -94,28 +94,59 @@ test("authorized RPC and immediate forced card bypass pre-change route cache; ac
     account = "second";
     const next = await (await server.get("/plugin/usage-card/card?refresh=1")).json();
     expect(next.html).toContain("7%"); expect(next.html).not.toContain("38%");
-    expect((await server.post("/plugin/usage-card/rpc/set-source", { args: { source: "deepseek" } })).status).toBe(400);
+    expect((await server.post("/plugin/usage-card/rpc/set-source", { args: { source: "deepseek" } })).status).toBe(200);
+    const deepseek = await (await server.get("/plugin/usage-card/card?refresh=1")).json();
+    expect(deepseek.source).toBe("deepseek");
+    expect(deepseek.html).toContain("DeepSeek usage is not configured");
+    expect(deepseek.html).not.toContain('class="uc-pct"');
   } finally { server.stop(); resetForTest(); }
 });
 
 
-test("all enabled sources persist across restart and card transport names the source; DeepSeek stays rejected", async () => {
-  const store = makePluginStore(await tmpDir("three-sources-"));
+test("all four sources persist across restart and card transport names the source", async () => {
+  const store = makePluginStore(await tmpDir("four-sources-"));
   const core = () => ({ store: () => store, harnesses: () => [{ kind: "claude", active: true }],
     usage: async () => ({ ok: true, email: "claude@example.test", fetchedAt: Date.now(), windows: [] }) }) as unknown as PluginCore;
   const codex = { identity: () => "codex", read: async () => ({ ok: true, provider: "codex" as const, fetchedAt: Date.now(), windows: [] }) };
   const grok = { identity: () => "grok", read: async () => ({ ok: true, provider: "grok" as const, fetchedAt: Date.now(),
     windows: [{ label: "week", pct: 12, resetsAt: null }] }) };
-  for (const source of ["claude", "codex", "grok"]) {
+  for (const source of ["claude", "codex", "grok", "deepseek"]) {
     let p = usageCardPlugin(core, undefined, codex, grok);
     await p.rpc!["set-source"]({ session: null, agent: null }, { source });
     __usageCardTest.reset(); p = usageCardPlugin(core, undefined, codex, grok);
     expect(await p.rpc!["get-source"]({ session: null, agent: null }, {})).toEqual({ source });
     const out = await p.card!.render(); expect(out.source).toBe(source);
     if (source === "grok") { expect(out.html).toContain("Grok"); expect(out.html).toContain("12%"); }
-    for (const invalid of ["deepseek", "unknown", null]) {
+    if (source === "deepseek") {
+      expect(out.html).toContain("DeepSeek usage is not configured");
+      expect(out.html).not.toContain('class="uc-pct"');
+      expect(out.html).not.toContain('class="uc-track"');
+      expect(out.ageMs).toBeNull();
+      expect(p.card!.dedupe!()).toBeNull();
+      const forced = await p.card!.render({ force: true });
+      expect(forced.html).toBe(out.html);
+    }
+    for (const invalid of ["unknown", null]) {
       try { await p.rpc!["set-source"]({ session: null, agent: null }, { source: invalid }); throw new Error("accepted invalid source"); }
       catch (e) { expect((e as { status: number }).status).toBe(400); }
     }
   }
+});
+
+
+test("DeepSeek has no reader and never reads other providers", async () => {
+  const store = makePluginStore(await tmpDir("deepseek-unconfigured-"));
+  let reads = 0;
+  const core = () => ({ store: () => store, harnesses: () => { reads++; return []; } }) as unknown as PluginCore;
+  const reader = { identity: () => "other-provider", read: async (): Promise<UsageReport> => {
+    reads++; throw new Error("must not read another provider");
+  } };
+  const p = usageCardPlugin(core, undefined, reader, reader);
+  await p.rpc!["set-source"]({ session: null, agent: null }, { source: "deepseek" });
+  for (const force of [false, true]) {
+    const out = await p.card!.render({ force });
+    expect(out.html).toContain("DeepSeek usage is not configured");
+    expect(out.html).not.toContain('class="uc-pct"');
+  }
+  expect(reads).toBe(0);
 });

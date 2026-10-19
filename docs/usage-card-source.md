@@ -6,10 +6,10 @@ Claude card, all Claude windows, freshness, refresh and alert behavior.
 This is a display preference, not an account switch or credential operation.
 The app draws variant C's four round provider glyphs as chrome outside the
 sandboxed face. The selected logo is colored and larger; the others are dim grey.
-Tap the active logo to rotate `claude -> codex -> grok -> claude`, or a dim enabled
-logo to jump directly. DeepSeek is visible but disabled (including keyboard and
-synthetic clicks), has `aria-disabled`, and is not in the rotation. No DeepSeek
-reader, API call, key lookup or credential configuration is implemented.
+Tap the active logo to rotate `claude -> codex -> grok -> deepseek -> claude`, or
+a dim logo to jump directly. DeepSeek is selectable and persisted like the others,
+but always shows "DeepSeek usage is not configured", with no percentage. No
+DeepSeek reader, API call, key lookup, env var or credential configuration exists.
 
 The app updates the logo optimistically, serializes quick taps per engine, calls
 `set-source`, then forces a fetch from that engine and settles to its answer.
@@ -42,8 +42,8 @@ curl --unix-socket "${CYC_ENGINE_SOCK:-$HOME/.callyourcode/engine.sock}" -H 'Con
   -d '{"args":{"source":"codex"}}' http://localhost/plugin/usage-card/rpc/set-source
 ```
 
-Replace `codex` with `claude` or `grok` for the other enabled sources.
-Unknown values, including `deepseek`, return 400.
+Replace `codex` with `claude`, `grok` or `deepseek` for the other sources.
+Unknown values return 400.
 The reply is `{"ok":true,"result":{"source":"codex"}}` (or the selected source).
 The existing `GET /plugin/usage-card/card` returns the selected card; ordinary
 app polling observes changes without reloading the app. `?refresh=1` retains

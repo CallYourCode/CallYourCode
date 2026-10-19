@@ -42,7 +42,7 @@ import { realClock, type Clock } from "../../runtime/clock.ts";
 export type UsageWindow = { label: string; pct: number; resetsAt: string | null; severity?: "normal" | "warning" | "critical" };
 export type UsageReport = {
   ok: boolean; email?: string; plan?: string; windows?: UsageWindow[]; fetchedAt: number;
-  provider?: "codex" | "grok"; accountId?: string;
+  provider?: "codex" | "grok" | "deepseek"; accountId?: string;
   error?: string; reason?: "signed-out" | "throttled" | "network" | "unknown"; stale?: boolean;
 };
 type UsageAlert = { label: string; pct: number; threshold: number; resetsAt: string | null };
@@ -253,8 +253,8 @@ export function renderUsageCard(report: UsageReport, now: number): { html: strin
     const isThrottled = reason === "throttled" || (reason === undefined && throttled(report));
     const signedOut = reason === "signed-out";
     const headline = signedOut ? "not signed in" : isThrottled ? "could not check" : "can't check right now";
-    const whoText = report.provider === "grok" ? "Grok" : report.provider === "codex" ? `Codex · ${report.email ?? report.accountId ?? headline}` : headline;
-    const msg = report.provider === "grok" ? (report.error ?? "Grok usage unavailable") : report.provider === "codex" ? (report.error ?? "Codex usage unavailable") : signedOut ? (report.error ?? "no limits available")
+    const whoText = report.provider === "deepseek" ? "DeepSeek" : report.provider === "grok" ? "Grok" : report.provider === "codex" ? `Codex · ${report.email ?? report.accountId ?? headline}` : headline;
+    const msg = report.provider === "deepseek" ? (report.error ?? "DeepSeek usage is not configured") : report.provider === "grok" ? (report.error ?? "Grok usage unavailable") : report.provider === "codex" ? (report.error ?? "Codex usage unavailable") : signedOut ? (report.error ?? "no limits available")
       : isThrottled ? "our check for these numbers was throttled"
       : "could not reach the usage service, showing nothing new";
     inner = `<div class="uc"><div class="uc-head"><span class="uc-who uc-err">${esc(whoText)}</span></div>` +
@@ -328,8 +328,8 @@ async function foldUsageOverHarnesses(core: (id: string) => PluginCore, force: b
 
 export type UsageReader = { identity(): string; read(force: boolean): Promise<UsageReport> };
 export type CodexUsageReader = UsageReader;
-type UsageProvider = "claude" | "codex" | "grok";
-const isUsageProvider = (value: unknown): value is UsageProvider => value === "claude" || value === "codex" || value === "grok";
+type UsageProvider = "claude" | "codex" | "grok" | "deepseek";
+const isUsageProvider = (value: unknown): value is UsageProvider => value === "claude" || value === "codex" || value === "grok" || value === "deepseek";
 let selectedSource: UsageProvider = "claude";
 let codexReader: CodexUsageReader | null = null;
 let grokReader: UsageReader | null = null;
@@ -618,6 +618,10 @@ const selectedCard: NonNullable<PluginSpec["card"]> = {
   title: "Plan usage",
   refreshFloorS: REFRESH_FLOOR_S,
   render: async (opts) => {
+    // DeepSeek is selectable, but intentionally has no reader or configuration.
+    if (selectedSource === "deepseek") return renderUsageCard({
+      ok: false, provider: "deepseek", error: "DeepSeek usage is not configured", fetchedAt: NaN,
+    }, Date.now());
     checkReaderIdentity();
     if (selectedSource !== "claude") {
       // The external cache is cheap to read and authoritative on every poll,
@@ -688,7 +692,7 @@ export function usageCardPlugin(core?: (id: string) => PluginCore, poll?: UsageP
       "set-source": async (_ctx, args) => {
         const source = (args as { source?: unknown } | null)?.source;
         if (!isUsageProvider(source))
-          throw Object.assign(new Error("source must be claude, codex or grok"), { status: 400 });
+          throw Object.assign(new Error("source must be claude, codex, grok or deepseek"), { status: 400 });
         const set = preferenceQueue.then(async () => {
           if (!usageCore) throw new Error("usage core not wired on this engine");
           await usageCore("usage-card").store().put("source", { source });
