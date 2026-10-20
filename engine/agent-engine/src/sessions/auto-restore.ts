@@ -188,12 +188,8 @@ export function startAutoRestore(deps: {
     do {
       try { ready = await snapshot(); break; } catch { await Bun.sleep(500); }
     } while (Date.now() < deadline);
-    if (!ready) {
-      log("restore.unavailable", { reason: "herdr did not answer within 30s" });
-      await deps.notify("Restored 0 agents. Recovery failed: herdr did not answer within 30s.");
-      return;
-    }
-    const epoch = ready.now;
+    // Recording outlives the bounded startup recovery, including a timeout:
+    // herdr may become available later without another engine restart.
     // Keep recording deliberate exits even during a long sequential recovery.
     // Old-incarnation shells cannot mark an agent stopped; in-flight rows are
     // excluded, and the observation version check protects their later commit.
@@ -201,6 +197,12 @@ export function startAutoRestore(deps: {
     deps.adapter.onAgents(() => void observe());
     const timer = setInterval(() => void observe(), 1000);
     timer.unref();
+    if (!ready) {
+      log("restore.unavailable", { reason: "herdr did not answer within 30s" });
+      await deps.notify("Restored 0 agents. Recovery failed: herdr did not answer within 30s.");
+      return;
+    }
+    const epoch = ready.now;
     let restored = 0, candidates = 0;
     const failures: string[] = [];
     for (const r of rows) {
