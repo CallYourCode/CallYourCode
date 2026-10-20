@@ -131,7 +131,7 @@ const LIFECYCLE_EVENTS = new Set([
   "workspace_renamed",
 ]);
 
-function socketPath(): string {
+export function socketPath(): string {
   return process.env.HERDR_SOCKET_PATH ?? join(homedir(), ".config", "herdr", "herdr.sock");
 }
 
@@ -165,7 +165,7 @@ function writeAll(sock: import("bun").Socket, rest: Uint8Array): Uint8Array {
 }
 
 /** One request, one response, over a fresh connection. */
-async function rpc(method: string, params: unknown, sock?: string): Promise<any> {
+export async function rpc(method: string, params: unknown, sock?: string, timeoutMs = rpcTimeoutMs()): Promise<any> {
   return new Promise((resolve, reject) => {
     let buf = "";
     let settled = false;
@@ -185,7 +185,7 @@ async function rpc(method: string, params: unknown, sock?: string): Promise<any>
           } catch {}
           reject(new Error(`herdr rpc ${method}: timeout`));
         }),
-      rpcTimeoutMs(),
+      timeoutMs,
     );
     Bun.connect({
       unix: sock ?? socketPath(),
@@ -315,6 +315,11 @@ export class HerdrClient implements Multiplexer {
    * dead here on the next snapshot. */
   async closePane(paneId: string): Promise<void> {
     await rpc("pane.close", { pane_id: paneId }, this.sock);
+  }
+
+  /** Native start validates the shell prompt atomically inside herdr. */
+  async startAgent(paneId: string, kind: string, name: string, args: string[]): Promise<void> {
+    await rpc("agent.start", { pane_id: paneId, kind, name, args, timeout_ms: 30_000 }, this.sock, 35_000);
   }
 
   /** Which workspace a pane belongs to, so a new tab can be opened beside it. */

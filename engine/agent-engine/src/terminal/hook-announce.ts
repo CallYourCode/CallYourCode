@@ -124,6 +124,8 @@ export function liveModelOf(sessionId: string): string | null {
   return loadModels().get(sessionId) ?? null;
 }
 let binds: Map<string, Bind> | null = null; // lazy: loaded from disk on first use
+let announcementVersion = 0;
+const liveAnnouncements = new Map<string, { sessionId: string; version: number }>();
 const listeners: Array<() => void> = [];
 
 /* THE LIVE-BINDING STEAL GUARD (defense in depth for the 2026-09-18 aiusage-grok
@@ -202,12 +204,21 @@ export function hookBindFor(handle: string): { sessionId: string; link?: Session
   return b ? { sessionId: b.sessionId, ...(b.link ? { link: b.link } : {}) } : null;
 }
 
+/** Process-local versions, never wall time: a stale persisted bind (or a boot
+ * clock correction) cannot masquerade as a NEW launch announcement. */
+export function hookAnnouncementVersion(): number { return announcementVersion; }
+export function hookAnnouncedAfter(handle: string, sessionId: string, version: number): boolean {
+  const live = liveAnnouncements.get(handle);
+  return !!live && live.sessionId === sessionId && live.version > version;
+}
+
 /** Record (or roll) a pane's announced bind. A re-announce of the same id is
  *  a no-op; a NEW id on the same pane is a roll/resume announced by claude
  *  itself and simply replaces the bind (announce beats announce, latest wins).
  *  Answers whether the store actually changed, so the caller's outcome log
  *  can stay quiet on idempotent re-announces. */
 export function recordHookBind(handle: string, sessionId: string, pid: number, link?: SessionLink | null): boolean {
+  liveAnnouncements.set(handle, { sessionId, version: ++announcementVersion });
   const cur = loadBinds().get(handle);
   if (cur?.sessionId === sessionId) return false;
   loadBinds().set(handle, { sessionId, pid, at: Date.now(), ...(link ? { link } : {}) });
@@ -281,6 +292,7 @@ export function pruneHookBinds(live: Set<string>, owns: (handle: string) => bool
   for (const h of [...loadBinds().keys()]) {
     if (owns(h) && !live.has(h)) {
       loadBinds().delete(h);
+      liveAnnouncements.delete(h);
       changed = true;
     }
   }
@@ -453,5 +465,7 @@ export function resetHookAnnounce(): void {
   pending.length = 0;
   liveModels = null;
   binds = null;
+  announcementVersion = 0;
+  liveAnnouncements.clear();
   listeners.length = 0;
 }
