@@ -346,6 +346,17 @@ function compactionGuard(event, ctx) {
 /** The extension factory pi calls with its API. Exported as default AND as a
  *  named `activate` so a test can drive it against a stub pi without pi. */
 function activate(pi, deps) {
+  // herdr agent.start has an argv-only boundary (no env prefix). Register
+  // equivalent launch-context flags. Pi fills getFlag after factory loading,
+  // so read these explicit argv values here before opening the event socket.
+  if (typeof pi.registerFlag === "function") {
+    for (const [flag, env] of [["cyc-agent-id", "CYC_AGENT_ID"], ["cyc-event-sock", "CYC_PI_EVENT_SOCK"]]) {
+      pi.registerFlag(flag, { type: "string", description: "cyc native pane launch context" });
+      const at = process.argv.indexOf(`--${flag}`);
+      const value = at >= 0 ? process.argv[at + 1] : null;
+      if (value && (flag !== "cyc-agent-id" || /^ag-[A-Za-z0-9_-]{16}$/.test(value))) process.env[env] = value;
+    }
+  }
   /* THE REPLY CHANNEL (reply-channel.js): register speak/chat/show so a pi agent
    * can answer INTO the app the same way the MCP harnesses do. This is
    * independent of the event-stream socket below -- a pi pane must be able to

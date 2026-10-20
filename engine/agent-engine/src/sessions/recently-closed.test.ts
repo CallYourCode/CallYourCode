@@ -24,6 +24,7 @@ import { until } from "../test-utils/wait.ts";
 import { agentMetas, sessions } from "./session-state.ts";
 import { saveAgentMeta, type AgentMeta } from "../runtime/agentmeta.ts";
 import { agentMetaFile } from "../storage/datadir.ts";
+import { resetLaunchClaimsForTest } from "./launch-claims.ts";
 
 let core: WireCore | null = null;
 let http: ServedRoutes | null = null;
@@ -42,6 +43,7 @@ afterEach(async () => {
 });
 
 async function routed(): Promise<{ c: WireCore; http: ServedRoutes }> {
+  resetLaunchClaimsForTest(); // each fixture is a new engine, including pending launches
   core = await wireCore({ with: ["delivery"] });
   await until(() => core!.sessions.size === 1, { what: "the pane to reconcile" });
   http = serveRoutes({
@@ -174,6 +176,13 @@ test("reopen falls back to a FRESH launch when the meta has no session id", asyn
   expect(typed).toContain(`CYC_AGENT_ID=${AG(1)}`);
   expect(typed, "no session id, so no --resume: the fresh launch").not.toContain("--resume");
   expect(typed).toContain("claude --dangerously-skip-permissions");
+});
+
+test("a concurrent reopen cannot duplicate a launch still awaiting announcement", async () => {
+  const { http: h } = await routed();
+  await seedDead({ agentId: AG(1), harness: "pi", cwd: HARNESS_CWD, sessionId: UUID }, Date.now());
+  expect((await reopen(h, AG(1), true)).status).toBe(200);
+  expect((await reopen(h, AG(1), true)).status).toBe(409);
 });
 
 test("reopen refuses a live agent with 409", async () => {

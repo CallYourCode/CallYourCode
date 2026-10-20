@@ -12,6 +12,7 @@ import { SGR, classifyPaneBox, flat, parseAsk, type PaneBox } from "../terminal/
 import { runDeliveryMachine } from "../chat/delivery-machine.ts";
 import { agentLabel, PREMINT_SOURCE, PARKED_SOURCE, type AgentSessionRef } from "../runtime/agents.ts";
 import { HerdrClient } from "../terminal/herdr.ts";
+import { nativeLaunch } from "./native-launch.ts";
 import { makeTerminalDriver } from "../terminal/terminal.ts";
 import type { AgentStatus, Multiplexer, MuxAgent } from "../terminal/mux.ts";
 import { claudeReader, readAgentRuns, readEventsTail, sessionFilePath } from "../readers/claude.ts";
@@ -247,7 +248,7 @@ export interface MultiplexerAdapter {
    * does not exist, and made four working call sites type errors. What
    * capabilities actually gate is whether the APP offers the verb, not whether
    * the adapter has it. */
-  spawn(opts: { cwd: string; nearHandle?: string | null; command: string }): Promise<{ handle: string }>;
+  spawn(opts: { cwd: string; nearHandle?: string | null; command: string; workspaceId?: string; existingHandle?: string }): Promise<{ handle: string }>;
   rename(handle: string, label: string): Promise<void>;
   close(handle: string): Promise<void>;
   knownCwds(): string[];
@@ -1366,7 +1367,7 @@ export class MuxAdapter implements MultiplexerAdapter {
    * `spawn` folds the workspace derivation (workspaceOf(near)) and the label
    * (basename(cwd)) that server.ts used to compute beside newTab into one call,
    * so core asks only for a cwd and a command and never names a workspace. */
-  async spawn(opts: { cwd: string; nearHandle?: string | null; command: string }):
+  async spawn(opts: { cwd: string; nearHandle?: string | null; command: string; workspaceId?: string; existingHandle?: string }):
     Promise<{ handle: string }> {
     /* PRE-TRUST THE FOLDER (trust-folder.ts). Before the pane is created, mark
      * opts.cwd trusted in the harness's own config so an engine-spawned claude
@@ -1408,12 +1409,26 @@ export class MuxAdapter implements MultiplexerAdapter {
         console.error(`[pi-events] could not bind for a pi launch: ${(e as Error)?.message}`);
       }
     }
-    const handle = await this.mux.newTab({
-      workspaceId: opts.nearHandle ? this.mux.workspaceOf(opts.nearHandle) : null,
-      cwd: opts.cwd,
-      label: opts.cwd.split("/").filter(Boolean).pop() ?? "claude",
-      command,
-    });
+    let handle: string;
+    try {
+      if (opts.existingHandle) {
+        if (!(this.mux instanceof HerdrClient)) throw new Error("native pane restore requires herdr");
+        const launch = nativeLaunch(command);
+        handle = opts.existingHandle;
+        const name = `cyc-${new Bun.CryptoHasher("sha256").update(piSockKey(opts.command)).digest("hex").slice(0, 24)}`;
+        await this.mux.startAgent(handle, launch.kind, name, launch.args);
+      } else {
+        handle = await this.mux.newTab({
+          workspaceId: opts.workspaceId ?? (opts.nearHandle ? this.mux.workspaceOf(opts.nearHandle) : null),
+          cwd: opts.cwd,
+          label: opts.cwd.split("/").filter(Boolean).pop() ?? "claude",
+          command,
+        });
+      }
+    } catch (e) {
+      server?.close();
+      throw e;
+    }
     if (server) {
       // a re-spawn onto the same handle replaces any prior server
       this.stopPiServer(handle);

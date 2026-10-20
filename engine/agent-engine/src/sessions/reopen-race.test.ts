@@ -34,6 +34,7 @@ import { join } from "node:path";
 import * as S from "./session-state.ts";
 import { makeReconcile, resetReconcileForTest } from "./reconcile.ts";
 import { carryDirectHandleBind } from "./carry.ts";
+import { resetLaunchClaimsForTest } from "./launch-claims.ts";
 import { sessionOpsRoutes } from "../routes/session-ops.ts";
 import { initChatlog } from "../chat/chatlog.ts";
 import { initIngest } from "../chat/ingest.ts";
@@ -123,6 +124,7 @@ http = serveRoutes({
 });
 
 beforeEach(async () => {
+  resetLaunchClaimsForTest();
   S.resetForTest();
   resetReconcileForTest();
   await S.chatStore.flush();

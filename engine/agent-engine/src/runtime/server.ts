@@ -82,6 +82,7 @@ import { sessionOpsRoutes } from "../routes/session-ops.ts";
 import { pluginRoutes } from "../routes/plugin.ts";
 import { transferRoutes, startTransferSweeper } from "../routes/transfer.ts";
 import { makeReconcile } from "../sessions/reconcile.ts";
+import { startAutoRestore } from "../sessions/auto-restore.ts";
 import { initMcp, agentInfo } from "./mcp.ts";
 import { initFrames, makeWsHandlers } from "../transport/frames.ts";
 import { initRtcGlue, onSignalOffer, relaySignalSock, mintRtcClient } from "../transport/rtc-glue.ts";
@@ -1511,6 +1512,13 @@ adapter.onAgents(makeReconcile({
   log: (e, f) => LOG.line(e, f),
 }));
 adapter.start();
+if ((process.env.CYC_MUX ?? "tmux").trim().toLowerCase() === "herdr") {
+  startAutoRestore({
+    adapter,
+    log: (e, f) => LOG.line(e, f),
+    notify: (body) => notifyEngineDevices({ plugin: "auto-restore", title: "Agent recovery", body }),
+  });
+}
 
 /* HARNESS WIRING SELF-CHECK: a harness config copied across machines (or a
  * moved engine dir) can still carry a dead absolute cyc path, which kills voice

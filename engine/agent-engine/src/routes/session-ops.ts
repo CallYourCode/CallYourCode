@@ -20,6 +20,7 @@ import { markAllRead, markUnread, unreadOf } from "../sessions/readstate.ts";
 import { restartConfirmed, restartLogsToChat, restartTell } from "../terminal/restart.ts";
 import { agentMetas, applySessionSettings, freshAgentId, getManualOrder, isRecentCwd, nameOverrideOf, recentCwds, sessions, setManualOrder, setNameOverride, settingsOf, type Session, type SessionSettings } from "../sessions/session-state.ts";
 import { bindSpawnedPane } from "../sessions/carry.ts";
+import { claimLaunch, waitForLaunch } from "../sessions/launch-claims.ts";
 import { withAgentEnv } from "../runtime/agent-env.ts";
 import { programToken } from "../adapters/pi-launch.ts";
 import { broadcastSessions, sessionList } from "../sessions/sessions-frame.ts";
@@ -602,6 +603,9 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
        * that pane then resolves self straight from the env with no fallback. */
       aid = freshAgentId();
     }
+    const resumeSid = wantAgentId && body.resume === true ? agentMetas.get(aid)?.sessionId ?? null : null;
+    const release = claimLaunch(aid, resumeSid);
+    if (!release) return json({ ok: false, error: "that agent or session is already being opened" }, 409);
     try {
       /* Spawning a tab goes through the ctx.adapter. workspaceOf(near) and the
        * cwd-derived label are the adapter's now; the wire reply still names the
@@ -620,6 +624,10 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
        * The poll may have listed the pane while spawn was in flight and keyed
        * it by a provisional: the spawn's own id takes the handle over it. */
       bindSpawnedPane(paneId, aid);
+      // Keep the claim across the announce gap, not just the spawn RPC.
+      void waitForLaunch(aid, resumeSid, paneId).catch((e) => {
+        console.warn(`[new-session] ${aid}: ${(e as Error).message}`);
+      }).finally(release);
       console.log(`[new-session] ${paneId} in ${cwd} (${aid}, ${harness ?? "claude"})`);
       /* `agentId` is the pre-minted STABLE id, returned alongside the transient
        * pane handle. The app matches the new session by this id: the pane handle
@@ -628,6 +636,7 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
        * "not appeared". The stable id survives that re-key. */
       return json({ ok: true, paneId, agentId: aid });
     } catch (e) {
+      release();
       const why = (e as Error)?.message ?? "could not start it";
       const muxDown = isMuxUnreachableError(e);
       console.error(`[new-session] failed in ${cwd}: ${why}`);
