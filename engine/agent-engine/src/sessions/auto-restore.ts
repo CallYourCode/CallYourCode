@@ -115,8 +115,9 @@ async function duplicate(r: RunningAgent, snap: Snapshot): Promise<boolean> {
 }
 
 export function startAutoRestore(deps: {
-  adapter: MultiplexerAdapter; log: Log; notify(body: string): Promise<unknown>;
+  adapter: MultiplexerAdapter; log: Log; notify(body: string): Promise<unknown>; now?: () => number;
 }): void {
+  const now = deps.now ?? Date.now;
   const log: Log = (event, fields) => { console.log(`[${event}] ${JSON.stringify(fields)}`); deps.log(event, fields); };
   const path = join(dataDir(), "state", "running-agents.json");
   let rows: RunningAgent[];
@@ -184,10 +185,10 @@ export function startAutoRestore(deps: {
 
   async function recover(): Promise<void> {
     let ready: Awaited<ReturnType<typeof snapshot>> | undefined;
-    const deadline = Date.now() + 30_000;
+    const deadline = now() + 30_000;
     do {
       try { ready = await snapshot(); break; } catch { await Bun.sleep(500); }
-    } while (Date.now() < deadline);
+    } while (now() < deadline);
     // Recording outlives the bounded startup recovery, including a timeout:
     // herdr may become available later without another engine restart.
     // Keep recording deliberate exits even during a long sequential recovery.
