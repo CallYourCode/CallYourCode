@@ -3,7 +3,7 @@ import {spawn, type ChildProcess} from 'node:child_process';
 import {mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve, join} from 'node:path';
-type Rig = {origin: string; engineId: string; key: string; engineUrl: string; submitted: string[]};
+type Rig = {origin: string; engineId: string; key: string; engineUrl: string; submitted: string[]; lines: string[]; appLog: string[]};
 let proc: ChildProcess;
 let control = '';
 let home = '';
