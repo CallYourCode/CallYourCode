@@ -7,8 +7,8 @@
  *
  *     if (!ws.data.sec) return;   // tunnel-glue.ts
  *
- * ws.data.sec is set only when the RtcSock is built for a sealed DataChannel
- * (rtc-glue.ts), and the EngineSecConn behind it forwards frames to the content
+ * ws.data.sec is set only when the SealedSock is built for a sealed WebSocket
+ * (client-glue.ts), and the EngineSecConn behind it forwards frames to the content
  * dispatch ONLY after `ready` (sec.ts). This proves the guard directly at the
  * glue layer: a `{t:"req"}` arriving on a sock with NO sec is a no-op -- the
  * router is never called and no reply frame is sent -- so a peer that has not

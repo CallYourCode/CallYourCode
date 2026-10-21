@@ -30,18 +30,8 @@ const sayDone: FrameHandler = (ctx, frame) => {
   );
 };
 
-const sayLive: FrameHandler = (ctx, frame) => {
-  ctx.emit('sayLive', String(frame.id), String(frame.msgId));
-};
-
-const sayLiveFail: FrameHandler = (ctx, frame) => {
-  ctx.emit('sayLiveFail', String(frame.id), String(frame.msgId));
-};
-
 export const sayFrameHandlers: [string, FrameHandler][] = [
   ['say', say],
   ['say-grow', sayGrow],
-  ['say-done', sayDone],
-  ['say-live', sayLive],
-  ['say-live-fail', sayLiveFail]
+  ['say-done', sayDone]
 ];

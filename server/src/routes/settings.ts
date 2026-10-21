@@ -9,8 +9,7 @@ import { chordMap, sidList, type OwnerStore } from "../access/owner-store";
 import type { Owners } from "../access/owners";
 
 export type SettingsDeps = {
-  hosted: boolean;
-  owners: Pick<Owners, "deviceOwner" | "engineAuth" | "ownerStore">;
+  owners: Pick<Owners, "deviceOwner">;
   log: LogFn;
 };
 
@@ -19,18 +18,8 @@ export function makeSettingsRoutes(deps: SettingsDeps) {
     if (path !== "/settings") return null;
 
     if (req.method === "GET") {
-      /* A device's session, or an ENGINE's issued token: the engine used to poll
-       * the two dials here, and in HOSTED it has no Clerk session -- its token
-       * names the owner whose globals it reads. The reply dials moved onto the
-       * engine's own reply-dials plugin (#585), which owns them now; this route
-       * still ECHOES whatever an old app-settings.json holds for them so the app
-       * can migrate those values into the plugin once. Read-only: POST below
-       * stays device-only. */
-      let store: OwnerStore | null = await deps.owners.deviceOwner(req);
-      if (!store && deps.hosted) {
-        const eng = deps.owners.engineAuth(req);
-        if (eng) store = await deps.owners.ownerStore(eng.owner);
-      }
+
+      const store: OwnerStore | null = await deps.owners.deviceOwner(req);
       if (!store) return json({ error: "unauthorized" }, 401);
       return json({ ...store.settings, seq: store.settingsSeq });
     }

@@ -28,47 +28,10 @@ const get = () => new Request("http://x/settings");
 const post = (body: unknown) => new Request("http://x/settings",
   { method: "POST", body: JSON.stringify(body) });
 
-test("GET without any credential is a 401 in HOSTED", async () => {
-  const routes = makeSettingsRoutes({ hosted: true, log: silent, owners: {
-    deviceOwner: async () => null,
-    engineAuth: () => null,
-    ownerStore: async () => { throw new Error("must not be reached"); },
-  }});
-  expect((await routes(get(), "/settings"))!.status).toBe(401);
-});
-
-test("GET with an ENGINE token reads the token owner's globals (dual auth)", async () => {
-  const store = await freshStore();
-  store.settings.replyLevel = 5;
-  const eng = { engineId: "e-1", owner: "user_a" } as EngineTokenRec;
-  const asked: string[] = [];
-  const routes = makeSettingsRoutes({ hosted: true, log: silent, owners: {
-    deviceOwner: async () => null,          // no Clerk session on an engine
-    engineAuth: () => eng,
-    ownerStore: async (sub: string) => { asked.push(sub); return store; },
-  }});
-  const r = (await routes(get(), "/settings"))!;
-  expect(r.status).toBe(200);
-  expect((await r.json()).replyLevel).toBe(5);
-  expect(asked).toEqual(["user_a"]);      // the token names the owner, not the body
-});
-
-test("POST stays device-only: an engine token cannot write", async () => {
-  const eng = { engineId: "e-1", owner: "user_a" } as EngineTokenRec;
-  const routes = makeSettingsRoutes({ hosted: true, log: silent, owners: {
-    deviceOwner: async () => null,
-    engineAuth: () => eng,
-    ownerStore: async () => { throw new Error("must not be reached"); },
-  }});
-  expect((await routes(post({ speed: 2 }), "/settings"))!.status).toBe(401);
-});
-
 async function localRoutes() {
   const store = await freshStore();
-  const routes = makeSettingsRoutes({ hosted: false, log: silent, owners: {
+  const routes = makeSettingsRoutes({ log: silent, owners: {
     deviceOwner: async () => store,
-    engineAuth: () => null,
-    ownerStore: async () => store,
   }});
   return { store, routes };
 }

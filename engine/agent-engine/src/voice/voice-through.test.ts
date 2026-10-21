@@ -6,7 +6,7 @@
  * configured VOICE_URL, so the app stops needing a second host.
  *
  * THE MIC STREAM IS NOT HERE ANY MORE: /voice/stt-stream was removed
- * (a WS upgrade can never carry the sealed-tunnel mark). Streaming STT rides the sealed DataChannel as stt-open/stt-b/
+ * (a WS upgrade can never carry the sealed-tunnel mark). Streaming STT rides the sealed WebSocket as stt-open/stt-b/
  * stt-close frames, proven in voice-stt-bridge.test.ts.
  *
  * WHAT IS REAL HERE: routes/voice.ts, voice-proxy.ts (the pick + the HTTP

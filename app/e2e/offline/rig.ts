@@ -63,296 +63,36 @@ export async function evidenceShot(page: Page, dir: string, name: string): Promi
   }
 }
 
+// Offline fixtures emulate the relay auth envelope, not production forwarding.
 const LOOP_INIT = (o: {logSends: boolean}) => {
-  const LIVE = /:(10101|10102)\b/;
   const Real = window.WebSocket;
-  const pending: any[] = [];
-  const dcByWs = new WeakMap<any, any>();
-
-  type PipeSent = {kind: 'plain' | 'sealed' | 'ctrl' | 'bad'; t?: string};
-  const sent: PipeSent[] = [];
+  const sent: Array<{kind: string; t?: string}> = [];
   if (o.logSends) (window as any).__cycPipeSent = sent;
-
-  const dec = new TextDecoder();
-  let parts: Uint8Array[] = [];
-  let size = 0;
-  function noteSend(bytes: Uint8Array) {
-    if (!o.logSends) return;
-    const type = bytes[0];
-    if (type === 0x00 || type === 0x01) {
-      const payload = bytes.subarray(1);
-      parts.push(payload);
-      size += payload.length;
-      if (type === 0x00) return;
-      const whole = new Uint8Array(size);
-      let off = 0;
-      for (const p of parts) {
-        whole.set(p, off);
-        off += p.length;
-      }
-      parts = [];
-      size = 0;
-      const s = dec.decode(whole);
-      let f: any;
-      try {
-        f = JSON.parse(s);
-      } catch {
-        sent.push({kind: 'bad'});
-        return;
-      }
-      if (f?.t === 'x') sent.push({kind: 'sealed'});
-      else sent.push({kind: 'plain', t: typeof f?.t === 'string' ? f.t : undefined});
-      return;
-    }
-    sent.push({kind: 'ctrl', t: String(type)});
-  }
-
-  // The app dials the engine over WebRTC and reaches it only through a relay it
-  // signals at <origin>/device?engine=<id>. Offline there is no relay and no real
-  // WebRTC: this shim answers the relay+offer handshake locally and backs the
-  // faked DataChannel with a plain socket straight to the engine's /ws.
-  const engineUrlFor = (engineId: string | null): string | null => {
-    if (!engineId) return null;
-    try {
-      const cfg = JSON.parse(localStorage.getItem('cyc-config') || '{}');
-      const list = Array.isArray(cfg.engines) ? cfg.engines : [];
-      const e = list.find((x: any) => x && x.engineId === engineId);
-      return e && typeof e.url === 'string' ? e.url : null;
-    } catch {
-      return null;
-    }
-  };
-
-  // The backing socket closed. Before the channel opened that is a transport
-  // that never came up, which real WebRTC reports as ICE `failed` (the dial
-  // fails at once instead of sitting out its 10 s timer); after, the channel
-  // closes like a lost pipe.
-  const onBackingClose = (ws: any) => {
-    const d = dcByWs.get(ws);
-    if (!d || d.readyState === 'closed') return;
-    const pc = d._pc;
-    if (d.readyState !== 'open' && pc && pc.iceConnectionState !== 'failed') {
-      pc.iceConnectionState = 'failed';
-      pc.connectionState = 'failed';
-      pc.oniceconnectionstatechange?.();
-    }
-    d.close();
-  };
-
-  const wireEngineWs = (ws: any) => {
-    ws.binaryType = 'arraybuffer';
-    pending.push(ws);
-    ws.addEventListener('close', () => onBackingClose(ws));
-    ws.addEventListener('message', (ev: any) => {
-      if (typeof ev.data !== 'string') dcByWs.get(ws)?.onmessage?.({data: ev.data});
-    });
-  };
-
-  // One engine socket per dial: `__cycDials` is the dial count a spec reads
-  // (the loopback shim answers the rtc-offer locally, so the rig's `offers`
-  // never moves here).
   (window as any).__cycDials = 0;
-  const makeLoopSignal = (engineId: string | null): any => {
-    const eu = engineUrlFor(engineId);
-    if (eu) {
+  const Guarded = function (_url: string | URL, protocols?: string | string[]) {
+    let url = String(_url);
+    if (/:(10100|10101|10102|20100|20101|20102)\b/.test(url)) throw new Error('ISOLATION: live socket refused');
+    if (/\/device\b/.test(url)) {
+      const id = new URL(url).searchParams.get('engine');
+      const cfg = JSON.parse(localStorage.getItem('cyc-config') || '{}');
+      const engine = cfg.engines?.find((e: any) => e.engineId === id);
+      url = engine?.url ?? 'ws://127.0.0.1:59997/ws';
       (window as any).__cycDials++;
-      wireEngineWs(new Real(eu));
-    }
-    const listeners: Record<string, ((ev: any) => void)[]> = {open: [], message: [], close: []};
-    let onmessage: ((ev: any) => void) | null = null;
-    let onclose: ((ev: any) => void) | null = null;
-    let closed = false;
-    const deliver = (frame: unknown) => {
-      if (closed) return;
-      const ev = {data: JSON.stringify(frame)};
-      onmessage?.(ev);
-      for (const cb of listeners.message.slice()) cb(ev);
-    };
-    const sig: any = {
-      binaryType: '',
-      readyState: 1,
-      get onmessage() {
-        return onmessage;
-      },
-      set onmessage(fn) {
-        onmessage = fn;
-      },
-      get onclose() {
-        return onclose;
-      },
-      set onclose(fn) {
-        onclose = fn;
-      },
-      addEventListener(t: string, cb: (ev: any) => void) {
-        (listeners[t] ||= []).push(cb);
-      },
-      removeEventListener(t: string, cb: (ev: any) => void) {
-        const a = listeners[t];
-        if (a) {
-          const i = a.indexOf(cb);
-          if (i >= 0) a.splice(i, 1);
-        }
-      },
-      send(s: string) {
-        let f: any;
-        try {
-          f = JSON.parse(s);
-        } catch {
-          return;
-        }
-        if (f?.t === 'r-auth') deliver({t: 'r-ok'});
-        else if (f?.t === 'rtc-offer') deliver({t: 'rtc-answer', id: f.id, sdp: 'loopback-answer'});
-      },
-      close() {
-        if (closed) return;
-        closed = true;
-        sig.readyState = 3;
-        onclose?.({code: 1000});
-        for (const cb of listeners.close.slice()) cb({code: 1000});
-      }
-    };
-    setTimeout(() => {
-      for (const cb of listeners.open.slice()) cb({});
-      deliver({t: 'r-challenge', nonce: 'loop'});
-    }, 0);
-    return sig;
-  };
-
-  const Guarded = function (this: unknown, url: string | URL, protocols?: string | string[]) {
-    const s = String(url);
-    if (LIVE.test(s)) {
-      throw new Error(`ISOLATION: refused a socket to the live stack: ${url}`);
-    }
-    if (/\/device\b/.test(s)) {
-      let engineId: string | null = null;
-      try {
-        engineId = new URL(s).searchParams.get('engine');
-      } catch {
-        engineId = null;
-      }
-      return makeLoopSignal(engineId);
     }
     const ws = new Real(url, protocols);
-    ws.binaryType = 'arraybuffer';
-    if (s.includes('/ws')) pending.push(ws);
-    ws.addEventListener('close', () => onBackingClose(ws));
-    let userOnMsg: ((ev: any) => void) | null = null;
-    Object.defineProperty(ws, 'onmessage', {
-      configurable: true,
-      enumerable: true,
-      get: () => userOnMsg,
-      set: (fn) => {
-        userOnMsg = fn;
-        ws.addEventListener('message', (ev: any) => {
-          if (typeof ev.data === 'string') fn?.call(ws, ev);
-          else dcByWs.get(ws)?.onmessage?.({data: ev.data});
-        });
+    const send = ws.send.bind(ws);
+    ws.send = (data) => {
+      if (o.logSends && typeof data === 'string') {
+        try { const f = JSON.parse(data); sent.push({kind: f.t === 'x' ? 'sealed' : f.t === 'r-auth' ? 'ctrl' : 'plain', t: f.t}); }
+        catch { sent.push({kind: 'bad'}); }
       }
-    });
+      send(data);
+    };
     return ws;
   } as unknown as typeof WebSocket;
+  Object.assign(Guarded, {CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3});
   Guarded.prototype = Real.prototype;
-  Object.assign(Guarded, Real);
-  window.WebSocket = Guarded;
-
-  (window as any).RTCPeerConnection = function (this: any) {
-    this.connectionState = 'new';
-    this.iceConnectionState = 'new';
-    this.onicecandidate = null;
-    this.oniceconnectionstatechange = null;
-    this._cbs = {};
-    this._dc = null;
-    this.addEventListener = (t: string, cb: (ev: any) => void) => {
-      (this._cbs[t] ||= []).push(cb);
-    };
-    this.createDataChannel = () => {
-      const bound = pending.shift();
-      const d: any = {
-        readyState: 'connecting',
-        binaryType: '',
-        bufferedAmount: 0,
-        bufferedAmountLowThreshold: 0,
-        onopen: null,
-        onmessage: null,
-        onclose: null,
-        _ws: bound,
-        _pc: this,
-        _cbs: {},
-        addEventListener(t: string, cb: (ev: any) => void) {
-          (d._cbs[t] ||= []).push(cb);
-        },
-        send(bytes: Uint8Array) {
-          const u = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-          noteSend(u);
-          if (d._ws && d._ws.readyState === 1) d._ws.send(bytes);
-        },
-        close() {
-          d.readyState = 'closed';
-          d.onclose?.();
-          try {
-            d._ws?.close();
-          } catch {
-            /* the backing socket may already be gone */
-          }
-        }
-      };
-      if (bound) dcByWs.set(bound, d);
-      this._dc = d;
-      return d;
-    };
-    this.createOffer = () => Promise.resolve({type: 'offer', sdp: 'loopback-offer'});
-    this.setLocalDescription = (desc: any) => {
-      this.localDescription = desc;
-      this.connectionState = 'connecting';
-      return Promise.resolve();
-    };
-    this.setRemoteDescription = () => {
-      this.connectionState = 'connected';
-      this.iceConnectionState = 'connected';
-      const d = this._dc;
-      const openDc = () => {
-        if (!d || d.readyState === 'closed') return;
-        d.readyState = 'open';
-        d.onopen?.();
-      };
-      const ws = d?._ws;
-      if (!ws || ws.readyState === 1) setTimeout(openDc, 0);
-      else if (ws.readyState >= 2) setTimeout(() => onBackingClose(ws), 0);
-      else ws.addEventListener('open', () => setTimeout(openDc, 0), {once: true});
-      return Promise.resolve();
-    };
-    this.addIceCandidate = () => Promise.resolve();
-    this.close = () => {
-      this.connectionState = 'closed';
-      this.iceConnectionState = 'closed';
-      this._dc?.close?.();
-    };
-  };
-
-  const realFetch = window.fetch;
-  window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-    const url =
-      typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.href
-          : (input as Request).url;
-    if (LIVE.test(String(url))) {
-      throw new Error(`ISOLATION: refused a fetch to the live stack: ${url}`);
-    }
-
-    return realFetch(input, init);
-  };
-
-  (navigator.mediaDevices as unknown as {getUserMedia: () => Promise<MediaStream>}).getUserMedia =
-    async () => {
-      const ac = new AudioContext();
-      const osc = ac.createOscillator();
-      const dst = ac.createMediaStreamDestination();
-      osc.connect(dst);
-      osc.start();
-      return dst.stream;
-    };
+  (window as any).WebSocket = Guarded;
 };
 
 export type Isolation = {

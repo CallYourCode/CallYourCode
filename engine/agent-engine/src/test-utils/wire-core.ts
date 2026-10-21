@@ -3,7 +3,7 @@
  * server.ts's boot() is an ordered sequence of `initX({deps})` calls over a
  * route table and an adapter. That decomposition is what makes this possible:
  * almost every behaviour the old suite proved by spawning `bun run server.ts`
- * and dialling a real WebRTC DataChannel can be proven by performing the SAME
+ * and dialling a real relay WebSocket can be proven by performing the SAME
  * ordered wiring in-process, with fakes at the architecture seams.
  *
  * What is real here: every engine module, the herdr JSON-RPC framing, the
@@ -15,7 +15,7 @@
  * clients (plain recorded Sock objects pushed into wire.ts's `clients`, every
  * frame captured), the voice engine (a refusing url), the live terminal bridge
  * (a refusing driver) and time (a manualClock). There is no Bun.serve for the
- * engine, no announce loop, no relay link, no services, no rtc, no subprocess.
+ * engine, no announce loop, no relay link, no services, no subprocess.
  *
  * ONE wireCore PER TEST FILE by default: bun test --parallel gives each file a
  * fresh module registry in its own worker, so the module singletons a wiring

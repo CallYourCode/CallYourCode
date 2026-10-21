@@ -28,26 +28,7 @@ export const PLUGIN_ID_RE = /^[a-z0-9-]{1,64}$/;
 export const CARD_HTML_MAX_BYTES = 128 * 1024; // a card is HTML+CSS, no scripts
 export const PANEL_HTML_MAX_BYTES = 1024 * 1024; // same cap as a shown page
 export const RPC_ARGS_MAX_BYTES = 256 * 1024; // body in
-/* THE ONE REPLY CAP, RAISED 1 MB -> 16 MB (arch section 3.3). git and files are
- * sandboxed-HTML plugins now, so a whole diff or file body comes back in ONE
- * cyc.call rather than over a native HTTP route. 16 MB is sized to what a reply
- * actually carries: a big realistic diff (a lockfile rewrite, a generated-code
- * sweep) is low single-digit MB of raw text, JSON string-escaping roughly
- * doubles it, and pre-highlighted HTML markup adds another 2-3x, so ~8 MB is
- * reachable by honest content while 16 MB is not, in practice, by anything but
- * abuse. It is still a hard bound a phone can buffer in one piece. One cap, no
- * per-plugin carve-out; args stay 256 KB and the html caps are unchanged.
- * routes/plugin.ts enforces this constant on the reply; an over-cap reply is
- * refused with the same honest 413 sentence as today.
- *
- * TRANSPORT NOTE, settled (contracts FINDINGS #5). Plugin rpc rides the sealed
- * DataChannel now, and a reply NEVER rides one frame: tunnel-glue's reply()
- * streams every Response body through ResStreamEncoder, which carves it into
- * CHUNK (256 KB) frames (transport/tunnel.ts), each ~350 KB sealed, far below
- * dcpipe MSG_MAX (16 MB); the app reassembles the multi-frame answer as a
- * stream with no ceiling (tunnelClient.ts onRes). So a reply AT this cap
- * transits, and the cap stands. Proven hermetically by the rpc-cap cases in
- * transport/tunnel-glue.test.ts. */
+
 export const RPC_REPLY_MAX_BYTES = 16 * 1024 * 1024; // json out
 
 /* The floor under a card's refresh, both sides. Five seconds so a page cannot

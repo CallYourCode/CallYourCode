@@ -1,16 +1,3 @@
-/* Per-engine enrollment tokens, both layers:
- *
- *   - the EngineTokens store as a unit: issue, hash-only persistence, rotate,
- *     revoke/restore, identity and owner mismatch;
- *   - one real LOCAL server process proving the wiring: a signed enrollment
- *     earns a token, announce and push require it, re-enrollment rotates it
- *     (old bearer dies), revocation locks the engine out until restored.
- *
- * HOSTED behaviour (Clerk gate, owner scoping) lives in hosted.test.ts.
- *
- *   VOICE_URL=http://127.0.0.1:1 bun test app-server/enroll.test.ts
- */
-
 import { test, expect, afterEach } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -42,7 +29,7 @@ test("issue, verify, and hash-only persistence", async () => {
   const file = join(dir, "engine-tokens.json");
   const s = await EngineTokens.open(file);
 
-  const r = await s.enroll({ engineId: "e-1", spki: "spki-a", owner: "local" });
+  const r = await s.enroll({ engineId: "e-1", spki: "spki-a"});
   if (!r.ok) throw new Error("enroll refused");
   expect(r.token.startsWith("cyt_")).toBe(true);
   expect(r.rotated).toBe(false);
@@ -66,8 +53,8 @@ test("issue, verify, and hash-only persistence", async () => {
 
 test("re-enroll rotates: fresh token works, the old bearer dies", async () => {
   const s = await EngineTokens.open(join(await scratch(), "t.json"));
-  const a = await s.enroll({ engineId: "e-1", spki: "spki-a", owner: "local" });
-  const b = await s.enroll({ engineId: "e-1", spki: "spki-a", owner: "local" });
+  const a = await s.enroll({ engineId: "e-1", spki: "spki-a"});
+  const b = await s.enroll({ engineId: "e-1", spki: "spki-a"});
   if (!a.ok || !b.ok) throw new Error("enroll refused");
   expect(b.rotated).toBe(true);
   expect(b.token).not.toBe(a.token);
@@ -78,64 +65,57 @@ test("re-enroll rotates: fresh token works, the old bearer dies", async () => {
 
 test("identity and owner mismatches are refused, never rebound", async () => {
   const s = await EngineTokens.open(join(await scratch(), "t.json"));
-  await s.enroll({ engineId: "e-1", spki: "spki-a", owner: "user_alice" });
+  await s.enroll({ engineId: "e-1", spki: "spki-a"});
 
-  const otherKey = await s.enroll({ engineId: "e-1", spki: "spki-EVIL", owner: "user_alice" });
+  const otherKey = await s.enroll({ engineId: "e-1", spki: "spki-EVIL"});
   expect(otherKey).toMatchObject({ ok: false, status: 403, error: "identity mismatch" });
 
-  const otherOwner = await s.enroll({ engineId: "e-1", spki: "spki-a", owner: "user_bob" });
-  expect(otherOwner).toMatchObject({ ok: false, status: 403, error: "owner mismatch" });
 });
 
 test("revoke kills the bearer at once and bars re-enrollment until restored", async () => {
   const s = await EngineTokens.open(join(await scratch(), "t.json"));
-  const a = await s.enroll({ engineId: "e-1", spki: "spki-a", owner: "user_alice" });
+  const a = await s.enroll({ engineId: "e-1", spki: "spki-a"});
   if (!a.ok) throw new Error("enroll refused");
 
-  expect(await s.revoke("e-1", "user_alice")).toBe("revoked");
+  expect(await s.revoke("e-1")).toBe("revoked");
   expect(s.verify(a.token)).toBeNull();
 
   // a revoked engine may not talk its way back in
-  const again = await s.enroll({ engineId: "e-1", spki: "spki-a", owner: "user_alice" });
+  const again = await s.enroll({ engineId: "e-1", spki: "spki-a"});
   expect(again).toMatchObject({ ok: false, status: 403, error: "revoked" });
 
-  // another owner can neither revoke nor restore, and cannot tell it exists
-  expect(await s.revoke("e-1", "user_bob")).toBe("not-found");
-  expect(await s.restore("e-1", "user_bob")).toBe("not-found");
-
   // restore un-bars the door; the old bearer stays dead until re-enrollment
-  expect(await s.restore("e-1", "user_alice")).toBe("restored");
+  expect(await s.restore("e-1")).toBe("restored");
   expect(s.verify(a.token)).toBeNull();
-  const fresh = await s.enroll({ engineId: "e-1", spki: "spki-a", owner: "user_alice" });
+  const fresh = await s.enroll({ engineId: "e-1", spki: "spki-a"});
   if (!fresh.ok) throw new Error("post-restore enroll refused");
   expect(s.verify(fresh.token)?.engineId).toBe("e-1");
 });
 
 test("the listing carries no hashes and scopes by owner", async () => {
   const s = await EngineTokens.open(join(await scratch(), "t.json"));
-  await s.enroll({ engineId: "e-a", spki: "sa", owner: "user_alice" });
-  await s.enroll({ engineId: "e-b", spki: "sb", owner: "user_bob" });
-  const alice = s.list("user_alice");
-  expect(alice.map((e) => e.engineId)).toEqual(["e-a"]);
+  await s.enroll({ engineId: "e-a", spki: "sa"});
+  await s.enroll({ engineId: "e-b", spki: "sb"});
+  const alice = s.list();
+  expect(alice.map((e) => e.engineId)).toEqual(["e-a", "e-b"]);
   expect(JSON.stringify(alice)).not.toContain("tokenHash");
   expect(JSON.stringify(alice)).not.toContain("spki");
-  expect(s.list(null).length).toBe(2);
+  expect(s.list().length).toBe(2);
 });
 
 test("one owner cannot grow the store past the per-owner cap; re-enroll still works", async () => {
   const s = await EngineTokens.open(join(await scratch(), "t.json"));
-  const { ENGINES_PER_OWNER_MAX } = await import("./enroll");
-  for (let i = 0; i < ENGINES_PER_OWNER_MAX; i++) {
-    const r = await s.enroll({ engineId: `e-${i}`, spki: `s${i}`, owner: "user_alice" });
+  const { ENGINES_MAX } = await import("./enroll");
+  for (let i = 0; i < ENGINES_MAX; i++) {
+    const r = await s.enroll({ engineId: `e-${i}`, spki: `s${i}` });
     expect(r.ok).toBe(true);
   }
   // one more NEW engineId is refused, loudly
-  const over = await s.enroll({ engineId: "e-over", spki: "sx", owner: "user_alice" });
+  const over = await s.enroll({ engineId: "e-over", spki: "sx"});
   expect(over).toMatchObject({ ok: false, status: 429, error: "too many engines" });
   // an existing engine still rotates (never counted against the cap)...
-  expect((await s.enroll({ engineId: "e-0", spki: "s0", owner: "user_alice" })).ok).toBe(true);
-  // ...and another owner is unaffected
-  expect((await s.enroll({ engineId: "e-bob", spki: "sb", owner: "user_bob" })).ok).toBe(true);
+  expect((await s.enroll({ engineId: "e-0", spki: "s0"})).ok).toBe(true);
+
 });
 
 test("two minted tokens never collide and carry the prefix", () => {
@@ -212,7 +192,7 @@ test("the whole local lifecycle: enroll, announce, push, rotate, revoke, restore
   // a bad signature is refused; a stale ts is refused
   const good = await signEnroll(eng);
   expect((await post(`${s.url}/engines/enroll`, { ...good, sig: good.sig.slice(0, -4) + "AAAA" })).status).toBe(401);
-  expect((await enrollEngine(s.url, eng, {}, Date.now() - ENROLL_SKEW_MS - 60_000)).status).toBe(400);
+  expect((await enrollEngine(s.url, eng, Date.now() - ENROLL_SKEW_MS - 60_000)).status).toBe(400);
   expect((await post(`${s.url}/engines/enroll`, { engineId: "e" })).status).toBe(400);
 
   // a correct enrollment earns a token, and the token opens the routes

@@ -40,11 +40,4 @@ export function wireSpeech(conn: Conn, ctx: HandlerCtx): void {
     ctx.fireSayDone(id, msgId, durationS);
   });
 
-  client.on('sayLive', (paneId, msgId) => {
-    ctx.fireSayLive(sid(conn.key, paneId), msgId);
-  });
-
-  client.on('sayLiveFail', (paneId, msgId) => {
-    ctx.fireSayLiveFail(sid(conn.key, paneId), msgId);
-  });
 }

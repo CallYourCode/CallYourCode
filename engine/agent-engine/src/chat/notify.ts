@@ -62,7 +62,7 @@ let clk: Clock = realClock;
 export function initNotify(d: NotifyDeps): void {
   cfg = d;
   clk = d.clock ?? realClock;
-  void refreshHostedSettings();
+  void refreshAppSettings();
 }
 const C = (): NotifyDeps => {
   if (!cfg) throw new Error("notify not initialised");
@@ -77,11 +77,6 @@ function nap(ms: number): Promise<void> {
   return new Promise<void>((res) => { clk.setTimeout(() => res(), ms); });
 }
 
-/** TEST ONLY: cancel the batch and ceiling timers, drop the queued window and
- *  the cached hosted settings, and forget the deps, so a second in-process
- *  wiring does not fire the first one's window at the first one's push sink
- *  (which is by then a stopped server on a port nobody is listening on). No-op
- *  in production, which never re-wires. */
 export function resetForTest(): void {
   /* Cancelled through the clock that ARMED them, before the clock goes back to
    * the real one: clearing a manual clock's timer with the global clearTimeout
@@ -93,8 +88,8 @@ export function resetForTest(): void {
   ceilingTimer = null;
   queuedNew.clear();
   queuedDismiss.clear();
-  hostedSettings = { notify: true };
-  hostedSettingsAt = 0;
+  appSettings = { notify: true };
+  appSettingsAt = 0;
   cfg = null;
   clk = realClock;
 }
@@ -898,21 +893,14 @@ export function flushUnread() {
 /* What `show` accepts, how big it may be, and whether it may render inside a
  * bubble: agent-engine/src/chat/show.ts, which is testable without booting this. */
 
+let appSettings = { notify: true };
+let appSettingsAt = 0;
+const APP_SETTINGS_TTL_MS = 60_000;
 
-/* The user's GLOBAL defaults, from the app server, cached the way the hosted
- * voice is and for the same reason: the notify decision below runs while no
- * page is open, so this engine has to know the default itself, and it must
- * not pay a network hop per reply. App server down = last answer stands, and
- * before any answer the shipped defaults do. */
-let hostedSettings = { notify: true };
-let hostedSettingsAt = 0;
-const HOSTED_SETTINGS_TTL_MS = 60_000;
-
-export async function refreshHostedSettings() {
-  hostedSettingsAt = clk.now();
+export async function refreshAppSettings() {
+  appSettingsAt = clk.now();
   try {
-    /* Bear the engine token when there is one: in HOSTED /settings is
-     * owner-scoped, and the token names whose globals this engine reads. */
+
     const tok = C().peekToken();
     const res = await fetch(`${C().appServerUrl}/settings`, {
       headers: tok ? { authorization: `Bearer ${tok}` } : {},
@@ -920,14 +908,13 @@ export async function refreshHostedSettings() {
     });
     if (!res.ok) return;
     const j = (await res.json()) as any;
-    if (typeof j?.notify === "boolean") hostedSettings.notify = j.notify;
+    if (typeof j?.notify === "boolean") appSettings.notify = j.notify;
   } catch { /* app server down: keep the last answer */ }
 }
 
-
 export function globalNotify(): boolean {
-  if (clk.now() - hostedSettingsAt > HOSTED_SETTINGS_TTL_MS) void refreshHostedSettings();
-  return hostedSettings.notify;
+  if (clk.now() - appSettingsAt > APP_SETTINGS_TTL_MS) void refreshAppSettings();
+  return appSettings.notify;
 }
 
 /* The bell, resolved: this session's override, else the user's default. */

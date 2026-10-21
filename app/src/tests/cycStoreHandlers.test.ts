@@ -112,8 +112,6 @@ function spyCtx(over: Partial<HandlerCtx> = {}): HandlerCtx {
     fireSay: vi.fn(),
     fireSayGrow: vi.fn(),
     fireSayDone: vi.fn(),
-    fireSayLive: vi.fn(),
-    fireSayLiveFail: vi.fn()
   };
   return {...base, ...over};
 }
@@ -716,15 +714,6 @@ describe('speech family', () => {
     wireSpeech(conn, ctx);
     fire('sayGrow', 'p1', 'clip1', 3.2, 40);
     expect(ctx.fireSayGrow).toHaveBeenCalledWith(SID, 'clip1', 3.2, 40);
-  });
-  test('sayLive and sayLiveFail fan out namespaced without touching held state', () => {
-    const {conn, fire} = fakeConn();
-    const ctx = spyCtx();
-    wireSpeech(conn, ctx);
-    fire('sayLive', 'p1', 'clip1');
-    fire('sayLiveFail', 'p1', 'clip1');
-    expect(ctx.fireSayLive).toHaveBeenCalledWith(SID, 'clip1');
-    expect(ctx.fireSayLiveFail).toHaveBeenCalledWith(SID, 'clip1');
   });
 });
 describe('terminal frames family', () => {

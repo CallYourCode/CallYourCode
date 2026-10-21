@@ -849,10 +849,6 @@ class Pipeline {
     return this.handsFreeId;
   }
 
-  callMicTrack(): MediaStreamTrack | null {
-    return this.stream?.getAudioTracks()[0] ?? null;
-  }
-
   private rmsDb(): number {
     this.analyser!.getFloatTimeDomainData(this.buf!);
     const buf = this.buf!;

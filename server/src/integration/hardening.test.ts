@@ -1,20 +1,3 @@
-/* Security hardening proofs for the app server (H3, DDoS, engine auth):
- *
- *   - A HOSTED deploy needs no PUSH_TOKEN boot gate any more: engine routes
- *     verify the per-engine issued token, and an empty
- *     token store fails CLOSED -- proven here by booting HOSTED with no
- *     legacy env and getting 401 on push/announce.
- *   - Documents carry the CSP + baseline security headers; hashed assets get
- *     the baseline without a CSP.
- *   - /clientlog is capped: an oversize POST is dropped whole (still 204,
- *     the sink never makes the page retry) and never reaches the log file.
- *   - The push rate limit is per ENGINE: two enrolled engines arriving from
- *     the same loopback proxy (tailscale serve) each have their own budget,
- *     keyed by the authenticated token, no forwarded header trusted.
- *
- *   VOICE_URL=http://127.0.0.1:1 bun test app-server/hardening.test.ts
- */
-
 import { test, expect } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { readdirSync } from "node:fs";
@@ -76,13 +59,9 @@ async function spawnServer(extraEnv: Record<string, string>): Promise<Spawned> {
   return { url, dir, stop, said };
 }
 
-/* ------------- engine auth fails closed: no boot gate needed any more.
- * The old H2 check ("HOSTED refuses to boot without PUSH_TOKEN") is
- * superseded: there is no shared secret to require. A HOSTED server with an
- * EMPTY engine-token store must boot fine and refuse every unauthenticated
- * or garbage-bearer engine call. */
 
-test("HOSTED boots with no PUSH_TOKEN and engine routes fail closed", async () => {
+
+test("Clerk environment never activates login; local engine routes still fail closed", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cyc-h2-"));
   const port = await freePort();
   const proc = Bun.spawn(["bun", "run", join(import.meta.dir, "../bootstrap/server.ts")], {
@@ -91,18 +70,19 @@ test("HOSTED boots with no PUSH_TOKEN and engine routes fail closed", async () =
       APP_PORT: String(port),
       APP_HOST: "127.0.0.1",
       DIST_DIR: dir,
-      OWNERS_DIR: join(dir, "owners"),
+      HOME: dir, CYC_DATA_DIR: dir,
+      PUSH_FILE: join(dir, "push.json"),
+      SETTINGS_FILE: join(dir, "settings.json"),
+      REPORTS_DIR: join(dir, "reports"),
       ENGINE_TOKENS_FILE: join(dir, "engine-tokens.json"),
       CYC_LOG_DIR: join(dir, "logs"),
       VOICE_ENGINES: "http://127.0.0.1:1|http://127.0.0.1:1|none",
       CLERK_SECRET_KEY: "sk_test_scratch",
-      // a locally generated, never-real VAPID pair for the HOSTED boot guard
+      // Scratch VAPID identity. No real device is registered.
       VAPID_PUBLIC_KEY: "BOuHGkAv4-PtWtHGwZfTg0cZ1eXXYJhjZTG02Y-jbXwWULmHh_n35fGq7TcI9jGT1gy3GSX5VomGREvoFZdAnUU",
       VAPID_PRIVATE_KEY: "Sy2m28XLTu-1pDAao8kt50es9zajr6r0PXp0Pd-JvP0",
-      /* HOSTED also refuses to boot without APP_SERVER_URL now (the
-       * host-header gate needs the public front named); this test is about
-       * the PUSH_TOKEN legacy, so it names a scratch front. */
-      APP_SERVER_URL: "https://cyc-hosted.example.com",
+
+      APP_SERVER_URL: `http://127.0.0.1:${port}`,
     },
     stdout: "ignore",
     stderr: "ignore",
@@ -112,8 +92,11 @@ test("HOSTED boots with no PUSH_TOKEN and engine routes fail closed", async () =
     for (let i = 0; i < 80; i++) {
       if (await fetch(`${url}/health`).then((r) => r.ok).catch(() => false)) break;
       await Bun.sleep(100);
-      if (i === 79) throw new Error("HOSTED server did not boot without PUSH_TOKEN");
+      if (i === 79) throw new Error("local server did not boot with dormant Clerk configuration");
     }
+    const cfg = await (await fetch(`${url}/config`)).json() as {auth: string};
+    expect(cfg.auth).toBe("none");
+    expect((await fetch(`${url}/settings`)).status).toBe(200);
     const post = (path: string, headers: Record<string, string> = {}) =>
       fetch(`${url}${path}`, { method: "POST",
         headers: { "content-type": "application/json", ...headers },

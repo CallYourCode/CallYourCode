@@ -17,18 +17,6 @@ export function openSttStream(
   return voiceClientFor(sessionId).transcribeStream(handlers);
 }
 
-export function hasVoiceMedia(sessionId: string | undefined): boolean {
-  return voiceClientFor(sessionId).hasVoiceMedia();
-}
-
-export function openMediaSttStream(
-  sessionId: string | undefined,
-  handlers: SttStreamHandlers,
-  micTrack?: MediaStreamTrack | null
-): SttStream {
-  return voiceClientFor(sessionId).openMediaSttStream(sessionId ?? '', handlers, micTrack);
-}
-
 export function uploadFile(
   sessionId: string,
   file: File,

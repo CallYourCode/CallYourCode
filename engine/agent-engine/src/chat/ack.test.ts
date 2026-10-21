@@ -10,7 +10,7 @@
  * The app's liveness probe is a ping, answered with a pong, not an attach.
  *
  * NO ENGINE PROCESS: wireCore's in-process boot, frames through the shipped
- * dispatcher (dispatchClientFrame), the same path a sealed DataChannel reaches.
+ * dispatcher (dispatchClientFrame), the same path a sealed WebSocket reaches.
  *
  *   bun test agent-engine/src/chat/ack.test.ts
  */

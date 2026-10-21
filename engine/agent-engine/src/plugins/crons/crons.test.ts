@@ -12,7 +12,7 @@
  *
  * The store's own arithmetic (fire-once, grace, backoff, lock) is
  * schedules.test.ts beside this one. The single wire-level fact -- the same rpc
- * ops travelling over the sealed DataChannel and the one /plugin/crons/rpc
+ * ops travelling over the sealed WebSocket and the one /plugin/crons/rpc
  * route -- is e2e/crons-delivery.test.ts, and only that, because it is the only
  * claim here that cannot exist without the real transport.
  *

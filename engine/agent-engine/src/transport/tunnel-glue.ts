@@ -1,52 +1,3 @@
-/* TUNNEL GLUE (L4 interface): a sealed `{t:"req"}` frame
- * becomes a routed request against this engine, answered as one or more
- * sealed `{t:"res"}` frames.
- *
- * There is NO new protocol and NO per-route rewrite. The engine has ONE request
- * router with two feeds: the localhost HTTP socket and this sealed tunnel.
- * onReq reassembles the frames (tunnel.ts), synthesizes a `Request` from them,
- * and hands it to the SAME routeRequest the localhost server uses, so every
- * route and body limit behaves identically. The device is already through the
- * sealed v2 sec handshake
- * (ws.data.sec is set only after enrolment), so the CHANNEL is the auth: onReq
- * marks the request (markSealedTunnel), and requireOwner treats a marked request
- * as the owner. There is no HTTP bearer at all now (the x-cyc-cap machinery is
- * deleted): a content route answers the sealed tunnel and the host only.
- * requireLocal routes (agent-message, debug, trim-log) stay refused --
- * they are local-only by design and the app never tunnels them.
- *
- * STREAMING. Three additions inside the same frames:
- *
- *  (a) STREAMED REQUESTS, for the fixed big-body routes in STREAM_REQ_PATHS
- *      (/upload, /user-audio): their chunks SPOOL to a temp file as they
- *      arrive instead of reassembling in memory, and the route gets a
- *      file-backed Request body once the last chunk lands. This retires the
- *      old "/user-audio stays on HTTP" exemption -- a 300MB voice note now
- *      rides the sealed channel without anything holding it whole.
- *  (b) STREAMED REPLIES: reply() streams res.body as it arrives rather than
- *      buffering via arrayBuffer(), so an answer has no 32MB ceiling and a
- *      GROWING body (a TTS mp3 still rendering) goes out chunk by chunk. The
- *      encoder's lookahead keeps a fully-buffered body's frames byte-identical
- *      to the old encodeRes wire.
- *  (c) {t:"req-abort", id}: the app walked away; the engine stops spooling
- *      (and deletes the spool file) and stops a reply still going out.
- *
- * The reply is chunked by tunnel.ts and each chunk is sealed + sent in order
- * with a pipe.drain() between them, so a large answer rides the backpressure
- * dcpipe already has. The drain is read only AFTER the sealed frame is on the
- * pipe (sendFrame awaits the sealed write): reading it right after queueing
- * the seal saw an empty buffer every time, so the whole file was poured into
- * the DataChannel stack at once, starving the engine's event loop for the rest
- * of the download (download-lane, 2026-10-03). A multi-frame answer rides the
- * sealed writer's BULK lane, which yields to every control frame, so a
- * download never holds a chat frame or an upload ack behind its bytes; a route
- * can put a one-frame answer there too with `x-cyc-lane: bulk` (a download
- * chunk). Replies are NOT awaited by the frame dispatch: a growing
- * body can stay open for minutes, and the dispatch loop must keep reading --
- * not least the {t:"req-abort"} that stops that very reply. Frames of
- * concurrent replies interleave on the wire; the app correlates by id.
- */
-
 import { ReqReassembler, ResStreamEncoder, decodeChunk, encodeRes, TunnelError,
   type ReqAbortFrame, type ReqFrame, type ResFrame } from "./tunnel.ts";
 import { send } from "./wire.ts";
@@ -105,7 +56,7 @@ type ReqStream = {
 
 /* TEST-ONLY CHAOS (Lane A proof). When CYC_CHAOS_DROP_AFTER_BYTES is set, the
  * sealed pipe is closed after that many request-body bytes have arrived on THIS
- * connection, simulating the roaming-4G flap from the incident: the DataChannel
+ * connection, simulating the roaming-4G flap from the incident: the WebSocket
  * dies mid-upload and the app must reconnect and resume. Inert (0) unless the
  * env var is a positive number, and read lazily so a test can set it per case. */
 function chaosDropAfterBytes(): number {
@@ -129,7 +80,7 @@ type TunnelState = {
 
 /* One tunnel state per connection, dropped with the socket (a WeakMap so
  * closeClient needs no extra teardown for the memory; closeTunnelClient below
- * cleans the DISK half, which no WeakMap can). A sealed DC client only; a
+ * cleans the DISK half, which no WeakMap can). A sealed WS client only; a
  * frame on anything without a sec state machine is ignored. */
 const stateOf = new WeakMap<Sock, TunnelState>();
 
@@ -152,7 +103,7 @@ type Lane = "ctl" | "bulk";
 
 /** One reply frame onto the pipe, on `lane`, resolving once it is IN the pipe
  * and the pipe has drained under its low-water mark. Through the sealed writer
- * when the sock has one (the DataChannel client), else the plain send. */
+ * when the sock has one (the WebSocket client), else the plain send. */
 async function sendFrame(ws: Sock, f: ResFrame, lane: Lane): Promise<void> {
   const sec = ws.data.sec;
   if (sec && typeof sec.sealSend === "function") await sec.sealSend(f, lane);
@@ -160,12 +111,6 @@ async function sendFrame(ws: Sock, f: ResFrame, lane: Lane): Promise<void> {
   await ws.data.pipeDrain?.();
 }
 
-/** Send one Response back over the sealed channel as chunked {t:"res"} frames,
- * streaming res.body AS IT ARRIVES: a fully-buffered body emits the
- * exact frames the old arrayBuffer() path did (the stream encoder's lookahead
- * pins that), a growing body goes out chunk by chunk with no size ceiling.
- * Drains between chunks so a big or slow answer respects dcpipe backpressure;
- * a {t:"req-abort"} for this id stops the stream mid-body. */
 async function reply(ws: Sock, id: string, res: Response, st?: TunnelState): Promise<void> {
   const headers: Record<string, string> = {};
   res.headers.forEach((v, k) => {
@@ -239,7 +184,7 @@ async function reply(ws: Sock, id: string, res: Response, st?: TunnelState): Pro
 
 export async function onReq(ws: Sock, m: ReqFrame): Promise<void> {
   if (!deps) return;
-  // Tunnel rides the sealed DataChannel only; without a sec state machine there
+  // Tunnel rides the sealed WebSocket only; without a sec state machine there
   // is no proven device behind this frame, so there is nothing to authorise.
   if (!ws.data.sec) return;
   const d = deps;
@@ -275,7 +220,7 @@ export async function onReq(ws: Sock, m: ReqFrame): Promise<void> {
   // the queue once the file is ready. Without this the frame would fall through
   // to the buffered reassembler below, which throws no-meta and answers the id
   // a spurious 413, failing an upload whose first frame merely lost the race to
-  // its own async file open (dispatch is not serialised: rtc-glue feeds every
+  // its own async file open (dispatch is not serialised: client-glue feeds every
   // sealed frame with `void dispatchClientFrame`).
   const s = st.streams.get(id);
   if (s) {
@@ -315,7 +260,7 @@ export async function onReq(ws: Sock, m: ReqFrame): Promise<void> {
     headers,
     body: hasBody ? done.body : undefined,
   });
-  // The channel IS the auth: this request came through the sealed DataChannel,
+  // The channel IS the auth: this request came through the sealed WebSocket,
   // which already proved the device (ws.data.sec). Mark it so requireOwner
   // treats it as the owner, WITHOUT a forgeable cap header. A remote HTTP caller
   // never gets this mark (it is keyed on the in-process Request object), so the
@@ -376,7 +321,7 @@ async function killStream(st: TunnelState, id: string, s: ReqStream): Promise<vo
 
 async function openStream(ws: Sock, st: TunnelState, id: string, m: ReqFrame): Promise<void> {
   const tmp = join(tunnelTmpDir(), `req-${crypto.randomUUID()}`);
-  /* REGISTERED BEFORE THE AWAIT. Frame dispatch is not serialised (rtc-glue
+  /* REGISTERED BEFORE THE AWAIT. Frame dispatch is not serialised (client-glue
    * feeds every sealed frame with `void dispatchClientFrame`), so a continuation
    * chunk of this same upload can reach onReq while the two awaits below are
    * still opening the spool file. It must find this stream and be held in its

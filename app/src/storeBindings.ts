@@ -182,12 +182,6 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
     }
   >();
 
-  const liveSuppressed = new Set<string>();
-  const suppressedSays = new Map<
-    string,
-    {sessionId: string; text: string; origin?: string; growing?: boolean}
-  >();
-
   // A say may autoplay only when the chat is open here AND its row is genuinely
   // unheard by the engine's read state (mayAutoplayArrival) -- the SAME truth the
   // unread count and the divider use. Without the second half, a say that names a
@@ -220,33 +214,9 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
     engine.onSay((sessionId, msgId, text, origin, growing) => {
       if (dataState.mode !== 'live') return;
 
-      if (liveSuppressed.has(msgId)) {
-        suppressedSays.set(msgId, {sessionId, text, origin, growing});
-        audio.updateRowAudio();
-        return;
-      }
       handleSay(sessionId, msgId, text, origin, growing);
     })
   );
-  deps.onTeardown(
-    engine.onSayLive((_sessionId, msgId) => {
-      if (dataState.mode !== 'live') return;
-      liveSuppressed.add(msgId);
-    })
-  );
-  deps.onTeardown(
-    engine.onSayLiveFail((_sessionId, msgId) => {
-      if (dataState.mode !== 'live') return;
-      liveSuppressed.delete(msgId);
-
-      const held = suppressedSays.get(msgId);
-      if (held) {
-        suppressedSays.delete(msgId);
-        handleSay(held.sessionId, msgId, held.text, held.origin, held.growing);
-      }
-    })
-  );
-
   deps.onTeardown(
     engine.onSayGrow((sessionId, msgId, durS, chars) => {
       if (dataState.mode !== 'live') return;
@@ -406,7 +376,6 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       if (!restoredActive && engine.list().length && tryRestoreActive() === 'opened') return;
       const s = active();
       const count = s ? s.messages.length : -1;
-
 
       const overlayActive = !!s && engine.overlayOn(s.id);
       const evCount = overlayActive ? (s as CycEngineSession).events.length : -1;

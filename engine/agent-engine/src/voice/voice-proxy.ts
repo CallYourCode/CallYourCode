@@ -1,5 +1,5 @@
 /* THE VOICE PROXY (L3 feature): the voice-engine pick, the /voice/* HTTP
- * forwarding, and the sealed STT bridge (the mic stream as sealed DC frames).
+ * forwarding, and the sealed STT bridge (the mic stream as sealed WS frames).
  *
  * The engine's OWN origin carries the voice contract (/voice/*), forwarding
  * to the configured voice engine (VOICE_URL). The app stops needing a second
@@ -57,7 +57,7 @@ export async function voiceUrl(): Promise<string> {
 //
 // /voice/stt, /voice/tts and /voice/voices forward over HTTP with the same
 // request/response shapes the voice engine already serves; the mic STREAM rides
-// the sealed DataChannel as stt-* frames and the bridge below. A down voice
+// the sealed WebSocket as stt-* frames and the bridge below. A down voice
 // engine fails at connect (immediate), so these timeouts are backstops for a
 // connected-but-silent upstream, never the working deadline.
 
@@ -101,7 +101,7 @@ export function voiceWsUrl(base: string): string {
 }
 
 // ------------------------------------------------------- the sealed stt bridge
-/* The app's mic stream rides the sealed DataChannel as
+/* The app's mic stream rides the sealed WebSocket as
  * ordinary client frames (dispatched by frames.ts), and this bridge carries
  * each stream to the voice engine's /stt-stream over loopback -- the same
  * server-to-server pipe shape the old /voice/stt-stream WS relay had, minus the
@@ -112,7 +112,7 @@ export function voiceWsUrl(base: string): string {
  *
  * THE WIRE, exactly (the contract the app half implements):
  *
- *   app -> engine, sealed DC client frames:
+ *   app -> engine, sealed WS client frames:
  *     {t:"stt-open", id, rate, format}
  *         Open one streaming STT session. `id` is the app's name for the
  *         stream, any non-empty string, unique per connection while live.
@@ -130,7 +130,7 @@ export function voiceWsUrl(base: string): string {
  *         End of audio. Forwarded as {t:"stop"}; the voice engine finalizes
  *         and answers its final, which comes back as stt-final below.
  *
- *   engine -> app, sealed DC frames (transcripts ride BACK sealed too):
+ *   engine -> app, sealed WS frames (transcripts ride BACK sealed too):
  *     {t:"stt-partial", id, text, committed, committedS?}
  *         A live transcript. Field-for-field the voice engine's own partial:
  *         `text` = the corrected words so far (committed + live draft tail),
@@ -239,7 +239,7 @@ function onSttUpstream(ws: Sock, st: SttSession, data: unknown): void {
 /** {t:"stt-open", id, rate, format}: open a streaming STT session, bridged to
  *  the voice engine's /stt-stream over loopback. */
 export function onSttOpen(ws: Sock, m: any): void {
-  // Sealed DC only, same guard as the tunnel: without a sec state machine there
+  // Sealed WS only, same guard as the tunnel: without a sec state machine there
   // is no proven device behind this frame. The channel is the auth.
   if (!ws.data.sec) return;
   const id = typeof m?.id === "string" ? m.id : "";
@@ -330,7 +330,6 @@ export function closeSttClient(ws: Sock): void {
   if (!map) return;
   for (const st of [...map.values()]) sttTeardown(ws, st);
 }
-
 
 /* The voices this host can speak in, from the voice engine. The one place that
  * asks, so the /voices route and the voice plugin's `list` op cannot report two

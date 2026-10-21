@@ -382,7 +382,7 @@ test("an unknown device enrols only when sec-ok carries a valid pair proof", asy
     const engineOut: any[] = [];
     let closed: {code: number; reason: string} | null = null;
     const sec = new EngineSecConn(
-      st, "example", "linux", "rtc",
+      st, "example", "linux",
       (f) => engineOut.push(f),
       () => {},
       () => {},

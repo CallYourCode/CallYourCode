@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { initTunnel, onReq, onReqAbort, closeTunnelClient, STREAM_REQ_PATHS } from "./tunnel-glue.ts";
 import { CHUNK, REASSEMBLE_MAX, encodeReq, encodeRes, ReqStreamEncoder, ResReassembler,
   type ReqFrame, type ResFrame } from "./tunnel.ts";
-import { MSG_MAX } from "./dcpipe.ts";
+import { MSG_MAX } from "../../../shared/ws-pipe.ts";
 import { RPC_REPLY_MAX_BYTES } from "../plugins/platform/spec.ts";
 import { tunnelTmpDir } from "../storage/datadir.ts";
 import { tmpDir } from "../test-utils/tmp.ts";
@@ -61,10 +61,6 @@ function bytes(n: number): Uint8Array {
   return b;
 }
 
-/** A sealed-looking sock: glue only touches data.sec / data.pipeDrain, and
- * wire.send only calls ws.send(JSON string). pipeDrain yields a REAL event
- * loop turn (like the dcpipe drain it stands in for): a reply streaming an
- * endless body must not starve the test's own timers. */
 function fakeSock() {
   const out: (ResFrame & Record<string, unknown>)[] = [];
   const ws = {
@@ -202,7 +198,7 @@ test("a /upload request STREAMS to a spool file, reaches the router file-backed,
 
 test("a continuation frame racing the spool open is held, not misrouted (openStream registration race)", async () => {
   /* THE DUPLICATE-PASTE UPLOAD BUG. Production does NOT serialise frame dispatch:
-   * rtc-glue feeds every sealed frame with `void dispatchClientFrame`, so a
+   * client-glue feeds every sealed frame with `void dispatchClientFrame`, so a
    * multi-frame /upload's continuation chunk can reach onReq while the FIRST
    * frame's openStream is still awaiting mkdirPrivate + open. If the stream is
    * not registered until after those awaits, the continuation (no meta) falls
@@ -303,17 +299,6 @@ test("a streamed Response goes out chunk by chunk: meta first, growing body, cle
   expect(Array.from(done.body)).toEqual(Array.from(all));
 });
 
-/* ---- THE RPC REPLY CAP RIDES THE SEALED TUNNEL (contracts FINDINGS #5) -----
- *
- * spec.ts once warned that a plugin rpc reply NEAR RPC_REPLY_MAX_BYTES (16 MB)
- * plus its JSON envelope "will not fit one sealed frame" (dcpipe MSG_MAX is
- * also 16 MB). That fear assumed the reply rides ONE frame. It does not: the
- * glue's reply() streams every Response body through ResStreamEncoder, which
- * carves it into CHUNK (256 KB) parts, one sealed frame each, so no frame ever
- * approaches MSG_MAX no matter how large the reply. These two tests pin that
- * with rpc-shaped answers, the exact Response routes/plugin.ts produces:
- * a JSON body under content-type application/json. */
-
 /** An rpc wire string of exactly `total` bytes, shaped like routes/plugin.ts
  * line 206 builds it: {"ok":true,"result":"xxx..."} in pure ASCII, so string
  * length equals byte length. */
@@ -347,13 +332,13 @@ test("an rpc reply of a few MB transits the sealed glue chunked and intact", asy
   expect(frames.length).toBe(Math.ceil((4 * 1024 * 1024) / CHUNK)); // 16 frames, not one
 }, 60_000);
 
-test("an rpc reply AT RPC_REPLY_MAX_BYTES transits: many small frames, none anywhere near dcpipe MSG_MAX", async () => {
+test("an rpc reply AT RPC_REPLY_MAX_BYTES transits: many small frames, none anywhere near WebSocket MSG_MAX", async () => {
   // The largest reply the 413 gate lets through: byteLen(wire) == the cap.
   const wire = rpcWire(RPC_REPLY_MAX_BYTES);
   expect(wire.length).toBe(RPC_REPLY_MAX_BYTES);
   const frames = await rpcRoundTrip("rpc-cap", wire);
   expect(frames.length).toBe(Math.ceil(RPC_REPLY_MAX_BYTES / CHUNK)); // 64 chunk frames
-  // Each frame's serialized form IS the string dcpipe fragments and the far
+  // Each frame's serialized form IS the string the WebSocket carries and the far
   // side reassembles under MSG_MAX. All ASCII (base64 + envelope), so length
   // is bytes. The bound that matters is MSG_MAX; the tight bound shows the
   // headroom is ~46x, not luck: 256 KB of body base64s to ~350 KB.
@@ -477,7 +462,7 @@ test("CYC_CHAOS_DROP_AFTER_BYTES unset (or 0) is inert: a whole request goes thr
  * every reply frame goes through sec.sealSend with a lane, and the reply waits
  * for each sealed write before it reads the next part of the body. The old
  * reply queued the seal and read the pipe's drain at once, saw an empty buffer,
- * and poured the whole file into the DataChannel stack. */
+ * and poured the whole file into the WebSocket stack. */
 function sealedSock() {
   const sent: { f: ResFrame; lane: string }[] = [];
   let pending: Array<() => void> = [];

@@ -40,7 +40,7 @@ import { until } from "../test-utils/wait.ts";
 import { sessionOpsRoutes } from "../routes/session-ops.ts";
 import { dispatchClientFrame } from "../transport/frames.ts";
 import { dispatchSessionFrame } from "./mcp.ts";
-import { flushBatch, notifyWanted, refreshHostedSettings } from "../chat/notify.ts";
+import { flushBatch, notifyWanted, refreshAppSettings } from "../chat/notify.ts";
 import type { Sock } from "../transport/sock.ts";
 
 let core: WireCore | null = null;
@@ -267,7 +267,7 @@ test("global notify OFF is followed by a session with no override, and beaten by
      * change is made at the app server and then re-read, which is the same
      * path the TTL takes. */
     c.pushSink!.settings.notify = false;
-    await refreshHostedSettings();
+    await refreshAppSettings();
     expect(notifyWanted(wireId(PANE)), "a session with no override must follow the global").toBe(false);
 
     const said = await saying(() => reply(c, "global says quiet"));
@@ -289,7 +289,7 @@ test("global notify OFF is followed by a session with no override, and beaten by
     /* AND THE OTHER DIRECTION, which is the half a "global off" test cannot
      * reach: with the global back ON, a session that says OFF still says off. */
     c.pushSink!.settings.notify = true;
-    await refreshHostedSettings();
+    await refreshAppSettings();
     await post({ notify: false });
     expect(notifyWanted(wireId(PANE)), "the override lost to a global that agreed with it before")
       .toBe(false);

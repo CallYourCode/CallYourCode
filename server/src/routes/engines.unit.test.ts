@@ -9,7 +9,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeEngineRoutes } from "./engines";
 import { EngineTokens } from "../access/enroll";
-import { EnrollGrants } from "../access/grants";
 import { EngineLeases } from "../engines/hosts";
 import { fakeEngine } from "../test-support/enrollkit";
 import { signEnroll } from "../../../engine/shared/enroll-wire.ts";
@@ -22,22 +21,20 @@ afterEach(async () => {
 });
 const silent = () => {};
 
-async function rig(hosted = false, sub: string | null = null) {
+async function rig() {
   const d = await mkdtemp(join(tmpdir(), "cyc-engroutes-unit-"));
   dirs.push(d);
   const engineTokens = await EngineTokens.open(join(d, "tokens.json"));
   const leases = await EngineLeases.open(join(d, "leases.json"), 60_000);
-  const enrollGrants = new EnrollGrants();
   const routes = makeEngineRoutes({
-    hosted, engineTokens, enrollGrants, leases, engineLeaseMs: 60_000,
-    sessionSub: async () => sub,
+    engineTokens, leases, engineLeaseMs: 60_000,
     engineAuth: (req) => {
       const h = req.headers.get("authorization") ?? "";
       return engineTokens.verify(h.startsWith("Bearer ") ? h.slice(7) : null);
     },
     log: silent,
   });
-  return { engineTokens, leases, enrollGrants, routes };
+  return { engineTokens, leases, routes };
 }
 
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -71,29 +68,6 @@ test("a bad signature is a 401; a tampered field kills the real signature", asyn
   const r = (await routes(post("/engines/enroll", tampered), "/engines/enroll"))!;
   expect(r.status).toBe(401);
   expect(engineTokens.count).toBe(0);
-});
-
-test("HOSTED enroll: signature is checked BEFORE a grant is burned", async () => {
-  const { routes, enrollGrants } = await rig(true);
-  const sub = "user_alice";
-  const code = enrollGrants.mint(sub).code;
-  const eng = await fakeEngine();
-  const forged = { ...(await signEnroll(eng)), sig: "AAAA" };
-  const r = (await routes(post("/engines/enroll", forged,
-    { authorization: `Bearer ${code}` }), "/engines/enroll"))!;
-  expect(r.status).toBe(401);
-  // the grant survived the forgery and still redeems for the real enrollment
-  const ok = (await routes(post("/engines/enroll", await signEnroll(eng),
-    { authorization: `Bearer ${code}` }), "/engines/enroll"))!;
-  expect(ok.status).toBe(200);
-  expect((await ok.json()).owner).toBe(sub);
-});
-
-test("HOSTED enroll with neither grant nor session is a 401", async () => {
-  const { routes } = await rig(true, null);
-  const eng = await fakeEngine();
-  const r = (await routes(post("/engines/enroll", await signEnroll(eng)), "/engines/enroll"))!;
-  expect(r.status).toBe(401);
 });
 
 test("revoke kills the bearer; restore only un-bars re-enrollment", async () => {
@@ -145,26 +119,4 @@ test("announce: token required, engineId bound to the token, lease recorded", as
   const live = await leases.list();
   expect(live.length).toBe(1);
   expect(live[0]).toMatchObject({ engineId: "e-ann", url: "ws://h:10101/ws", user: "u" });
-});
-
-test("GET /engines: LOCAL lists all; HOSTED scopes to the session's own", async () => {
-  const local = await rig();
-  const r = (await local.routes(new Request("http://x/engines"), "/engines"))!;
-  expect((await r.json()).engines).toEqual([]);
-
-  const hosted = await rig(true, null);
-  expect((await hosted.routes(new Request("http://x/engines"), "/engines"))!.status).toBe(401);
-});
-
-test("/engines/verify trades a bearer for {engineId, owner}; garbage is a 401", async () => {
-  const { routes } = await rig();
-  const eng = await fakeEngine("e-ver");
-  const enrolled = (await routes(post("/engines/enroll", await signEnroll(eng)), "/engines/enroll"))!;
-  const token = (await enrolled.json()).token as string;
-
-  const good = (await routes(post("/engines/verify", { token }), "/engines/verify"))!;
-  expect(await good.json()).toMatchObject({ ok: true, engineId: "e-ver", owner: "local" });
-
-  const bad = (await routes(post("/engines/verify", { token: "cyt_nope" }), "/engines/verify"))!;
-  expect(bad.status).toBe(401);
 });

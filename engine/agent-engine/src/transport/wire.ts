@@ -31,8 +31,8 @@ export function rawSend(ws: Sock, msg: unknown) {
   }
 }
 
-/* The one socket-write choke point. A DataChannel client's `send` seals
- * through its own EngineSecConn (sock.ts RtcSock), so sealing is per-socket
+/* The one socket-write choke point. A WebSocket client's `send` seals
+ * through its own EngineSecConn (sock.ts SealedSock), so sealing is per-socket
  * and this stays transport-blind. */
 export function send(ws: Sock, msg: unknown) {
   rawSend(ws, msg);

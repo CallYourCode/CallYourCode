@@ -5,8 +5,7 @@
 // moment it starts; if that has not happened and #cyc-app is still empty after
 // the grace window, beacon one line to /clientlog so the stuck boot names
 // itself. No framework, no imports: this runs even when every module fetch
-// hangs. /clientlog is same-origin and, in hosted mode, drops lines without a
-// signed-in device, so the privacy gate still holds.
+// hangs. /clientlog is same-origin on the local app-server.
 //
 // This lives in its own same-origin file (not inline in index.html) because the
 // app's served CSP is script-src 'self' blob: with no 'unsafe-inline', no nonce

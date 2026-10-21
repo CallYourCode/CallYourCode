@@ -23,7 +23,7 @@
  * noticeChat now (log + stampTs + broadcast), the same shape as the restart
  * notice.
  *
- * NOT HERE, ON PURPOSE: "the sealed DataChannel is the only client wire". That
+ * NOT HERE, ON PURPOSE: "the sealed WebSocket is the only client wire". That
  * sentence cannot be proven without the real transport, so it lives in
  * e2e/roundtrip.test.ts, which dials one. Everything else is provable in
  * process: wireCore performs server.ts's own ordered boot, the frames go in

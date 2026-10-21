@@ -4,8 +4,7 @@
  * proves possession of its identity key (keys.json v3, agent-engine/src/security/sec.ts) by
  * SIGNING an enrollment request, and the app server answers with a per-engine
  * opaque token. Every later announce and push bears that token; the app server
- * maps token -> {engineId, owner}, so in HOSTED no engine can announce or push
- * into another owner's account.
+ * binds every token to its engine identity.
  *
  * WHY IT LIVES HERE. The canonical string is a WIRE CONTRACT: the engine signs
  * it and the app server verifies it, and if the two ever spelled it differently
@@ -43,8 +42,7 @@ export type EnrollIdentity = {
 };
 
 /** How far an enrollment `ts` may sit from the server clock. A replay bound,
- *  not a security boundary on its own (HOSTED also gates on the Clerk
- *  session; LOCAL is a trusted network by definition). */
+ *  enrollment is restricted to the local or Tailscale network. */
 export const ENROLL_SKEW_MS = 10 * 60_000;
 
 /** The exact bytes the identity key signs. Versioned so a future shape can

@@ -11,17 +11,11 @@
     "pair-key": "bun run src/security/pairkey.ts"
   },
   "dependencies": {
-    "@inquirer/core": "^11.2.1",
-    "werift": "0.24.4",
-    "opusscript": "^0.1.1",
     "qrcode-terminal": "^0.12.0",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
     "bun-types": "1.2.0",
     "typescript": "5.7.3"
-  },
-  "patchedDependencies": {
-    "werift@0.24.4": "patches/werift@0.24.4.patch"
   }
 }

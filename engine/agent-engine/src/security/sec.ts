@@ -14,8 +14,7 @@
  * transport. A device must prove it holds a live content generation's key
  * (sec-ok.pair, an HMAC over the handshake transcript) before the engine enrols
  * it; a known, unrevoked device needs no proof because it is already in the
- * device list. Transport no longer decides, so the direct DataChannel and the
- * hosted relay fold into the one proof below.
+ * device list. The relay WebSocket carries the same proof on every connection.
  */
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -312,13 +311,13 @@ export async function verifyRelayAuth(
 
 /** Which lane of the sealed writer a frame rides (EngineSecConn.sealSend). */
 export type WriteLane = "ctl" | "bulk";
-type WriteJob = { inner: unknown; resolve: () => void };
+type WriteJob = { inner: unknown; bytes: number; resolve: () => void };
 
 /* The engine's per-connection sec state machine. Feed it every
  * plaintext string the pipe delivers; it answers the hello, verifies the
  * device's sec-ok, enrols or refuses, sends sec-done, then hands each OPENED
  * inner frame up to onFrame -- so the dispatcher above never knows the pipe is
- * sealed, exactly as the pre-579 plaintext socket looked. One per RtcSock. */
+ * sealed, exactly as the pre-579 plaintext socket looked. One per SealedSock. */
 export class EngineSecConn {
   private chan: SecureChannel | null = null;
   ready = false;
@@ -336,6 +335,7 @@ export class EngineSecConn {
   private ctlQ: WriteJob[] = [];
   private bulkQ: WriteJob[] = [];
   private pumping = false;
+  private queuedBytes = 0;
   /** wakes a pump parked on the bulk gate when a control frame arrives */
   private wakeCtl: (() => void) | null = null;
 
@@ -343,10 +343,6 @@ export class EngineSecConn {
     private state: E2EState,
     private user: string,
     private host: string,
-    /* Positional, deliberately NOT a field: every caller states the transport
-     * it is opening on, but nothing in here reads it back. Kept in the
-     * signature so the call sites stay honest about which pipe they are. */
-    _transport: "ws" | "rtc" | "relay",
     /** plaintext write on the pipe (the caller JSON.stringifies + pipe.send). */
     private send: (frame: unknown) => void,
     /** the device is enrolled and sec-done sent: send the sealed hello burst. */
@@ -364,9 +360,16 @@ export class EngineSecConn {
    * once the sealed frame was handed to the pipe, so a caller that awaits it
    * and then the pipe's drain sees the bytes it just wrote. */
   sealSend(inner: unknown, lane: WriteLane = "ctl"): Promise<void> {
-    if (!this.chan) return Promise.resolve();
+    if (!this.chan || this.done) return Promise.resolve();
+    const bytes = enc.encode(JSON.stringify(inner)).byteLength;
+    if (this.queuedBytes + bytes > 32 * 1024 * 1024 || this.ctlQ.length + this.bulkQ.length >= 1024) {
+      this.markClosed();
+      this.onClose(1009, "writer-limit");
+      return Promise.resolve();
+    }
+    this.queuedBytes += bytes;
     return new Promise<void>((resolve) => {
-      (lane === "bulk" ? this.bulkQ : this.ctlQ).push({ inner, resolve });
+      (lane === "bulk" ? this.bulkQ : this.ctlQ).push({ inner, bytes, resolve });
       if (lane === "ctl") this.wakeCtl?.();
       void this.pump();
     });
@@ -390,10 +393,14 @@ export class EngineSecConn {
         if (!job) break;
         const chan = this.chan;
         try {
-          if (chan) this.send(await chan.seal(job.inner));
+          if (chan && !this.done) {
+            const frame = await chan.seal(job.inner);
+            if (!this.done) this.send(frame);
+          }
         } catch {
           // socket gone; the close handler cleans up
         }
+        this.queuedBytes -= job.bytes;
         job.resolve();
       }
     } finally {
@@ -422,9 +429,9 @@ export class EngineSecConn {
     /* JSON.parse SUCCEEDS ON "null", AND ON "7", AND ON '"hi"'. The catch above
      * only covers bytes that are not JSON at all, so a client writing the four
      * characters `null` got past it and the next line read `m.t` off null:
-     * "TypeError: null is not an object". rtc-glue calls this as
+     * "TypeError: null is not an object". client-glue calls this as
      * `void sec.feed(raw)`, so that TypeError is an UNHANDLED REJECTION, thrown
-     * by any peer that can open a DataChannel, before it has proved anything.
+     * by any peer that can open a WebSocket, before it has proved anything.
      * A non-object frame is not a frame; it is dropped like any other junk. */
     if (!m || typeof m !== "object") return;
 
@@ -533,6 +540,12 @@ export class EngineSecConn {
   }
 
   markClosed(): void {
+    if (this.done) return;
     this.done = true;
+    this.wakeCtl?.();
+    for (const job of [...this.ctlQ.splice(0), ...this.bulkQ.splice(0)]) {
+      this.queuedBytes -= job.bytes;
+      job.resolve();
+    }
   }
 }

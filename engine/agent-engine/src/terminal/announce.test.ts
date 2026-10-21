@@ -97,11 +97,6 @@ async function mk(url: string, clock: ManualClock, heartbeatMs = 3_600_000) {
   });
 }
 
-/* -------------------------------------------- pair -> Cloud JUST WORKS.
- * The pair saves the token file with the enrolled base inside; the engine's
- * next boot must resolve its app-server from it, with no APP_SERVER_URL env
- * and no unit drop-in. That resolution is what these two pin down. */
-
 async function mkBare() {
   e2e ??= await loadOrCreateE2E(join(base, "keys.json"));
   return makeAnnounce({
@@ -111,18 +106,16 @@ async function mkBare() {
   });
 }
 
-test("no env: the enrolled base in the token file IS the engine's app-server", async () => {
-  saveAppToken(stateFile("app-token.json"), "https://app.example.test", "cyt_enrolled");
+test("saved enrollment never silently restores a destination", async () => {
+  saveAppToken(stateFile("app-token.json"), "https://old.example.test", "cyt_old");
   const prior = process.env.APP_SERVER_URL;
   delete process.env.APP_SERVER_URL;
   try {
     const a = await mkBare();
-    expect(a.appServerUrl).toBe("https://app.example.test");
-    // and the saved token loads against that resolved base, ready to announce
-    expect(a.peekToken()).toBe("cyt_enrolled");
+    expect(a.appServerUrl).toBe(DEFAULT_APP_URL);
+    expect(a.peekToken()).toBe("");
   } finally {
-    if (prior === undefined) delete process.env.APP_SERVER_URL;
-    else process.env.APP_SERVER_URL = prior;
+    if (prior !== undefined) process.env.APP_SERVER_URL = prior;
   }
 });
 
@@ -274,9 +267,7 @@ test("the token survives a process restart via state/app-token.json", async () =
 });
 
 test("a token stored for a DIFFERENT app server is not reused", async () => {
-  /* The file records which app server issued the token. Pointing the engine at
-   * another one (the hosted/local switch) must re-enrol rather than present a
-   * bearer that server has never heard of. */
+
   const first = stubServer();
   const second = stubServer();
   try {

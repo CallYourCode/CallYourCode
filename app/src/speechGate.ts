@@ -1,5 +1,4 @@
 import * as engine from './engine/store';
-import {selectSttStream} from './engine/voiceCall';
 import {pipeline} from './audio/pipeline';
 import {speaker} from './audio/speaker';
 import {sessionState} from './sessionState';
@@ -26,17 +25,7 @@ export function ensureMic(): Promise<void> {
         transcribe: (audio, sessionId) => engine.transcribe(voiceSession(sessionId), audio),
 
         transcribeStream: (handlers, sessionId) =>
-          selectSttStream(
-            {
-              callSessionId: pipeline.handsFreeSessionId,
-              micTrack: pipeline.callMicTrack(),
-              hasVoiceMedia: (s) => engine.hasVoiceMedia(s),
-              openMedia: (s, h, mic) => engine.openMediaSttStream(s, h, mic),
-              openDc: (s, h) => engine.openSttStream(s, h)
-            },
-            handlers,
-            voiceSession(sessionId)
-          )
+          engine.openSttStream(voiceSession(sessionId), handlers)
       })
       .catch((err) => {
         mic.ready = null;

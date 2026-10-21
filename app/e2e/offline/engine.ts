@@ -16,10 +16,15 @@ import {
   keyId,
   type EngineIdentity
 } from '../../../engine/shared/e2e';
-import {Reassembler, fragment} from '../../../engine/shared/dcpipe';
 import {ReqReassembler, encodeRes, TunnelError, type ReqComplete} from '../../../engine/shared/tunnel';
 
 const te = new TextEncoder();
+const delivering = new WeakSet<WS>();
+function emitOpened(ws: WS, inner: unknown) {
+  delivering.add(ws);
+  try { ws.emit('message', JSON.stringify(inner), false); }
+  finally { delivering.delete(ws); }
+}
 
 export type SeenFrame = {sealed: boolean; t: string};
 
@@ -56,7 +61,7 @@ export type TestEngine = RegisteredEngine & {
 
   setIdentity(id: EngineIdentity): void;
   seen: SeenFrame[];
-  offers: number;
+  auths: number;
   rawHellos: number;
   connections: number;
   secOkCount: number;
@@ -101,7 +106,6 @@ export type EngineOptions = {
 type Conn = {
   ws: WS;
   rawSend: (data: Buffer | string) => void;
-  rx: Reassembler;
 
   rxReq: ReqReassembler;
   chan: SecureChannel | null;
@@ -130,7 +134,7 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
   const conns = new Set<Conn>();
   const devices = new Set<string>();
   const seen: SeenFrame[] = [];
-  let offers = 0;
+  let auths = 0;
   let rawHellos = 0;
   let connections = 0;
   let secOkCount = 0;
@@ -150,7 +154,7 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
   const info: RegisteredEngine = {contentKeyB64, user, host, userHost};
 
   function sendPipe(conn: Conn, s: string) {
-    for (const f of fragment(s)) conn.rawSend(Buffer.from(f));
+    conn.rawSend(s);
   }
 
   function enqueue(conn: Conn, job: () => Promise<void>) {
@@ -279,26 +283,15 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
     }) as typeof conn.ws.send;
   }
 
-  function handleBinary(conn: Conn, data: Buffer | ArrayBuffer | Buffer[]) {
-    const bytes = Buffer.isBuffer(data)
-      ? data
-      : Array.isArray(data)
-        ? Buffer.concat(data.map((c) => new Uint8Array(c)))
-        : Buffer.from(new Uint8Array(data));
-    let s: string | null;
-    try {
-      s = conn.rx.push(new Uint8Array(bytes));
-    } catch {
-      conn.ws.close(1002, 'protocol');
-      return;
-    }
-    if (s === null) return;
+  function handleText(conn: Conn, data: Buffer | string) {
+    const s = data.toString();
     let f: any;
     try {
       f = JSON.parse(s);
     } catch {
       return;
     }
+    if (f?.t === 'r-auth') { auths++; conn.rawSend(JSON.stringify({t: 'r-ok'})); return; }
     if (f?.t === 'hello' && f?.sec && !conn.chan) {
       seen.push({sealed: false, t: 'hello'});
       void (async () => {
@@ -374,33 +367,12 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
           }
           o.onMessage?.(conn.ws, inner);
 
-          conn.ws.emit('message', JSON.stringify(inner), false);
+          emitOpened(conn.ws, inner);
         })
         .catch(() => {});
       return;
     }
     seen.push({sealed: false, t: String(f?.t ?? 'unknown')});
-  }
-
-  function handleText(conn: Conn, data: Buffer | string) {
-    const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data);
-    let f: any;
-    try {
-      f = JSON.parse(text);
-    } catch {
-      return;
-    }
-    if (f?.t === 'rtc-offer') {
-      offers++;
-      conn.rawSend(JSON.stringify({t: 'rtc-answer', id: f.id, sdp: 'loopback-answer'}));
-      return;
-    }
-    if (f?.t === 'rtc-cand') return;
-    if (f?.t === 'hello') {
-      rawHellos++;
-      conn.rawSend(JSON.stringify({t: 'transport-required', transport: 'rtc'}));
-      conn.ws.close(4426, 'transport-required');
-    }
   }
 
   function wire() {
@@ -413,11 +385,11 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
     wss.on('connection', (ws, req) => {
       if (o.onUpgrade && o.onUpgrade(ws, req)) return;
       connections++;
+      ws.send(JSON.stringify({t: "r-challenge", nonce: "offline-fixture"}));
       const rawSend = ws.send.bind(ws) as (data: Buffer | string) => void;
       const conn: Conn = {
         ws,
         rawSend,
-        rx: new Reassembler(),
         rxReq: new ReqReassembler(),
         chan: null,
         write: Promise.resolve()
@@ -427,7 +399,8 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
       ws.on('close', () => conns.delete(conn));
       ws.on('error', () => {});
       ws.on('message', (data, isBinary) => {
-        if (isBinary) handleBinary(conn, data as Buffer);
+    if (delivering.has(ws)) return;
+        if (isBinary) ws.close(1003, 'text-only');
         else handleText(conn, data as Buffer | string);
       });
     });
@@ -494,8 +467,8 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
     get seen() {
       return seen;
     },
-    get offers() {
-      return offers;
+    get auths() {
+      return auths;
     },
     get rawHellos() {
       return rawHellos;
@@ -649,16 +622,16 @@ function bindHandrolled(
   http?: Server
 ): void {
   const rawSend = ws.send.bind(ws) as (data: Buffer | string) => void;
+  rawSend(JSON.stringify({t: 'r-challenge', nonce: 'offline-fixture'}));
   const conn: Conn = {
     ws,
     rawSend,
-    rx: new Reassembler(),
     rxReq: new ReqReassembler(),
     chan: null,
     write: Promise.resolve()
   };
   const sendPipe = (s: string) => {
-    for (const f of fragment(s)) rawSend(Buffer.from(f));
+    rawSend(s);
   };
   const enqueue = (job: () => Promise<void>) => {
     conn.write = conn.write.then(job, job);
@@ -686,39 +659,16 @@ function bindHandrolled(
   }) as typeof ws.send;
 
   ws.on('message', (data, isBinary) => {
-    if (!isBinary) {
-      const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data);
-      let f: any;
-      try {
-        f = JSON.parse(text);
-      } catch {
-        return;
-      }
-      if (f?.t === 'rtc-offer') {
-        rawSend(JSON.stringify({t: 'rtc-answer', id: f.id, sdp: 'loopback-answer'}));
-        return;
-      }
-      if (f?.t === 'hello') {
-        rawSend(JSON.stringify({t: 'transport-required', transport: 'rtc'}));
-        ws.close(4426, 'transport-required');
-      }
-      return;
-    }
-    const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
-    let s: string | null;
-    try {
-      s = conn.rx.push(new Uint8Array(bytes));
-    } catch {
-      ws.close(1002, 'protocol');
-      return;
-    }
-    if (s === null) return;
+    if (delivering.has(ws)) return;
+    if (isBinary) { ws.close(1003, 'text-only'); return; }
+    const s = data.toString();
     let f: any;
     try {
       f = JSON.parse(s);
     } catch {
       return;
     }
+    if (f?.t === 'r-auth') { rawSend(JSON.stringify({t: 'r-ok'})); return; }
     if (f?.t === 'hello' && f?.sec && !conn.chan) {
       void (async () => {
         const {sec, chan} = await SecureChannel.answer(f.sec, identity, user, host);
@@ -777,7 +727,7 @@ function bindHandrolled(
             serveTunnelReq(http, conn, inner as {id?: string}, sendSealed);
             return;
           }
-          ws.emit('message', JSON.stringify(inner), false);
+          emitOpened(ws, inner);
         })
         .catch(() => {});
     }

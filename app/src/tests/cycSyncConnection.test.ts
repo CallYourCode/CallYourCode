@@ -193,6 +193,18 @@ describe('sync connection manager', () => {
     expect(d.calls).toEqual(['poke:pull', 'poke:online']);
   });
 
+  test('a sealed local connection supersedes a false Internet reachability hint', () => {
+    const d = dialer();
+    sync.register(A, d);
+    sync.start();
+    sync.setOnline(false);
+    settle(A);
+    sync.noteDown(A);
+    expect(sync.schedule(A)).toBeGreaterThan(0);
+    vi.advanceTimersByTime(1200);
+    expect(d.calls).toEqual(['backoff']);
+  });
+
   test('a held client (pairing / identity) leaves the engine down, not dialing', () => {
     const d = dialer(false);
     sync.register(A, d);

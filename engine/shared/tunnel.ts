@@ -1,25 +1,3 @@
-/* THE SEALED REQUEST/RESPONSE TUNNEL. This is the SINGLE shared codec: both the engine
- * and the app bundle import it directly, so there is no twin to keep in sync.
- * The WIRE is the contract and is pinned by fixtures/tunnel-vectors.json,
- * exercised from both bundles. StreamEncoder.flush() (live TTS, #531) is used
- * only by engine response streaming; the app never calls it.
- *
- * It moves every content-bearing HTTP call between app and engine off plaintext
- * HTTP onto the already-sealed `cyc` DataChannel, reusing that channel's exact
- * frame shapes -- NO new protocol. A device sends `{t:"req", ...}`; the engine
- * answers one or more `{t:"res", ...}`. Bodies larger than CHUNK ride under one
- * `id`, `more:true` until the last chunk; every chunk is base64 of raw body
- * bytes. The meta (method/path/headers, or status/headers) rides the FIRST
- * frame only; continuations carry `id` + `b` + `more`.
- *
- * NOTHING HERE SEALS OR SENDS. Sealing is the EngineSecConn's / app SecClient's
- * job; the channel IS the auth. This module is a pure codec -- encode() yields
- * frames, a stateful reassembler takes them in -- so the frozen vectors pin
- * every byte independent of any socket, the same contract dcpipe has.
- */
-
-/** Raw body bytes per frame. One 256 KB chunk base64s to ~350 KB
- * of UTF-8, which dcpipe fragments into 16 KB DataChannel writes on its own. */
 export const CHUNK = 256 * 1024;
 
 /** Per-id inbound reassembly cap. Plugin rpc (RPC_REPLY_MAX_BYTES 16 MB of

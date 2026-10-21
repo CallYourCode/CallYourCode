@@ -11,7 +11,7 @@
  *   - a `set` that moves a dial must RE-DECLARE the plugin list and BROADCAST
  *     it. That crosses three seams in one motion: an HTTP route mutates plugin
  *     state, the registry rebuilds the decl from that state, and the frame
- *     leaves over the sealed DataChannel to a socket that asked for nothing.
+ *     leaves over the sealed WebSocket to a socket that asked for nothing.
  *     Every device's composer redraws off that frame; if it does not arrive, the
  *     slider on the phone still says 3 while the engine has 5, and nothing in
  *     process would notice.

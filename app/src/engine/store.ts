@@ -120,9 +120,6 @@ const sayGrowSubs = new Set<
 
 const sayDoneSubs = new Set<(sessionId: string, msgId: string, durationS?: number) => void>();
 
-const sayLiveSubs = new Set<(sessionId: string, msgId: string) => void>();
-const sayLiveFailSubs = new Set<(sessionId: string, msgId: string) => void>();
-
 const idChangeSubs = new Set<(oldId: string, newId: string) => void>();
 
 const replayedSubs = new Set<(sessionId: string) => void>();
@@ -388,16 +385,6 @@ export function onSayDone(
 ): () => void {
   sayDoneSubs.add(fn);
   return () => sayDoneSubs.delete(fn);
-}
-
-export function onSayLive(fn: (sessionId: string, msgId: string) => void): () => void {
-  sayLiveSubs.add(fn);
-  return () => sayLiveSubs.delete(fn);
-}
-
-export function onSayLiveFail(fn: (sessionId: string, msgId: string) => void): () => void {
-  sayLiveFailSubs.add(fn);
-  return () => sayLiveFailSubs.delete(fn);
 }
 
 export function onIdChange(fn: (oldId: string, newId: string) => void): () => void {
@@ -919,8 +906,6 @@ export {activityMark} from './store/activity';
 export {
   transcribe,
   openSttStream,
-  hasVoiceMedia,
-  openMediaSttStream,
   uploadFile
 } from './store/audioDocs';
 export {
@@ -1301,12 +1286,6 @@ const handlerCtx: HandlerCtx = {
   },
   fireSayDone: (sessionId, msgId, durationS) => {
     for (const fn of sayDoneSubs) fn(sessionId, msgId, durationS);
-  },
-  fireSayLive: (sessionId, msgId) => {
-    for (const fn of sayLiveSubs) fn(sessionId, msgId);
-  },
-  fireSayLiveFail: (sessionId, msgId) => {
-    for (const fn of sayLiveFailSubs) fn(sessionId, msgId);
   }
 };
 for (const conn of conns) wireConnHandlers(conn, handlerCtx);

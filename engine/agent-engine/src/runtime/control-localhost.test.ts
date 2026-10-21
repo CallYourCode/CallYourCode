@@ -353,7 +353,7 @@ test("agent-message is loopback-only and passes for the machine it runs on", asy
 const CAP_ATTEMPTS = ["anything-at-all", "", "A".repeat(43), "x".repeat(200)];
 
 test("no x-cyc-cap value opens a route over plain HTTP: the bearer is deleted", async () => {
-  /* The enrolled device reaches these routes over the sealed DataChannel tunnel,
+  /* The enrolled device reaches these routes over the sealed WebSocket tunnel,
    * not over an x-cyc-cap HEADER. There is no cap at all any more, so any value
    * a plain-HTTP peer waves buys nothing: direct remote AND proxied loopback
    * (tailscale serve) are both 403. */

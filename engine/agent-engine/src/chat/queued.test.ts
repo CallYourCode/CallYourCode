@@ -46,7 +46,7 @@
  * WHY THE OLD VERSION OF THIS FILE FAILED (three tests, 10s timeouts each): it
  * opened a plain WebSocket and sent `{t:"hello"}`, waiting for the sessions
  * frame that used to come back. Since #579 a raw-WS hello is answered
- * `transport-required` and the socket is closed -- the sealed DataChannel is the
+ * `transport-required` and the socket is closed -- the sealed WebSocket is the
  * only client wire -- so the frame could never arrive. The engine was right and
  * the test was speaking a retired transport. Here a client is a recorded Sock in
  * wire.ts's own client set, so the transport question does not arise.
