@@ -269,3 +269,65 @@ test('real voice-note recording and upload, then call capture and growing spoken
   await expect.poll(() => page.evaluate(() => (window as any).__gateMic.tracks.every((t: MediaStreamTrack) => t.readyState === 'ended')), {timeout: 10_000}).toBe(true);
   await testInfo.attach('synthetic-call-evidence', {body: JSON.stringify(evidence), contentType: 'application/json'});
 });
+
+for (const width of [1640, 390]) {
+  for (const theme of ['day', 'night'] as const) {
+    for (const fallback of [false, true]) {
+      test(`live partial stays inside its bubble: ${width} ${theme} ${fallback ? 'fallback' : 'Inter'}`, async ({page}, testInfo) => {
+        test.setTimeout(60_000);
+        test.skip(await page.evaluate(() => typeof MediaRecorder) !== 'function',
+          'Live recording requires native MediaRecorder support');
+        await page.setViewportSize({width, height: 900});
+        if (fallback) {
+          // Failed or not-yet-loaded webfonts must not clip the caption.
+          await page.route('**/assets/fonts/inter-*.woff2', (route) => route.abort());
+        }
+        await page.addInitScript((skin) => {
+          localStorage.setItem('cyc-skin', skin);
+          Object.defineProperty(navigator, 'mediaDevices', {configurable: true, value: {
+            getUserMedia: async () => {
+              const context = new AudioContext();
+              await context.resume();
+              const source = context.createOscillator();
+              source.frequency.value = 190;
+              const gain = context.createGain();
+              gain.gain.value = 0.15;
+              const destination = context.createMediaStreamDestination();
+              source.connect(gain);
+              gain.connect(destination);
+              source.start();
+              return destination.stream;
+            }
+          }});
+        }, theme);
+        const rig = await info();
+        await page.goto(`${rig.origin}/?engine=${rig.engineId}&testhooks=1#pair=${rig.key}`);
+        await page.locator('.cyc-pairing-row.is-confirm').getByRole('button', {name: 'Pair', exact: true}).click();
+        await page.locator('.cyc-session-entry').first().click();
+        const record = page.locator('.cyc-send-btn:visible').first();
+        await expect(record).toHaveAttribute('data-cyc-send-mode', 'record');
+        // A tap locks recording. PCM and the partial take the real app/engine path.
+        await record.click();
+        const bubble = page.locator('.cyc-pill-partial:visible');
+        await expect(bubble.locator('.cyc-pill-partial-words')).toHaveText('scratch live partial');
+        await page.evaluate(() => document.fonts.ready);
+        // A later partial applies the normal caption bottom-scroll after font load.
+        await expect.poll(() => bubble.evaluate((el) => {
+          const box = el.getBoundingClientRect();
+          const range = document.createRange();
+          range.selectNodeContents(el.querySelector('.cyc-pill-partial-words')!);
+          const words = range.getBoundingClientRect();
+          const dots = el.querySelector('.cyc-transcript-dots')!.getBoundingClientRect();
+          const wave = el.querySelector('.cyc-transcript-wave')!.getBoundingClientRect();
+          return {
+            wordsVisible: words.top >= box.top && words.bottom <= box.bottom,
+            waveOnOneLine: wave.height <= dots.height + 1,
+            scrollTop: el.scrollTop
+          };
+        })).toEqual({wordsVisible: true, waveOnOneLine: true, scrollTop: 0});
+        await page.screenshot({path: testInfo.outputPath('live-partial.png')});
+        await page.locator('.cyc-rec-cancel:visible').click();
+      });
+    }
+  }
+}

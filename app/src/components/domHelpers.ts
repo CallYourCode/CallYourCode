@@ -13,7 +13,9 @@ export function h<K extends keyof HTMLElementTagNameMap>(
 // even thirds so the ellipsis reads as a travelling wave. Used by the transcript /
 // partial-caption producers as the moving overlay above their static baseline dots.
 export function transcriptDotWave(): HTMLSpanElement {
-  const wave = h('span', 'cyc-transcript-wave absolute inset-x-0');
+  // Separate dot spans can round wider than the static "..." beneath them.
+  // Keep the overlay on one line even in captions with overflow-wrap:anywhere.
+  const wave = h('span', 'cyc-transcript-wave absolute inset-x-0 whitespace-nowrap');
   for (const delay of ['0s', '-0.5s', '-1s']) {
     // The delay is an inline style, not a Tailwind class, for the same reason
     // as BUSY_DOT_DELAYS below: the scanner cannot see utilities built from a
