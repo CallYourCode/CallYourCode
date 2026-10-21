@@ -532,7 +532,6 @@ const CONFIG_KEY = 'cyc-config';
 export type AppEngine =
   string | {url: string; engineId: string; host: string; user?: string | null};
 
-export type RtcIceServer = {urls: string[] | string; username?: string; credential?: string};
 type AppConfig = {
   engines: AppEngine[];
   voice: string | null;

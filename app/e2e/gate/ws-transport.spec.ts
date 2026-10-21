@@ -144,7 +144,43 @@ test('production sealed WS: pairing, chat, large hashed transfer, STT, restarts 
   await testInfo.attach('transport-evidence' , {body: JSON.stringify({sockets, transfer, stt, aliveMs: Date.now() - start}), contentType: 'application/json'});
 });
 
-test('real call UI captures synthetic microphone PCM and plays a growing spoken reply', async ({page}, testInfo) => {
+test('both restarts release active terminals, STT upstreams and upload spools before reconnect', async ({page}, testInfo) => {
+  test.setTimeout(180_000);
+  const rig = await info();
+  await page.goto(`${rig.origin}/?engine=${rig.engineId}&testhooks=1#pair=${rig.key}`);
+  await page.locator('.cyc-pairing-row.is-confirm').getByRole('button', {name: 'Pair', exact: true}).click();
+  await page.locator('.cyc-session-entry').first().click();
+  const evidence: unknown[] = [];
+  for (const restart of ['/restart-app', '/restart-engine']) {
+    const before = await (await fetch(control + '/hold-resources', {method: 'POST'})).json();
+    expect(before.spools).toHaveLength(1);
+    expect(before.sttOpened - before.sttClosed).toBe(1);
+    expect(before.terminalAlive).toBe(true);
+    expect(before.heldCloseEvents).toBe(0);
+    await action(restart);
+    await expect.poll(async () => {
+      const state = await (await fetch(control + '/resources')).json();
+      return {spools: state.spools.length, upstreams: state.sttOpened - state.sttClosed,
+        terminalAlive: state.terminalAlive, closes: state.heldCloseEvents};
+    }, {timeout: 20_000}).toEqual({spools: 0, upstreams: 0, terminalAlive: false, closes: 1});
+    const after = await (await fetch(control + '/resources')).json();
+    // An app-server outage closes the engine client normally. A killed engine
+    // cannot run JS cleanup; OS teardown plus boot spool recovery is required.
+    if (restart === '/restart-app') {
+      expect(after.clientCloses).toBe(1);
+      expect(after.terminalReleases).toBe(1);
+    }
+    await expect.poll(() => page.evaluate(() => (window as any).__cycStore.tabs().some((t: any) => t.state === 'connected')),
+      {timeout: 75_000}).toBe(true);
+    const text = 'active-resource recovery ' + restart;
+    await action('/reply', {text});
+    await expect(page.locator('.cyc-message', {hasText: text})).toHaveCount(1);
+    evidence.push({restart, before, after});
+  }
+  await testInfo.attach('active-resource-restarts', {body: JSON.stringify(evidence), contentType: 'application/json'});
+});
+
+test('real voice-note recording and upload, then call capture and growing spoken reply', async ({page}, testInfo) => {
   test.setTimeout(60_000);
   await page.addInitScript(() => {
     localStorage.setItem('cyc-toolbar-call', '1');
@@ -178,20 +214,46 @@ test('real call UI captures synthetic microphone PCM and plays a growing spoken 
   await expect(page.locator('.cyc-composer-input').first()).toBeVisible();
   await page.evaluate(() => {
     const w = window as any;
-    w.__gateVoice = {partials: [] as string[], grows: 0, done: 0};
+    w.__gateVoice = {partials: [] as string[], clips: [] as {bytes: number; type: string}[], grows: 0, done: 0};
     w.__cycPipeline.on('partial', (text: string) => w.__gateVoice.partials.push(text));
+    w.__cycPipeline.on('clip', (blob: Blob) => w.__gateVoice.clips.push({bytes: blob.size, type: blob.type}));
     w.__cycStore.onSayGrow(() => w.__gateVoice.grows++);
     w.__cycStore.onSayDone(() => w.__gateVoice.done++);
   });
   expect(await page.evaluate(() => typeof MediaRecorder), 'native MediaRecorder is required; do not replace it with a fake recorder to pass the voice gate').toBe('function');
   expect(await page.evaluate(() => (window as any).__gateMic.installed)).toBe(true);
+  // Hold the actual composer microphone. The browser's native recorder and
+  // PCM tap both consume the synthetic MediaStream, not injected STT frames.
+  const record = page.locator('.cyc-send-btn:visible').first();
+  await expect(record).toHaveAttribute('data-cyc-send-mode', 'record');
+  const box = (await record.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await expect.poll(() => page.evaluate(() => !!(window as any).__cycPipeline.pressCaptureId)).toBe(true);
+  await page.evaluate(() => {(window as any).__gateMic.gain.gain.value = 0.15;});
+  await expect.poll(() => page.evaluate(() => (window as any).__gateVoice.partials.length), {timeout: 15_000}).toBeGreaterThan(0);
+  await page.waitForTimeout(1800);
+  await page.mouse.up();
+  await page.evaluate(() => {(window as any).__gateMic.gain.gain.value = 0;});
+  await expect.poll(() => page.evaluate(() => (window as any).__gateVoice.clips.length), {timeout: 15_000}).toBe(1);
+  await expect(record).toHaveAttribute('data-cyc-send-mode', 'send');
+  await record.click();
+  await expect(page.locator('.cyc-message .cyc-clip.cyc-voice')).toHaveCount(1, {timeout: 20_000});
+  await expect(page.locator('.cyc-send-progress')).toHaveCount(0, {timeout: 20_000});
+  await expect.poll(async () => (await info()).lines.some((s) => s.includes('user-audio.stored'))).toBe(true);
+  await expect.poll(async () => (await info()).submitted.some((s) => s.includes('scratch final transcript')), {timeout: 15_000}).toBe(true);
+  const note = await page.evaluate(() => (window as any).__gateVoice);
+  expect(note.clips[0].bytes).toBeGreaterThan(1200);
+  expect(note.clips[0].type).toMatch(/^audio\//);
+  await testInfo.attach('native-voice-note-evidence', {body: JSON.stringify(note), contentType: 'application/json'});
+  await page.evaluate(() => {(window as any).__gateVoice.partials = [];});
   await page.locator('.cyc-conv-toggle:visible').first().click({timeout: 10_000});
   await expect.poll(() => page.evaluate(() => !!(window as any).__cycPipeline.handsFreeSessionId)).toBe(true);
   await page.evaluate(() => {(window as any).__gateMic.gain.gain.value = 0.15;});
   await page.waitForTimeout(1600);
   await page.evaluate(() => {(window as any).__gateMic.gain.gain.value = 0;});
   await expect.poll(() => page.evaluate(() => (window as any).__gateVoice.partials.length), {timeout: 15_000}).toBeGreaterThan(0);
-  await expect.poll(async () => (await info()).submitted.some((s) => s.includes('scratch final transcript')), {timeout: 20_000}).toBe(true);
+  await expect.poll(async () => (await info()).submitted.filter((s) => s.includes('scratch final transcript')).length, {timeout: 20_000}).toBe(2);
   await action('/reply', {speak: true, text: 'This is a growing spoken reply from the scratch agent. '.repeat(12)});
   await expect.poll(() => page.evaluate(() => (window as any).__gateVoice.grows), {timeout: 20_000}).toBeGreaterThan(1);
   await expect.poll(() => page.evaluate(() => (window as any).__gateVoice.done), {timeout: 20_000}).toBe(1);
