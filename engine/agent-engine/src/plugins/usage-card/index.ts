@@ -227,7 +227,9 @@ export function renderUsageCard(report: UsageReport, now: number): { html: strin
   if (report.ok) {
     // the head is the account alone; the age line is app chrome now (#577), so
     // the right of this row is deliberately empty for the app to sit it there
-    const label = report.provider === "grok" ? "Grok" : report.provider === "codex" ? `Codex · ${report.email ?? report.accountId ?? "active Pi account"}` : report.email;
+    // The lit logo in the app's source strip names the provider, so the head is
+    // just the account, the same as Claude's.
+    const label = report.provider === "grok" ? "Grok" : report.provider === "codex" ? report.email ?? report.accountId ?? "active Pi account" : report.email;
     const who = label ? `<span class="uc-who">${esc(label)}</span>` : "";
     const windows = report.windows ?? [];
     const bars = windows.map((w) => barHtml(w, now)).join("");
@@ -253,7 +255,7 @@ export function renderUsageCard(report: UsageReport, now: number): { html: strin
     const isThrottled = reason === "throttled" || (reason === undefined && throttled(report));
     const signedOut = reason === "signed-out";
     const headline = signedOut ? "not signed in" : isThrottled ? "could not check" : "can't check right now";
-    const whoText = report.provider === "deepseek" ? "DeepSeek" : report.provider === "grok" ? "Grok" : report.provider === "codex" ? `Codex · ${report.email ?? report.accountId ?? headline}` : headline;
+    const whoText = report.provider === "deepseek" ? "DeepSeek" : report.provider === "grok" ? "Grok" : report.provider === "codex" ? report.email ?? report.accountId ?? headline : headline;
     const msg = report.provider === "deepseek" ? (report.error ?? "DeepSeek usage is not configured") : report.provider === "grok" ? (report.error ?? "Grok usage unavailable") : report.provider === "codex" ? (report.error ?? "Codex usage unavailable") : signedOut ? (report.error ?? "no limits available")
       : isThrottled ? "our check for these numbers was throttled"
       : "could not reach the usage service, showing nothing new";
