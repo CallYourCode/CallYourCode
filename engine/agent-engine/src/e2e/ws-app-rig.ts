@@ -30,8 +30,16 @@ const bootApp = async () => {
   throw new Error('scratch app-server did not start');
 };
 await bootApp();
+const encoder = Bun.spawn(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i',
+  'sine=frequency=440:duration=0.5', '-f', 'mp3', 'pipe:1'], {stdout: 'pipe', stderr: 'inherit'});
+const mp3 = new Uint8Array(await new Response(encoder.stdout).arrayBuffer());
+if (await encoder.exited !== 0) throw new Error('scratch MP3 generation failed');
 const voice = Bun.serve({port: 0, hostname: '127.0.0.1',
-  fetch(req, srv) {
+  async fetch(req, srv) {
+    if (new URL(req.url).pathname === '/tts') {
+      await Bun.sleep(250);
+      return new Response(mp3, {headers: {'content-type': 'audio/mpeg'}});
+    }
     if (new URL(req.url).pathname === '/stt-stream') return srv.upgrade(req) ? undefined : new Response('upgrade', {status: 426});
     if (new URL(req.url).pathname === '/stt') return Response.json({text: 'scratch final transcript'});
     return Response.json({ok: true, healthy: true});
@@ -44,7 +52,11 @@ const voice = Bun.serve({port: 0, hostname: '127.0.0.1',
     },
   },
 });
-const engine = await startEngine({env: {APP_SERVER_URL: origin, VOICE_URL: `http://127.0.0.1:${voice.port}`}});
+const engine = await startEngine({env: {APP_SERVER_URL: origin, VOICE_URL: `http://127.0.0.1:${voice.port}`},
+  seed: async (engineDir) => { await Bun.write(join(engineDir, 'services.json'), JSON.stringify([
+    {key: 'voice-engine', name: 'scratch voice', port: voice.port, ceilingMb: 6000, unit: 'voice', revive: {how: 'watch'}},
+  ])); },
+});
 let session = await engine.session();
 const keys = await loadOrCreateE2E(join(engine.dir, 'data/keys.json'));
 let stopped = false;
@@ -66,8 +78,8 @@ const control = Bun.serve({port: 0, hostname: '127.0.0.1', async fetch(req) {
   if (path === '/info') return Response.json({origin, engineUrl: engine.url, engineId: keys.engineId,
     key: b64urlencode(newestGen(keys).keyBytes), submitted: engine.submitted(), lines: engine.lines.slice(-100)});
   if (path === '/reply') {
-    const body = await req.json() as {text: string};
-    session.send(JSON.stringify({t: 'chat', text: body.text, msgId: crypto.randomUUID()}));
+    const body = await req.json() as {text: string; speak?: boolean};
+    session.send(JSON.stringify({t: body.speak ? 'speak' : 'chat', text: body.text, msgId: crypto.randomUUID()}));
   } else if (path === '/revoke-device') {
     const state = await loadOrCreateE2E(join(engine.dir, 'data/keys.json'));
     for (const d of state.devices) d.revokedAt = Date.now();

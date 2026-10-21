@@ -19,7 +19,7 @@ export function makeSettingsRoutes(deps: SettingsDeps) {
 
     if (req.method === "GET") {
 
-      let store: OwnerStore | null = await deps.owners.deviceOwner(req);
+      const store: OwnerStore | null = await deps.owners.deviceOwner(req);
       if (!store) return json({ error: "unauthorized" }, 401);
       return json({ ...store.settings, seq: store.settingsSeq });
     }

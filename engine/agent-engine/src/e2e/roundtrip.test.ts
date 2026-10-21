@@ -129,7 +129,7 @@ test.skipIf(!hasE2ETransport)("one engine, one round trip: enrolled, raw wire re
 
     const { wsTypes, sealedTypes } = await onePipeHistogram(e, closers);
     expect([...wsTypes].sort(),
-      "a non-rtc frame rode the signaling socket; the WS is signaling-only")
+      "relay authentication uses only its routing envelope")
       .toEqual(["r-auth", "r-challenge", "r-ok"]);
     expect([...sealedTypes].every((t) => t === "hello" || t === "sec" || t === "x"),
       `something unsealed rode the WebSocket after sec: ${[...sealedTypes].join(",")}`).toBe(true);

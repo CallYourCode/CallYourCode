@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
-import {SealedSttStream, type DcSttDeps} from '../engine/sttStream';
+import {SealedSttStream, type SealedSttDeps} from '../engine/sttStream';
 import {b64decode} from '@shared/e2e';
 type Frame = Record<string, unknown>;
 
@@ -8,7 +8,7 @@ function fakeDeps() {
   const detached: string[] = [];
   const drains: (() => void)[] = [];
   let sendOk = true;
-  const deps: DcSttDeps = {
+  const deps: SealedSttDeps = {
     send: (frame) => {
       if (!sendOk) return false;
       sent.push(frame as Frame);

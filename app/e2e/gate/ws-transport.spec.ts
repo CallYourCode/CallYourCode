@@ -30,7 +30,12 @@ test.beforeEach(async () => {
     proc.on('exit', (code) => {clearTimeout(timer); no(new Error('rig exited ' + code + ': ' + output));});
   });
 });
-test.afterEach(async () => {
+test.afterEach(async ({page}, testInfo) => {
+  if (control) {
+    const state = await info().catch(() => null);
+    await testInfo.attach('scratch-engine-state', {body: JSON.stringify(state), contentType: 'application/json'});
+    if (testInfo.status !== testInfo.expectedStatus) console.log('SCRATCH ENGINE', JSON.stringify(state));
+  }
   if (control) await action('/stop').catch(() => {});
   if (proc && proc.exitCode === null) {
     await Promise.race([new Promise<void>((r) => proc.once('exit', () => r())), new Promise<void>((r) => setTimeout(r, 5000))]);
@@ -136,4 +141,57 @@ test('production sealed WS: pairing, chat, large hashed transfer, STT, restarts 
   expect(await page.evaluate(() => (window as any).__cycStore.tabs().some((t: any) => t.state === 'connected'))).toBe(false);
   expect((await (await fetch(control + '/devices')).json()).devices).toEqual(enrolled.map((d: any) => ({...d, revoked: true})));
   await testInfo.attach('transport-evidence' , {body: JSON.stringify({sockets, transfer, stt, aliveMs: Date.now() - start}), contentType: 'application/json'});
+});
+
+test('real call UI captures synthetic microphone PCM and plays a growing spoken reply', async ({page}, testInfo) => {
+  test.setTimeout(60_000);
+  await page.addInitScript(() => {
+    localStorage.setItem('cyc-toolbar-call', '1');
+    const state = {constraints: null as MediaStreamConstraints | null, gain: null as GainNode | null, tracks: [] as MediaStreamTrack[]};
+    (window as any).__gateMic = state;
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      state.constraints = constraints;
+      const context = new AudioContext();
+      await context.resume();
+      const source = context.createOscillator(); source.frequency.value = 190;
+      const gain = context.createGain(); gain.gain.value = 0;
+      const destination = context.createMediaStreamDestination();
+      source.connect(gain); gain.connect(destination); source.start();
+      state.gain = gain; state.tracks = destination.stream.getTracks();
+      return destination.stream;
+    };
+  });
+  const rig = await info();
+  await page.goto(`${rig.origin}/?engine=${rig.engineId}&testhooks=1#pair=${rig.key}`);
+  await page.getByRole('button', {name: 'Pair', exact: true}).last().click();
+  await page.locator('.cyc-session-entry').first().click();
+  await expect(page.locator('.cyc-composer-input').first()).toBeVisible();
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__gateVoice = {partials: [] as string[], grows: 0, done: 0};
+    w.__cycPipeline.on('partial', (text: string) => w.__gateVoice.partials.push(text));
+    w.__cycStore.onSayGrow(() => w.__gateVoice.grows++);
+    w.__cycStore.onSayDone(() => w.__gateVoice.done++);
+  });
+  await page.locator('.cyc-conv-toggle:visible').first().click({timeout: 10_000});
+  await expect.poll(() => page.evaluate(() => !!(window as any).__cycPipeline.handsFreeSessionId)).toBe(true);
+  await page.evaluate(() => {(window as any).__gateMic.gain.gain.value = 0.15;});
+  await page.waitForTimeout(1600);
+  await page.evaluate(() => {(window as any).__gateMic.gain.gain.value = 0;});
+  await expect.poll(() => page.evaluate(() => (window as any).__gateVoice.partials.length), {timeout: 15_000}).toBeGreaterThan(0);
+  await expect.poll(async () => (await info()).submitted.some((s) => s.includes('scratch final transcript')), {timeout: 20_000}).toBe(true);
+  await action('/reply', {speak: true, text: 'This is a growing spoken reply from the scratch agent. '.repeat(12)});
+  await expect.poll(() => page.evaluate(() => (window as any).__gateVoice.grows), {timeout: 20_000}).toBeGreaterThan(1);
+  await expect.poll(() => page.evaluate(() => (window as any).__gateVoice.done), {timeout: 20_000}).toBe(1);
+  const evidence = await page.evaluate(() => {
+    const w = window as any;
+    return {voice: w.__gateVoice, constraints: w.__gateMic.constraints, speaker: w.__cycSpeakerState()};
+  });
+  expect(evidence.speaker.callPlayback).toBe(true);
+  expect(evidence.speaker.state).not.toBe('blocked');
+  expect(evidence.constraints.audio).toMatchObject({echoCancellation: true, noiseSuppression: true, autoGainControl: true});
+  await page.locator('.cyc-conv-toggle:visible').first().click();
+  await expect.poll(() => page.evaluate(() => (window as any).__cycPipeline.handsFreeSessionId)).toBeNull();
+  await expect.poll(() => page.evaluate(() => (window as any).__gateMic.tracks.every((t: MediaStreamTrack) => t.readyState === 'ended')), {timeout: 10_000}).toBe(true);
+  await testInfo.attach('synthetic-call-evidence', {body: JSON.stringify(evidence), contentType: 'application/json'});
 });

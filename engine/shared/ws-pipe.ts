@@ -30,12 +30,14 @@ export interface WsLike {
 export function wsPipe(ws: WsLike): Pipe {
   let closed = false;
   let polling: ReturnType<typeof setTimeout> | null = null;
-  const waiters = new Set<() => void>();
+  let waiting: Promise<void> | null = null;
+  let resolveDrain: (() => void) | null = null;
   const wake = () => {
     if (polling) clearTimeout(polling);
     polling = null;
-    for (const resolve of waiters) resolve();
-    waiters.clear();
+    resolveDrain?.();
+    resolveDrain = null;
+    waiting = null;
   };
   const poll = () => {
     polling = null;
@@ -63,13 +65,17 @@ export function wsPipe(ws: WsLike): Pipe {
     },
     drain() {
       if (!pipe.open || ws.bufferedAmount <= LOW) return Promise.resolve();
-      return new Promise<void>((resolve) => {
-        waiters.add(resolve);
-        if (!polling) polling = setTimeout(poll, 10);
+      if (!waiting) waiting = new Promise<void>((resolve) => {
+        resolveDrain = resolve;
+        polling = setTimeout(poll, 10);
       });
+      return waiting;
     },
     close(code = 1000, reason = '') {
-      try { ws.close(code, reason); } finally { finish(code, reason); }
+      if (closed) return;
+      // Browser scripts may only originate 1000 or application close codes.
+      const wireCode = code === 1000 || (code >= 3000 && code <= 4999) ? code : 4000 + code % 1000;
+      try { ws.close(wireCode, reason.slice(0, 30)); } finally { finish(code, reason); }
     },
   };
   ws.onopen = () => pipe.onopen?.();
@@ -95,6 +101,7 @@ export function dialRelay(url: string, auth: RelayAuth): Promise<Pipe> {
     pipe.onmessage = (raw) => {
       let m: any;
       try { m = JSON.parse(raw); } catch { pipe.close(1002, 'auth-protocol'); return; }
+      if (!m || typeof m !== 'object') { pipe.close(1002, 'auth-protocol'); return; }
       if (m.t === 'r-challenge' && typeof m.nonce === 'string' && !challenged) {
         challenged = true;
         void auth.sign(m.nonce).then((sig) => {

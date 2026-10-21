@@ -14,8 +14,7 @@
  * transport. A device must prove it holds a live content generation's key
  * (sec-ok.pair, an HMAC over the handshake transcript) before the engine enrols
  * it; a known, unrevoked device needs no proof because it is already in the
- * device list. Transport no longer decides, so the direct WebSocket and the
- * hosted relay fold into the one proof below.
+ * device list. The relay WebSocket carries the same proof on every connection.
  */
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";

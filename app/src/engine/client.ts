@@ -100,6 +100,8 @@ type HandshakeState = {
   rejectDone: ((e: Error) => void) | null;
   chan: SecureChannel | null;
   doneSeen: boolean;
+  earlyFrames: unknown[];
+  earlyBytes: number;
 };
 
 // An HTTP failure that carries its status, so a caller (the transfer worker)
@@ -996,6 +998,7 @@ export class WsEngineClient implements EngineClient {
       this.scheduleReconnect();
       return;
     }
+    if (this.pipe !== pipe || this.closed) return;
     this.rekeyKick = false;
     this.pairingIntent = false; // the deliberate-pairing window closes on success
 
@@ -1052,7 +1055,14 @@ export class WsEngineClient implements EngineClient {
           } else if (!hs.doneSeen && inner?.t === 'sec-fail') {
             hs.rejectDone?.(new Error('sec-fail: ' + String(inner.reason ?? 'unknown')));
           } else if (hs.doneSeen) {
-            this.handle(inner);
+            if (hs.pipe !== this.pipe) return;
+            if (this.hs !== hs) { this.handle(inner); return; }
+            hs.earlyBytes += new TextEncoder().encode(JSON.stringify(inner)).byteLength;
+            if (hs.earlyFrames.length >= 1024 || hs.earlyBytes > 32 * 1024 * 1024) {
+              hs.pipe.close(1009, 'handshake-queue-limit');
+              return;
+            }
+            hs.earlyFrames.push(inner);
           } else {
             hs.rejectDone?.(new Error('sec: protocol: expected sec-done'));
           }
@@ -1222,13 +1232,19 @@ export class WsEngineClient implements EngineClient {
   // The active chat is re-attached by the store on the settled edge, with the
   // current frontier; the tail and the terminals are this pipe's to re-arm.
   private sendPostHello() {
+    // A fast relay can deliver the hello burst while sec-done is still being
+    // awaited. Establish the sealed lifecycle edge before publishing that burst:
+    // sync.noteSealed resets the host/session flags consumed by the settled edge.
+    const hs = this.hs;
+    this.hs = null;
+    this.emit('status', 'connected');
+    for (const frame of hs?.earlyFrames ?? []) this.handle(frame);
     if (this.tailedId !== null) this.sendNow({t: 'session-tail', id: this.tailedId, on: true});
     for (const [id, size] of this.terms) {
       this.sendNow({t: 'term-open', id, dev: clientId(), cols: size.cols, rows: size.rows});
     }
 
     for (const raw of this.pending.splice(0)) this.writeRaw(raw);
-    this.emit('status', 'connected');
   }
 
   private storedUserHost(): string | null {
@@ -1314,7 +1330,9 @@ export class WsEngineClient implements EngineClient {
         resolveDone: null,
         rejectDone: null,
         chan: null,
-        doneSeen: false
+        doneSeen: false,
+        earlyFrames: [],
+        earlyBytes: 0
       };
       cyclog('hs.hello', {engine: this.url});
       pipe.send(JSON.stringify({t: 'hello', sec: offer.hello}));
@@ -1407,7 +1425,6 @@ export class WsEngineClient implements EngineClient {
     }
     cyclog('hs.sealed', {engine: this.url});
     if (this.sec) this.sec.ready = true;
-    this.hs = null;
 
     this.tunnel.signalReady();
   }

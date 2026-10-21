@@ -48,7 +48,7 @@ test("/config LOCAL announce-only: the announced lease only, voiceBases in engin
   expect(urls).not.toContain("ws://127.0.0.1:10101/ws");
   // voiceBases ride in the SAME order as engines
   expect(j.voiceBases).toEqual(urls.map(voiceBaseOf));
-  // LOCAL: no ICE servers (host candidates connect), no relay url.
+  // The local config does not expose traversal configuration.
   expect(j.rtc).toBeUndefined();
 });
 

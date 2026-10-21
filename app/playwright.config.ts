@@ -96,10 +96,10 @@ function transportConfig() {
   return defineConfig({
     testDir: './e2e/gate', testMatch: 'ws-transport.spec.ts',
     fullyParallel: false, workers: 1, retries: 0, timeout: 300_000,
-    reporter: [['list']], use: {headless: true},
+    reporter: [['list'], ['json', {outputFile: 'test-results/ws-transport.json'}]], use: {headless: true},
     projects: ['chromium', 'webkit'].flatMap((browserName) => [
-      {name: `${browserName}-phone`, use: {browserName: browserName as 'chromium' | 'webkit', viewport: {width: 390, height: 844}, launchOptions}},
-      {name: `${browserName}-laptop`, use: {browserName: browserName as 'chromium' | 'webkit', viewport: {width: 1280, height: 900}, launchOptions}},
+      {name: `${browserName}-phone`, use: {browserName: browserName as 'chromium' | 'webkit', viewport: {width: 390, height: 844}, ...(browserName === 'chromium' ? {launchOptions} : {})}},
+      {name: `${browserName}-laptop`, use: {browserName: browserName as 'chromium' | 'webkit', viewport: {width: 1280, height: 900}, ...(browserName === 'chromium' ? {launchOptions} : {})}},
     ]),
   });
 }

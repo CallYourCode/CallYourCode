@@ -39,3 +39,14 @@ describe('one sealed frame per WS message', () => {
     } finally {vi.useRealTimers();}
   });
 });
+
+it('originates browser-permitted application close codes and closes the native socket once', () => {
+  const ws = socket(); const codes: number[] = [];
+  ws.close = (code = 1000) => {
+    if (code !== 1000 && (code < 3000 || code > 4999)) throw new Error('InvalidAccessError');
+    codes.push(code);
+  };
+  const pipe = wsPipe(ws);
+  pipe.close(1009, 'oversize'); pipe.close(1009, 'oversize');
+  expect(codes).toEqual([4009]); expect(pipe.open).toBe(false);
+});

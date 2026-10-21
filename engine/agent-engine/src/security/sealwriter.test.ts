@@ -100,3 +100,23 @@ test("sealSend resolves only once its frame is on the pipe", async () => {
   await done;
   expect(out).toEqual(["b1"]);
 });
+
+test("close wakes queued bulk writers without sending accepted frames onto a dead connection", async () => {
+  const p = pipe();
+  const {c, out} = conn(p.drain);
+  const pending = [c.sealSend({k: 'a'}, 'bulk'), c.sealSend({k: 'b'}, 'bulk')];
+  c.markClosed();
+  await Promise.all(pending);
+  await turn();
+  expect(out).toEqual([]);
+});
+
+test("the pre-sealing writer queue is bounded, not just the socket buffer", async () => {
+  const p = pipe();
+  const codes: number[] = [];
+  const c = new EngineSecConn({} as never, 'u', 'h', () => {}, () => {}, () => {}, (code) => codes.push(code), p.drain);
+  (c as unknown as {chan: unknown}).chan = {seal: async (inner: unknown) => inner};
+  const pending = Array.from({length: 1025}, (_, n) => c.sealSend({n}, 'bulk'));
+  await Promise.all(pending);
+  expect(codes).toEqual([1009]);
+});

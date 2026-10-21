@@ -61,7 +61,7 @@ export type TestEngine = RegisteredEngine & {
 
   setIdentity(id: EngineIdentity): void;
   seen: SeenFrame[];
-  offers: number;
+  auths: number;
   rawHellos: number;
   connections: number;
   secOkCount: number;
@@ -134,7 +134,7 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
   const conns = new Set<Conn>();
   const devices = new Set<string>();
   const seen: SeenFrame[] = [];
-  let offers = 0;
+  let auths = 0;
   let rawHellos = 0;
   let connections = 0;
   let secOkCount = 0;
@@ -291,7 +291,7 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
     } catch {
       return;
     }
-    if (f?.t === 'r-auth') { offers++; conn.rawSend(JSON.stringify({t: 'r-ok'})); return; }
+    if (f?.t === 'r-auth') { auths++; conn.rawSend(JSON.stringify({t: 'r-ok'})); return; }
     if (f?.t === 'hello' && f?.sec && !conn.chan) {
       seen.push({sealed: false, t: 'hello'});
       void (async () => {
@@ -467,8 +467,8 @@ export async function startEngine(o: EngineOptions): Promise<TestEngine> {
     get seen() {
       return seen;
     },
-    get offers() {
-      return offers;
+    get auths() {
+      return auths;
     },
     get rawHellos() {
       return rawHellos;

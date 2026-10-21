@@ -40,9 +40,8 @@ import { EngineLeases, LEASE_DEFAULT_MS } from "../engines/hosts";
 import { EngineTokens } from "../access/enroll";
 import { OwnerStore } from "../access/owner-store";
 import { makeOwners } from "../access/owners";
-import { clientKeyOf } from "../platform/ratelimit";
 import { refuseForbiddenHost, refuseForbiddenOrigin } from "../platform/httpx";
-import { serveStatic, DOC_SECURITY_HEADERS, BASE_SECURITY_HEADERS } from "../platform/static";
+import { serveStatic } from "../platform/static";
 import { Relay, mintConnId, type RelayWsData } from "../delivery/relay";
 import { ENVELOPE_MAX, QUEUE_MAX } from "../../../engine/shared/ws-pipe";
 import { resolvePorts } from "../../../engine/shared/ports.ts";
@@ -84,13 +83,12 @@ const SETTINGS_FILE = process.env.SETTINGS_FILE ?? join(STATE_DIR, "app-settings
 const REPORTS_DIR = (process.env.REPORTS_DIR ?? join(STATE_DIR, "reports")).replace(/\/$/, "");
 const LEASES_FILE = process.env.ENGINE_LEASES_FILE ?? join(STATE_DIR, "engine-leases.json");
 const ENGINE_LEASE_MS = Number(process.env.ENGINE_LEASE_MS ?? LEASE_DEFAULT_MS);
-const OWNERS_DIR = (process.env.OWNERS_DIR ?? join(STATE_DIR, "owners")).replace(/\/$/, "");
 
 /* Tests override the stores onto scratch paths. Walking the default state dir
  * in that case would chmod the real per-user tree, which a test must never
  * touch. Production leaves those unset and repairs the real tree. */
 const scratchStores = !!(process.env.PUSH_FILE || process.env.SETTINGS_FILE ||
-  process.env.REPORTS_DIR || process.env.CYC_LOG_DIR || process.env.OWNERS_DIR ||
+  process.env.REPORTS_DIR || process.env.CYC_LOG_DIR ||
   process.env.ENGINE_LEASES_FILE || process.env.ENGINE_TOKENS_FILE);
 if (!scratchStores) {
   await mkdirPrivate(STATE_DIR);
@@ -164,9 +162,8 @@ const server = Bun.serve<RelayWsData>({
       const rec = engineTokens.verify(authz.startsWith("Bearer ") ? authz.slice(7).trim() : null);
       if (!rec) return new Response("unauthorized", {status: 401});
       const engineId = rec.engineId;
-      const owner = rec.owner;
       if (url.searchParams.get("engine") !== engineId) return new Response("engine mismatch", {status: 403});
-      const data: RelayWsData = { relay: "engine", engineId, owner };
+      const data: RelayWsData = { relay: "engine", engineId };
       return srv.upgrade(req, { data }) ? undefined : new Response("upgrade required", { status: 426 });
     }
 

@@ -3,3 +3,7 @@
 # ago (seconds). Blunts freshly-compromised-package attacks before they are
 # caught + yanked.
 minimumReleaseAge = 1209600
+
+[test]
+# Share the scratch HOME/data guard before any app-server test reads defaults.
+preload = ["../engine/agent-engine/src/test-utils/homeguard.ts"]

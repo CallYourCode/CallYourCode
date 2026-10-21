@@ -15,7 +15,7 @@
  * clients (plain recorded Sock objects pushed into wire.ts's `clients`, every
  * frame captured), the voice engine (a refusing url), the live terminal bridge
  * (a refusing driver) and time (a manualClock). There is no Bun.serve for the
- * engine, no announce loop, no relay link, no services, no rtc, no subprocess.
+ * engine, no announce loop, no relay link, no services, no subprocess.
  *
  * ONE wireCore PER TEST FILE by default: bun test --parallel gives each file a
  * fresh module registry in its own worker, so the module singletons a wiring

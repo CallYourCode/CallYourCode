@@ -14,7 +14,7 @@ test('real relay keeps opaque sealed strings alive beyond 300 frames and closes 
   const server = Bun.serve<RelayWsData>({port: 0, hostname: '127.0.0.1',
     fetch(req, srv) {
       const engine = new URL(req.url).pathname === '/engine';
-      return srv.upgrade(req, {data: engine ? {relay: 'engine', engineId: 'e', owner: 'local'} :
+      return srv.upgrade(req, {data: engine ? {relay: 'engine', engineId: 'e'} :
         {relay: 'device', engineId: 'e', connId: mintConnId()}}) ? undefined : new Response('', {status: 426});
     },
     websocket: {open: (ws) => relay.open(ws), message: (ws, raw) => relay.message(ws, typeof raw === 'string' ? raw : new Uint8Array()), close: (ws) => relay.close(ws)},

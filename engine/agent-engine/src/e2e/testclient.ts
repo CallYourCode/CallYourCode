@@ -131,13 +131,13 @@ export class TestClient {
   onclose: Listener | null = null;
   onerror: Listener | null = null;
 
-  private sig: WebSocket; // native signaling (RTC) / data (passthrough) socket
+  private sig: WebSocket; // raw loopback MCP/session socket
   private mode: "pending" | "ws" | "sealed" = "pending";
   private buf: string[] = []; // frames sent before the socket / pipe is ready
   private listeners = new Map<string, Set<Listener>>();
   private id = `tc${++CID}`;
 
-  // RTC state
+  // Sealed client state
   private pipe: Pipe | null = null;
   private chan: SecureChannel | null = null;
   private secReady = false;
@@ -153,8 +153,7 @@ export class TestClient {
     };
     this.sig.onerror = (ev: any) => this.fire("error", ev);
     this.sig.onclose = (ev: any) => {
-      // in RTC mode the signaling socket closing (4426 never happens here, since
-      // the shim never sends a plain hello) is the engine tearing us down.
+      // The raw session socket follows the engine process lifecycle.
       this.readyState = 3;
       this.fire("close", ev);
     };
@@ -181,7 +180,7 @@ export class TestClient {
       else this.buf.push(s);
       return;
     }
-    // rtc: seal and send over the pipe once sec is up, else buffer in order
+    // Seal and send over the relay once ready, else buffer in order
     if (this.secReady) this.seal(s);
     else this.buf.push(s);
   }

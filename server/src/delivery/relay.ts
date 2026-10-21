@@ -24,7 +24,7 @@ type WsLike = {
 };
 
 export type RelayWsData =
-  | { relay: "engine"; engineId: string; owner: string }
+  | { relay: "engine"; engineId: string }
   | { relay: "device"; engineId: string; connId: string };
 
 type Conn = {
@@ -43,7 +43,6 @@ type Conn = {
 
 type EngineLink = {
   ws: WsLike;
-  owner: string;
   conns: Map<string, Conn>;
 };
 
@@ -76,15 +75,23 @@ export class Relay {
   private send(ws: WsLike, raw: string): boolean {
     const queued = ws.getBufferedAmount?.() ?? ws.bufferedAmount ?? 0;
     if (queued + byteLength(raw) > QUEUE_MAX) {
-      this.close(ws);
-      ws.close(1009, "queue-limit");
+      this.fail(ws, 1009, "queue-limit");
       return false;
     }
     try {
       // Bun: -1 means queued, 0 means dropped. Never retry a queued frame.
-      if (ws.send(raw) === 0) { this.close(ws); ws.close(1013, "write-dropped"); return false; }
+      if (ws.send(raw) === 0) { this.fail(ws, 1013, "write-dropped"); return false; }
       return true;
-    } catch { this.close(ws); ws.close(1011, "write-failed"); return false; }
+    } catch { this.fail(ws, 1011, "write-failed"); return false; }
+  }
+
+  private fail(ws: WsLike, code: number, reason: string): void {
+    const d = ws.data;
+    if (d.relay === "device") {
+      const conn = this.engines.get(d.engineId)?.conns.get(d.connId);
+      if (conn?.device === ws) { this.dropConn(d.engineId, conn, code, reason); return; }
+    } else this.close(ws);
+    ws.close(code, reason);
   }
 
   /* ---------------------------------------------------------- socket events
@@ -93,19 +100,19 @@ export class Relay {
 
   open(ws: WsLike): void {
     const d = ws.data;
-    if (d.relay === "engine") return this.openEngine(ws, d.engineId, d.owner);
+    if (d.relay === "engine") return this.openEngine(ws, d.engineId);
     this.openDevice(ws, d.engineId, d.connId);
   }
 
   message(ws: WsLike, raw: string | Uint8Array): void {
     if (typeof raw !== "string") {
 
-      ws.close(1003, "text-only");
+      this.fail(ws, 1003, "text-only");
       return;
     }
     if (byteLength(raw) > (ws.data.relay === "engine" ? ENVELOPE_MAX : MSG_MAX)) {
       this.log("relay.oversize", { relay: ws.data.relay, bytes: raw.length, cap: RELAY_FRAME_MAX });
-      ws.close(1009, "oversize");
+      this.fail(ws, 1009, "oversize");
       return;
     }
     if (ws.data.relay === "engine") this.fromEngine(ws, raw);
@@ -131,7 +138,7 @@ export class Relay {
 
   /* ------------------------------------------------------------ engine leg */
 
-  private openEngine(ws: WsLike, engineId: string, owner: string): void {
+  private openEngine(ws: WsLike, engineId: string): void {
     const prev = this.engines.get(engineId);
     if (prev) {
       /* The engine redialed (its old socket half-dead behind a NAT timeout).
@@ -143,7 +150,7 @@ export class Relay {
       }
       prev.ws.close(RELAY_CLOSE.superseded, "superseded");
     }
-    this.engines.set(engineId, { ws, owner, conns: new Map() });
+    this.engines.set(engineId, { ws, conns: new Map() });
     this.log("relay.engine.open", { engineId, superseded: !!prev });
   }
 

@@ -13,7 +13,7 @@ const STT_RATE = 16000;
 const STT_QUEUE_MAX_S = 30;
 const STT_QUEUE_MAX_SAMPLES = STT_QUEUE_MAX_S * STT_RATE;
 
-export type DcSttDeps = {
+export type SealedSttDeps = {
   send: (frame: object) => boolean;
 
   drain: () => Promise<void>;
@@ -47,7 +47,7 @@ export class SealedSttStream implements SttStream {
   private readonly finalPromise: Promise<string>;
 
   constructor(
-    private deps: DcSttDeps,
+    private deps: SealedSttDeps,
     private handlers: SttStreamHandlers
   ) {
     this.finalPromise = new Promise<string>((res, rej) => {

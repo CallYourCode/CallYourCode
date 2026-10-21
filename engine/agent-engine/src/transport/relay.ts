@@ -171,13 +171,15 @@ export class RelayLink {
       if (this.conns.has(c) || this.conns.size >= 32) { this.send({t: "r-reject", c}); return; }
       let open = true;
       let active = false;
-      const waiters = new Set<() => void>();
+      let waiting: Promise<void> | null = null;
+      let resolveDrain: (() => void) | null = null;
       let timer: ReturnType<typeof setTimeout> | null = null;
       const poll = () => {
         timer = null;
         if (!open || !this.ws || this.ws.bufferedAmount <= LOW) {
-          for (const resolve of waiters) resolve();
-          waiters.clear();
+          resolveDrain?.();
+          resolveDrain = null;
+          waiting = null;
         } else timer = setTimeout(poll, 10);
       };
       const conn: RelayConn = { id: c, close: (code = 1000, reason = "") => {
@@ -186,8 +188,9 @@ export class RelayLink {
         this.conns.delete(c);
         this.pipes.delete(c);
         if (timer) clearTimeout(timer);
-        for (const resolve of waiters) resolve();
-        waiters.clear();
+        resolveDrain?.();
+        resolveDrain = null;
+        waiting = null;
         this.send({t: "r-close", c, code});
         pipe.onclose?.(code, reason);
       }};
@@ -202,10 +205,11 @@ export class RelayLink {
         close: conn.close,
         drain: () => {
           if (!open || !this.ws || this.ws.bufferedAmount <= LOW) return Promise.resolve();
-          return new Promise<void>((resolve) => {
-            waiters.add(resolve);
-            if (!timer) timer = setTimeout(poll, 10);
+          if (!waiting) waiting = new Promise<void>((resolve) => {
+            resolveDrain = resolve;
+            timer = setTimeout(poll, 10);
           });
+          return waiting;
         },
       };
       this.conns.set(c, conn);

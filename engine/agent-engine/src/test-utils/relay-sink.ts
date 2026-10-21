@@ -14,7 +14,7 @@ export function relaySink() {
         const token = (req.headers.get('authorization') ?? '').replace(/^Bearer /, '');
         const engineId = tokens.get(token);
         if (!engineId || engineId !== url.searchParams.get('engine')) return new Response('unauthorized', {status: 401});
-        return srv.upgrade(req, {data: {relay: 'engine', engineId, owner: 'local'}}) ? undefined : new Response('upgrade', {status: 426});
+        return srv.upgrade(req, {data: {relay: 'engine', engineId}}) ? undefined : new Response('upgrade', {status: 426});
       }
       if (url.pathname === '/device') {
         return srv.upgrade(req, {data: {relay: 'device', engineId: url.searchParams.get('engine') ?? '', connId: mintConnId()}}) ? undefined : new Response('upgrade', {status: 426});

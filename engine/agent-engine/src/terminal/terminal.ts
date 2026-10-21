@@ -984,9 +984,9 @@ export class TerminalHub {
     private readonly opts: { isViewerLive?: ViewerLiveness; watchdogMs?: number } = {},
   ) {
     /* THE NO-VIEWER WATCHDOG, the safety net for the half-open phone. Release
-     * runs from close events (a ws close, an RTC pipe close, an explicit
+     * runs from close events (a sealed WebSocket close, an explicit
      * term-close); a phone that locks or leaves wifi with neither a TCP FIN nor
-     * an ICE close delivered fires none of them, and the bridge (and the attach
+     * a liveness failure detected fires none of them, and the bridge (and the attach
      * slot behind it) stays up. This periodic sweep closes any bridge every one
      * of whose viewers the liveness predicate calls dead. It only runs when a
      * predicate AND an interval are wired (production, via frames.ts); the tests

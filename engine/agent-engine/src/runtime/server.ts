@@ -109,7 +109,7 @@ import { resolveRelayUrl, RelayLink } from "../transport/relay.ts";
  * and init functions, never top-level awaits. The order IS load-bearing and
  * is spelled by position:
  *
- *   1. env + identity, data tree, E2E keys, RTC stack
+ *   1. env + identity, data tree, E2E keys, sealed transport
  *   2. discovery/enrolment (announce) + construct the relay link
  *   3. stores: uploads, clips, session state (agent metas + chat replay)
  *   4. module wiring (initX seams), boot sweeps

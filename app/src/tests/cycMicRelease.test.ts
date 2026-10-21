@@ -19,8 +19,6 @@ vi.mock('../engine/store', () => ({
   sendVoiceClip: vi.fn(() => 7),
   transcribe: vi.fn(),
   isMuted: () => false,
-  hasVoiceMedia: () => false,
-  openMediaSttStream: vi.fn(),
   openSttStream: vi.fn(),
   engineCan: vi.fn(() => false),
   onAnswerResult: () => () => {},

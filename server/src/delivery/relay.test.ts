@@ -1,14 +1,3 @@
-/* The signaling relay FOLDED onto the app-server (server/src/bootstrap/server.ts /engine and
- * /device legs), as a REAL process on a scratch port: the auth gating on both
- * legs, the device-key envelope, blind verbatim forwarding, engine matching and
- * the caps. LOCAL (the tailscale target) is open on both legs; HOSTED gates
- * /engine by the issued cyt_ token and /device by the owner's Clerk session,
- * owner-scoped. The relay CORE is server/src/relay.ts; this drives it end to
- * end through the app-server that owns the port and the auth.
- *
- *   bun test src/relay.test.ts
- */
-
 import { test, expect, afterEach } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -68,7 +57,7 @@ async function startApp(env: Record<string, string> = {}, seed: Seed = {tokens: 
       OWNERS_DIR: join(dir, "owners"),
       CYC_LOG_DIR: logDir,
       VOICE_ENGINES: "http://127.0.0.1:1|http://127.0.0.1:1|none",
-      // A LOCAL app-server by default: no CLERK. HOSTED tests set these + VAPID.
+      // The local server never activates Clerk.
       CLERK_SECRET_KEY: "", CLERK_JWKS_URL: "", CLERK_ISSUER: "",
       ...env,
     },
@@ -148,7 +137,7 @@ test("LOCAL engine leg: opens on ?engine with no auth; a device dial with no eng
   eng.ws.close();
 }, 20_000);
 
-test("LOCAL device dial (step 8): offline engine 4404; the proof rides r-open; LOCAL ice is empty", async () => {
+test("device dial: offline engine 4404; the proof rides r-open without traversal configuration", async () => {
   const app = await startApp();
 
   // no engine leg yet: engine-offline, before any challenge is issued
@@ -162,7 +151,7 @@ test("LOCAL device dial (step 8): offline engine 4404; the proof rides r-open; L
   const rOpen = await deviceHandshake(dev, eng, { spki: "DEVSPKI", sig: "DEVSIG" });
   expect(rOpen.t).toBe("r-open");
   expect(typeof rOpen.c).toBe("string");
-  // LOCAL: host candidates connect, so the engine gets an EMPTY ice list
+  // The transport no longer advertises traversal configuration.
   expect(rOpen.rtc).toBeUndefined();
   // the proof is attached VERBATIM for the engine to verify (the relay is blind)
   expect(rOpen.auth).toEqual({ nonce: expect.any(String), spki: "DEVSPKI", sig: "DEVSIG" });
@@ -183,7 +172,7 @@ test("LOCAL device dial: r-reject closes 4401; a non-r-auth first frame is 4401 
   const bad = wsClient(`${app.ws}/device?engine=eng-l`);
   await opened(bad);
   await bad.next((s) => s.includes("r-challenge"));
-  bad.ws.send(JSON.stringify({ t: "hello", id: "x", sdp: "v=0" }));
+  bad.ws.send(JSON.stringify({ t: "hello", id: "x", payload: "not-auth" }));
   expect((await bad.closed).code).toBe(4401);
   await Bun.sleep(120);
   expect(eng.frames.find((s) => s.includes("r-open"))).toBeUndefined();
@@ -200,7 +189,7 @@ test("forwarding is verbatim and blind, both directions; the relay log carries n
   const c = rOpen.c as string;
 
   // device -> engine: an opaque string (not even JSON) crosses byte-identical
-  const sentinel = `OPAQUE-${crypto.randomUUID()}-{"t":"hello","sdp":"v=0 FAKE"}`;
+  const sentinel = `OPAQUE-${crypto.randomUUID()}-{"t":"hello","payload":"FAKE"}`;
   dev.ws.send(sentinel);
   const wrapped = JSON.parse(await eng.next((s) => s.includes("OPAQUE-")));
   expect(wrapped).toEqual({ t: "r", c, f: sentinel });
