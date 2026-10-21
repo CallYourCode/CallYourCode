@@ -1,5 +1,5 @@
 import {cyclog} from '@/shared/logging';
-import {onSyncStatus, syncStatus} from './engine/store';
+import {onSyncStatus} from './engine/store';
 import {pipeline} from './audio/pipeline';
 import {toast} from './components/widgets';
 import {unsentWork, vaultHolds} from './sessionState';
@@ -45,9 +45,8 @@ export function installStaleTabReload(): void {
       .then((r) => (r.ok ? r.text() : ''))
       .catch(() => '');
   // Dev bundles carry no baked stamp; there the first build.txt stamp read at
-  // boot stands in as the page's own identity (read the first time the sync is
-  // live; a stamp that came back empty is asked for again on the next live
-  // edge). In production the BAKED stamp is the identity: a page that was
+  // boot stands in as the page's own identity (an empty read is retried on
+  // the next check). In production the BAKED stamp is the identity: a page that was
   // itself served stale (the cache-first shell racing a new worker's install)
   // must not adopt the server's newer stamp as its own.
   const readBootStamp = () =>
@@ -56,10 +55,6 @@ export function installStaleTabReload(): void {
       bootStamp = parseServedStamp(s);
       if (!bundleInfo.stamp) bundleInfo.stamp = bootStamp;
     });
-  onSyncStatus((st) => {
-    if (st === 'live' && !bootStamp) void readBootStamp();
-  });
-  if (syncStatus() === 'live') void readBootStamp();
 
   const busy = () => {
     const input = document.querySelector('.cyc-composer');
@@ -78,12 +73,8 @@ export function installStaleTabReload(): void {
   };
 
   const RELOAD_PATIENCE_MS = 45_000;
-  /* The hard ceiling on every hold except a live recording. vaultHolds and
-   * unsentWork used to defer FOREVER: one stuck hold (a failed transfer that
-   * never settled) meant the toast showed and the reload silently never came
-   * (2026-09-06 report). Unsent intents are durable (IndexedDB) and survive
-   * the reload, so past this ceiling waiting protects nothing. A recording in
-   * progress is the one hold that genuinely cannot be reloaded away. */
+  // Vault writes keep their existing ceiling. Recordings and unsent work
+  // must settle before an update reload, even when the engine is unreachable.
   const RELOAD_CEILING_MS = 5 * 60_000;
   const reloadSoon = (target: string) => {
     if (reloading) return;
@@ -108,11 +99,11 @@ export function installStaleTabReload(): void {
         busy: busy()
       };
       const waited = Date.now() - since;
-      const cannotLose = holds.recording || holds.vault || holds.unsent;
-      const defer = recording
-        ? true // a live recording waits as long as it runs
-        : (cannotLose && waited < RELOAD_CEILING_MS) ||
-          (holds.busy && waited < RELOAD_PATIENCE_MS);
+      const defer =
+        holds.recording ||
+        holds.unsent ||
+        (holds.vault && waited < RELOAD_CEILING_MS) ||
+        (holds.busy && waited < RELOAD_PATIENCE_MS);
       if (defer) {
         if (waited - lastLogged >= 15_000) {
           lastLogged = waited;
@@ -182,16 +173,16 @@ export function installStaleTabReload(): void {
     reload: (target) => reloadSoon(target)
   });
 
-  // A stamp check is a fetch: only while the sync is live (offline design v2,
-  // section 7).
-  const check = () => {
-    if (syncStatus() !== 'live') return Promise.resolve();
-    return controller.check();
+  // Static build discovery uses HTTP, not engine sync. A transport-incompatible
+  // installed page must still be able to discover its replacement at boot and
+  // on foreground. Only dev needs to learn its own identity from the server.
+  const check = async () => {
+    if (!cycBuildStamp && !bootStamp) await readBootStamp();
+    await controller.check();
   };
+  void check();
 
-  // No idle timer: a new build only matters the next time this tab is looked at
-  // or the next time the sync comes back live. Both are edges, so the check
-  // rides them instead of a 20 s poll that ran while nothing was on screen.
+  // No idle timer: boot, foreground and live edges are enough.
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) void check();
   });
@@ -202,8 +193,7 @@ export function installStaleTabReload(): void {
   // A new worker activating under this page is the one reliable "the new build
   // is installed" edge (it fires even when the page landed stale off a reload
   // that raced the install). The handler verifies staleness itself with a
-  // single fetch, so it is not behind the live gate: offline the fetch fails
-  // and nothing happens.
+  // single HTTP fetch: offline the fetch fails and nothing happens.
   if (swSupported)
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       cyclog('sw.controllerchange', {hasController: !!navigator.serviceWorker.controller});
