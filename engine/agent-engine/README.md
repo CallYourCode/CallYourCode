@@ -5,7 +5,7 @@ The agent engine: one process per host, the only process that knows what a
 session's chat log, seals the transport to paired devices, delivers what an agent
 says out to the page, and feeds what you say back into the pane as input. Speech
 itself lives in the separate voice engine; this process calls it for TTS and STT
-and tells browsers where it is.
+and proxies it through the sealed browser channel.
 
 Entry point: `src/runtime/server.ts` (`bun run start`). Its header names the wire
 protocol and the routing rules; the boot sequence is documented at
@@ -23,7 +23,7 @@ protocol and the routing rules; the boot sequence is documented at
 - Calls the voice engine over HTTP for TTS and STT at `VOICE_URL` (default
   `http://127.0.0.1:10102`, `src/voice/voice-proxy.ts:17`).
 - Dials the app server for device discovery (announce) and for the blind
-  signaling relay, so a phone off the LAN still reaches this engine
+  sealed data relay, so a phone on your Tailscale tailnet reaches this engine
   (`src/terminal/announce.ts`, `src/transport/relay.ts`).
 - Persists to a data dir (`CYC_DATA_DIR`, else the platform default in
   `../shared/cycdir.ts`): the E2E key file `keys.json`, upload staging, and logs.
@@ -51,11 +51,10 @@ Operationally significant variables actually read (grep `process.env`):
 | `VOICE_URL` | `http://127.0.0.1:10102` (comma-list allowed, preferred first) | `src/voice/voice-proxy.ts:17` |
 | `VOICE_PUBLIC_URL` | (empty; vestigial: rides the `voice` frame but the app reads only `healthy`) | `src/runtime/server.ts:165` |
 | `APP_SERVER_URL` | `http://127.0.0.1:10100` | `src/terminal/announce.ts:68`, `src/security/pairkey.ts:70` |
-| `ENGINE_WS_URL` | derived from `APP_SERVER_URL` | `src/terminal/announce.ts:70` |
+| `ENGINE_WS_URL` | derived from engine host, port and public URL | `src/terminal/announce.ts:70` |
 | `ENGINE_PUBLIC_URL` | (empty) | `src/runtime/server.ts:171` |
 | `ENGINE_HOST` | `hostname()` | `src/runtime/server.ts:176` |
 | `RELAY_URL` | derived from `APP_SERVER_URL` | `src/runtime/server.ts:286` |
-| `CYC_CLOUD_URL` | the hosted app url | `src/security/pairkey.ts:53` |
 | `CYC_MUX` | `tmux` (`herdr` opts into the herdr upgrade) | `src/routes/session-ops.ts:58` |
 | `HERDR_SOCKET_PATH` | `~/.config/herdr/herdr.sock` | `src/terminal/herdr.ts:108` |
 | `CYC_DATA_DIR` | platform default | `../shared/cycdir.ts:26` |
@@ -81,8 +80,8 @@ Routes are grouped under `src/routes/` and dispatched from
   `/voice/voices`, `/voices/default`, `/voice-log`
 - `POST /harness/announce`, `GET /settings`, `/services/...`
 - `GET /ws` (the one WebSocket): a connection elects its role in its first
-  frame; local signaling and the sealed client transports ride it
-  (`src/transport/frames.ts`, `src/transport/wire.ts`).
+  frame for loopback MCP/session registration only. Browser clients instead
+  use the outbound `/engine` relay leg and same-origin app-server `/device`.
 
 Localhost callers pass the local/owner gates for free (`isTrustedLocal`,
 `requireLocal`, `requireOwner` in `src/transport/httpx.ts`).
@@ -93,18 +92,18 @@ Localhost callers pass the local/owner gates for free (`isTrustedLocal`,
   metadata, model selection, voice model warmup, the MCP glue, service leases.
 - `routes/`: the HTTP surface, one family per file (`health`, `chat`, `voice`,
   `media`, `session-ops`, `transfer`, `plugin`, `ctx`).
-- `transport/`: the sealed transports and framing: `rtc.ts`, `rtc-glue.ts`,
-  `dcpipe.ts` (DataChannel fragmentation), `relay.ts` (outbound relay leg),
+- `transport/`: the sealed WS transport: `client-glue.ts`,
+  `relay.ts` (outbound authenticated data-relay leg),
   `tunnel.ts`, `frames.ts`, `wire.ts`, `sock.ts`, `httpx.ts`.
 - `security/`: the engine key model and sealed handshake (`sec.ts`), enrolment
-  (`enroll.ts`), pairing (`pair.ts`, `pairkey.ts`), sealed push (`sealpush.ts`).
+  (`enroll.ts`), pairing (`pairkey.ts`), sealed push (`sealpush.ts`).
 - `sessions/`: the session registry and lifecycle: `session-state.ts`,
   `session-events.ts`, `reconcile.ts`, `presence.ts`, `title.ts`, `journey.ts`.
 - `chat/`: the chat log, delivery and notifications: `chatlog.ts`, `deliver.ts`,
   `pane-deliver.ts`, `reply.ts`, `notify.ts`, `show-handler.ts`, `uploads.ts`,
   `clips.ts`, `asks.ts`.
 - `voice/`: TTS/STT proxying and audio: `voice-proxy.ts`, `tts.ts`,
-  `transcribe.ts`, `voicemodels.ts`, `opus.ts`, `rtp.ts`, `audiopcm.ts`.
+  `transcribe.ts`, `voicemodels.ts`.
 - `terminal/`: the mux and terminal glue: `herdr.ts`, `tmux.ts`, `mux.ts`,
   `announce.ts`, `discovery.ts`, `restart.ts`.
 - `adapters/`: the mux adapter seam (`factory.ts`, `mux-adapter.ts`,
@@ -130,3 +129,12 @@ bun run pair-key     # bun run src/security/pairkey.ts
 ```
 
 See `src/fixtures/README.md` for the pane-capture fixtures the tests read.
+
+## Pairing and deployment
+
+Run `cyc pair` for the key-bearing link and QR. Open your own app-server on
+localhost or its Tailscale HTTPS origin. The pairing key is in the URL
+fragment, not a server request. Keep `keys.json` and app-server state on
+upgrades. The app-server relays sealed browser traffic throughout the session;
+its restart closes clients, which reconnect with fresh handshakes and reattach.
+See [transport contract](../../docs/contracts/05-websocket.md).

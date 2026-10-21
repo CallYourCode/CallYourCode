@@ -38,6 +38,10 @@ Is it up:
 
     curl -s http://127.0.0.1:10101/health
 
-Starting a local stack (engine + voice services) is
-`./scripts/start-v1.sh`; the deployed engines run under their service
-supervisor and are not started by hand.
+Install the local stack with `sh scripts/install.sh --local`, then use
+`cyc start` / `cyc stop` for its user services. `cyc pair` prints a link and
+QR for your own app-server, on localhost or Tailscale HTTPS. Phone access needs
+the tailnet origin, not the phone's localhost. Browser data remains sealed
+end-to-end through that app-server's WebSocket relay; do not expose the
+loopback engine or voice ports. Preserve pairing keys and app-server state
+when upgrading.

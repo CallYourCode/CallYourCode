@@ -101,7 +101,7 @@ function tmuxVersionsFor(m: Matrix, tier: string | null): string[] {
  *  (before the entrypoint learned to chown); clear those through a container. */
 async function resetDir(dir: string): Promise<void> {
   try { rmSync(dir, { recursive: true, force: true }); } catch {
-    const p = Bun.spawn(["docker", "run", "--rm", "--network", "none", "-v", `${join(dir, "..")}:/x`, "busybox", "rm", "-rf", `/x/${dir.split("/").pop()}`], { stdout: "ignore", stderr: "ignore" });
+    const p = Bun.spawn(["docker", "run", "--rm", "--name", `testbench-clean-${Date.now()}`, "--network", "none", "-v", `${join(dir, "..")}:/x`, "busybox", "rm", "-rf", `/x/${dir.split("/").pop()}`], { stdout: "ignore", stderr: "ignore" });
     await p.exited;
   }
   mkdirSync(dir, { recursive: true });
@@ -115,7 +115,7 @@ async function runDockerCell(m: Matrix, c: Cell, tmuxVersion: string | null): Pr
   const cfg = m.cell;
   const args = [
     "timeout", "--kill-after=10", String(cfg.timeout_s),
-    "docker", "run", "--rm", "--network", cfg.network, "--memory", cfg.memory, "--cpus", String(cfg.cpus), "--pids-limit", String(cfg.pids_limit),
+    "docker", "run", "--rm", "--name", `testbench-${c.id.replace(/[^a-zA-Z0-9_.-]/g, "-")}-${Date.now()}`, "--network", cfg.network, "--memory", cfg.memory, "--cpus", String(cfg.cpus), "--pids-limit", String(cfg.pids_limit),
     ...(cfg.cap_add ?? []).flatMap((c) => ["--cap-add", c]),
     "-v", `${REPO_DIR}:/engine:ro`, "-v", `${dir}:/out`,
     "-e", `CELL_ID=${c.id}`, "-e", `CELL_HARNESS=${c.harness}`, "-e", `CELL_VERSION=${c.version}`, "-e", `CELL_MUX=${c.mux}`, "-e", `CELL_SCENARIO=${c.scenario}`,

@@ -13,8 +13,7 @@
 # engine's data dir (~/.callyourcode, empty;
 # the engine mints its own files), installs per-harness integration for every
 # detected harness (claude, opencode, codex), installs the user services, and
-# ends by running the pair command (the Local/Cloud chooser -- the ONE choice
-# in the whole flow).
+# ends by pointing at cyc pair for a local or Tailscale link.
 # Idempotent: re-running updates the repos and skips everything already done.
 #
 # --dry-run prints every action and touches nothing (no clone, no installs, no
@@ -76,7 +75,7 @@ DATA_DIR="$HOME/.callyourcode"
 # The persisted "voice off" choice. `cyc voice off` (scripts/services.sh) writes
 # this marker; when it is present a REINSTALL must NOT re-enable or start the
 # voice unit (and so the engine does not download ~1 GB of voice models). Only
-# the voice unit is affected; the other three services install as always.
+# the voice unit is affected; the other two services install as always.
 VOICE_DISABLED_MARKER="$DATA_DIR/voice-disabled"
 
 # Voice stack: the voice engine's sherpa-onnx backend (voice-engine/src/backend/sherpa.ts)
@@ -298,11 +297,6 @@ run "$BUN" install --cwd "$REPO_DIR/engine/mcp"
 # compiles on the user's machine).
 echo "deps: bun install in voice-engine (sherpa-onnx, prebuilt)"
 run "$BUN" install --cwd "$REPO_DIR/engine/voice-engine"
-# The STUN/TURN service (server/turn): turn-server is a pure-JS, zero-dep bun
-# package (no system package, no sudo; 3478 is unprivileged).
-echo "deps: bun install in turn (turn-server, pure JS)"
-run "$BUN" install --cwd "$REPO_DIR/server/turn"
-
 # --- the app frontend (dist, what the app server serves) ---
 if [ "$DRY_RUN" = 0 ] && [ ! -d "$APP_DIR" ]; then
   echo "FAILED: $APP_DIR missing (broken checkout)" >&2; exit 1
@@ -335,26 +329,51 @@ export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
 EOF
 run chmod 0700 "$DATA_DIR"
 
-# --- STUN/TURN config (shared turn.env) ---
-# One env file all of the turn-touching services read: the cyc-turn service
-# itself (server/turn/src/server.ts) and the two that build ICE server lists off it
-# (app-server's rtcBlock/rtcFor, agent-engine's shared/turn.ts). It lives in the
-# runtime data dir at 0600 because it holds the shared static auth secret.
-#   TURN_STATIC_SECRET  generated ONCE with openssl; a re-install KEEPS the
-#                       existing secret (rotating it would break live creds).
-#   TURN_HOST           this box's tailnet MagicDNS name (clients STUN it there).
-#   TURN_EXTERNAL_IP    this box's tailnet IPv4 (TURN relay candidate address).
-#   Without a tailnet both are 127.0.0.1: the app runs on this machine, and a
-#   `.local` hostname can resolve IPv6-only on macOS while TURN listens on IPv4,
-#   so ICE never pairs (reported on a Mac, 2026-09-23).
-TURN_ENV="$DATA_DIR/turn.env"
-TURN_REALM=callyourcode
+# --- obsolete transport upgrade migration ---
+# Remove required EnvironmentFile references BEFORE deleting turn.env. Older
+# engine/app units used a required file, so reversing this order breaks starts.
+if [ "$OS" = "Linux" ]; then
+  _old_unit="$HOME/.config/systemd/user/cyc-turn.service"
+  if [ -f "$_old_unit" ]; then
+    run systemctl --user stop cyc-turn.service
+    run systemctl --user disable cyc-turn.service
+    run rm -f "$_old_unit"
+  fi
+  for _name in cyc-agent-engine cyc-app-server; do
+    _unit="$HOME/.config/systemd/user/$_name.service"
+    if [ -f "$_unit" ]; then
+      if [ "$DRY_RUN" = 1 ]; then
+        echo "would remove obsolete turn.env references: $_unit"
+      else
+        # Match only the obsolete file, preserving all other unit settings.
+        _tmp="$(mktemp)"
+        sed '/^[[:space:]]*EnvironmentFile=.*\/turn\.env["[:space:]]*$/d' "$_unit" >"$_tmp"
+        cat "$_tmp" >"$_unit"
+        rm -f "$_tmp"
+      fi
+    fi
+  done
+  run systemctl --user daemon-reload
+else
+  _old_plist="$HOME/Library/LaunchAgents/com.callyourcode.turn.plist"
+  if [ -f "$_old_plist" ]; then
+    # A previously unloaded job is already stopped.
+    if [ "$DRY_RUN" = 1 ]; then
+      echo "+ launchctl bootout gui/$(id -u)/com.callyourcode.turn"
+    elif launchctl print "gui/$(id -u)/com.callyourcode.turn" >/dev/null 2>&1; then
+      run launchctl bootout "gui/$(id -u)/com.callyourcode.turn"
+    fi
+    run launchctl disable "gui/$(id -u)/com.callyourcode.turn"
+    run rm -f "$_old_plist"
+  fi
+fi
+run rm -f "$DATA_DIR/turn.env"
 
 # --- port scheme (CYC_PORT_BASE) ---
-# One knob moves all four service ports so a second install on this box does not
+# One knob moves all three service ports so a second install on this box does not
 # collide on the silent defaults. This MUST match engine/shared/ports.ts:
-#   APP=B, AGENT=B+1, VOICE=B+2, TURN=B+3378.
-# Unset base keeps today's exact defaults (10100/10101/10102/3478). The units
+#   APP=B, AGENT=B+1, VOICE=B+2.
+# Unset base keeps today's exact defaults (10100/10101/10102). The units
 # below stamp CYC_PORT_BASE (so each service's own resolvePorts agrees, e.g. the
 # app server's VOICE_ENGINES default) alongside the explicit port each service
 # reads; an explicit port wins and both are derived here, so they never differ.
@@ -362,71 +381,17 @@ if [ -n "${CYC_PORT_BASE:-}" ]; then
   APP_PORT_VAL=$CYC_PORT_BASE
   AGENT_PORT_VAL=$((CYC_PORT_BASE + 1))
   VOICE_PORT_VAL=$((CYC_PORT_BASE + 2))
-  TURN_PORT=$((CYC_PORT_BASE + 3378))
   UNIT_PORT_BASE_ENV="Environment=CYC_PORT_BASE=$CYC_PORT_BASE"
   PLIST_PORT_BASE_ENV="		<key>CYC_PORT_BASE</key>
 		<string>$CYC_PORT_BASE</string>"
-  echo "ports: CYC_PORT_BASE=$CYC_PORT_BASE -> app=$APP_PORT_VAL agent=$AGENT_PORT_VAL voice=$VOICE_PORT_VAL turn=$TURN_PORT"
+  echo "ports: CYC_PORT_BASE=$CYC_PORT_BASE -> app=$APP_PORT_VAL agent=$AGENT_PORT_VAL voice=$VOICE_PORT_VAL"
 else
   APP_PORT_VAL=10100
   AGENT_PORT_VAL=10101
   VOICE_PORT_VAL=10102
-  TURN_PORT=3478
   UNIT_PORT_BASE_ENV=""
   PLIST_PORT_BASE_ENV=""
 fi
-
-# Tailnet identity for the ICE list: MagicDNS name (trailing dot stripped) and
-# IPv4. Both are read-only probes; with no tailnet, localhost.
-_ts_json="$(tailscale status --json 2>/dev/null || true)"
-TURN_HOST="$(printf '%s' "$_ts_json" | "$BUN" -e 'const t=await Bun.stdin.text();let d={};try{d=JSON.parse(t)}catch{}process.stdout.write((((d.Self||{}).DNSName)||"").replace(/\.$/,""))' 2>/dev/null || true)"
-if [ -n "$TURN_HOST" ]; then
-  TURN_EXTERNAL_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
-else
-  TURN_HOST=127.0.0.1
-  TURN_EXTERNAL_IP=127.0.0.1
-fi
-
-# The static secret: reuse the one already on disk, else mint a fresh one. In
-# dry-run we neither read nor write; a placeholder keeps the service templates
-# below well-formed (write_file discards their bodies in dry-run anyway).
-if [ "$DRY_RUN" = 1 ]; then
-  TURN_STATIC_SECRET="DRYRUN_PLACEHOLDER_SECRET"
-  echo "turn: would write $TURN_ENV (mode 600; secret kept if present, else openssl rand -hex 32)"
-  echo "turn: host=$TURN_HOST ip=${TURN_EXTERNAL_IP:-(none)} port=$TURN_PORT realm=$TURN_REALM"
-else
-  if [ -f "$TURN_ENV" ] && grep -q '^TURN_STATIC_SECRET=' "$TURN_ENV"; then
-    TURN_STATIC_SECRET="$(grep '^TURN_STATIC_SECRET=' "$TURN_ENV" | head -1 | cut -d= -f2-)"
-    echo "turn: reusing existing secret in $TURN_ENV"
-  else
-    TURN_STATIC_SECRET="$(openssl rand -hex 32)"
-    echo "turn: minted a new static secret"
-  fi
-  # Create at 0600 BEFORE writing so the secret is never briefly world-readable
-  # (cat > truncates in place and keeps the mode).
-  if ! (umask 177 && : >"$TURN_ENV"); then
-    echo "FAILED: create $TURN_ENV" >&2; exit 1
-  fi
-  chmod 600 "$TURN_ENV"
-  cat >"$TURN_ENV" <<EOF
-TURN_STATIC_SECRET=$TURN_STATIC_SECRET
-TURN_HOST=$TURN_HOST
-TURN_PORT=$TURN_PORT
-TURN_EXTERNAL_IP=$TURN_EXTERNAL_IP
-TURN_REALM=$TURN_REALM
-EOF
-  echo "wrote: $TURN_ENV (mode 600)"
-  echo "turn: host=$TURN_HOST ip=${TURN_EXTERNAL_IP:-(none)} port=$TURN_PORT realm=$TURN_REALM"
-fi
-
-# The turn vars the two ICE-building services need in their macOS plists (Linux
-# gets them via EnvironmentFile). Two-tab indent to match the plist dicts below.
-PLIST_TURN_ENV="		<key>TURN_HOST</key>
-		<string>$TURN_HOST</string>
-		<key>TURN_PORT</key>
-		<string>$TURN_PORT</string>
-		<key>TURN_STATIC_SECRET</key>
-		<string>$TURN_STATIC_SECRET</string>"
 
 # --- dependency: the multiplexer (herdr when present, tmux otherwise) ---
 # The engine needs ONE terminal multiplexer for the sessions to live in.
@@ -542,7 +507,6 @@ EOF
   ENGINE_UNIT="$HOME/.config/systemd/user/cyc-agent-engine.service"
   APP_UNIT="$HOME/.config/systemd/user/cyc-app-server.service"
   VOICE_UNIT="$HOME/.config/systemd/user/cyc-voice-engine.service"
-  TURN_UNIT="$HOME/.config/systemd/user/cyc-turn.service"
 
   # KillMode=process: the engine boots the tmux server as its own child, so the
   # systemd default (control-group) made every engine restart (cyc install does
@@ -559,7 +523,6 @@ KillMode=process
 WorkingDirectory=$REPO_DIR
 Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Environment=VOICE_URL=http://127.0.0.1:$VOICE_PORT_VAL
-EnvironmentFile=$TURN_ENV
 $UNIT_MUX_ENV
 $UNIT_PORT_BASE_ENV
 ExecStart=$BUN run engine/agent-engine/src/runtime/server.ts
@@ -582,7 +545,6 @@ Type=simple
 WorkingDirectory=$REPO_DIR
 Environment=APP_PORT=$APP_PORT_VAL
 Environment=DIST_DIR=$DIST_DIR
-EnvironmentFile=$TURN_ENV
 $UNIT_PORT_BASE_ENV
 ExecStart=$BUN run server/src/bootstrap/server.ts
 Restart=always
@@ -642,32 +604,16 @@ Persistent=false
 WantedBy=timers.target
 EOF
 
-  write_file "$TURN_UNIT" <<EOF
-[Unit]
-Description=CallYourCode STUN/TURN
-After=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=$REPO_DIR
-EnvironmentFile=$TURN_ENV
-ExecStart=$BUN run server/turn/src/server.ts
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-EOF
 
   run systemctl --user daemon-reload
   # Honor a persisted `cyc voice off`: drop ONLY the voice unit from the enable +
   # restart set, so a reinstall leaves it off (and the engine skips the model
-  # download). Without the marker, all four come up exactly as before.
+  # download). Without the marker, all three come up exactly as before.
   if [ -f "$VOICE_DISABLED_MARKER" ]; then
     echo "voice: disabled (cyc voice off); leaving it off"
-    CYC_ENABLE_UNITS="cyc-turn.service cyc-app-server.service cyc-agent-engine.service"
+    CYC_ENABLE_UNITS="cyc-app-server.service cyc-agent-engine.service"
   else
-    CYC_ENABLE_UNITS="cyc-turn.service cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service"
+    CYC_ENABLE_UNITS="cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service"
   fi
   run systemctl --user enable $CYC_ENABLE_UNITS
   run systemctl --user restart $CYC_ENABLE_UNITS
@@ -677,7 +623,6 @@ else
   ENGINE_PLIST="$HOME/Library/LaunchAgents/com.callyourcode.agent-engine.plist"
   APP_PLIST="$HOME/Library/LaunchAgents/com.callyourcode.app-server.plist"
   VOICE_PLIST="$HOME/Library/LaunchAgents/com.callyourcode.voice-engine.plist"
-  TURN_PLIST="$HOME/Library/LaunchAgents/com.callyourcode.turn.plist"
 
   # launchd redirects the stdout logs into the data dir's logs/ (the repo
   # .run is retired: logs and state live in ~/.callyourcode now, like the
@@ -699,7 +644,6 @@ $PLIST_PORT_BASE_ENV
 		<string>$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 		<key>VOICE_URL</key>
 		<string>http://127.0.0.1:$VOICE_PORT_VAL</string>
-$PLIST_TURN_ENV
 	</dict>
 	<key>KeepAlive</key>
 	<true/>
@@ -737,7 +681,6 @@ EOF
 $PLIST_PORT_BASE_ENV
 		<key>PATH</key>
 		<string>$HOME/.bun/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-$PLIST_TURN_ENV
 	</dict>
 	<key>KeepAlive</key>
 	<true/>
@@ -833,47 +776,6 @@ EOF
 </plist>
 EOF
 
-  write_file "$TURN_PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>PATH</key>
-		<string>$HOME/.bun/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-		<key>TURN_EXTERNAL_IP</key>
-		<string>$TURN_EXTERNAL_IP</string>
-		<key>TURN_HOST</key>
-		<string>$TURN_HOST</string>
-		<key>TURN_PORT</key>
-		<string>$TURN_PORT</string>
-		<key>TURN_REALM</key>
-		<string>$TURN_REALM</string>
-		<key>TURN_STATIC_SECRET</key>
-		<string>$TURN_STATIC_SECRET</string>
-	</dict>
-	<key>KeepAlive</key>
-	<true/>
-	<key>Label</key>
-	<string>com.callyourcode.turn</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>$BUN</string>
-		<string>run</string>
-		<string>server/turn/src/server.ts</string>
-	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>StandardErrorPath</key>
-	<string>$DATA_DIR/logs/turn.log</string>
-	<key>StandardOutPath</key>
-	<string>$DATA_DIR/logs/turn.log</string>
-	<key>WorkingDirectory</key>
-	<string>$REPO_DIR</string>
-</dict>
-</plist>
-EOF
 
   # Load + start each service, idempotently. Already loaded (a re-install over a
   # running one) -> restart with kickstart; not loaded -> bootstrap. Checking
@@ -882,12 +784,12 @@ EOF
   GUI="gui/$(id -u)"
   # Honor a persisted `cyc voice off`: drop ONLY the voice plist from the load
   # set, so a reinstall leaves it off (and the engine skips the model download).
-  # Without the marker, all four bootstrap exactly as before.
+  # Without the marker, all three bootstrap exactly as before.
   if [ -f "$VOICE_DISABLED_MARKER" ]; then
     echo "voice: disabled (cyc voice off); leaving it off"
-    CYC_BOOTSTRAP_PLISTS="$TURN_PLIST $APP_PLIST $ENGINE_PLIST $VOICE_RESTART_PLIST"
+    CYC_BOOTSTRAP_PLISTS="$APP_PLIST $ENGINE_PLIST $VOICE_RESTART_PLIST"
   else
-    CYC_BOOTSTRAP_PLISTS="$TURN_PLIST $VOICE_PLIST $APP_PLIST $ENGINE_PLIST $VOICE_RESTART_PLIST"
+    CYC_BOOTSTRAP_PLISTS="$VOICE_PLIST $APP_PLIST $ENGINE_PLIST $VOICE_RESTART_PLIST"
   fi
   for plist in $CYC_BOOTSTRAP_PLISTS; do
     label=$(basename "$plist" .plist)
@@ -920,14 +822,9 @@ exec "$BUN" "$REPO_DIR/scripts/cyc.ts" "\$@"
 EOF
 run chmod 755 "$CYC_SHIM"
 
-# --- done: point at `cyc pair` (never run the chooser from here) ---
-# The Local/Cloud chooser is interactive and needs a clean controlling tty.
-# Buried at the tail of this installer (which has spawned many subprocesses),
-# even a fresh /dev/tty open comes back unreadable (ENXIO), so the chooser
-# cannot run reliably from here. The install ends by pointing at `cyc pair`,
-# which the user runs in their own shell where the tty is clean.
+# --- done: pairing stays on the user's local or Tailscale app-server ---
 echo
-echo "Setup complete: agent-engine, app-server, voice-engine and turn are installed and running."
+echo "Setup complete: agent-engine, app-server, voice-engine are installed and running."
 echo
 # THE SAME-SHELL PATH GAP: the cyc shim lands in ~/.bun/bin, and when THIS
 # install put bun there, the shell that ran the installer has not re-read its
@@ -945,7 +842,7 @@ echo "Next, link this machine or a phone by running:"
 echo
 echo "    cyc pair"
 echo
-echo "That is the one interactive step: a Local / Cloud menu, then the link to open."
+echo "Open the pairing link on this machine or over Tailscale."
 echo "Run 'cyc help' to see every command."
 
 # Nothing here may touch the running herdr server: stopping it exits every

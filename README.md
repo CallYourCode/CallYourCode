@@ -6,11 +6,11 @@
 
 Your agents already live in a terminal on your machine. CallYourCode (cyc)
 puts every one of them in your pocket: each pane becomes a chat with a voice,
-on a page you can open from anywhere. You speak, the words land in the pane as
+on a page you open locally or over Tailscale. You speak, the words land in the pane as
 ordinary terminal input, the agent works, and it speaks the result back.
 
-No company server in the data path. No cloud speech API. No audio leaving your
-machine. Your hardware, your network, your agents.
+Your own app-server relays sealed traffic. Speech processing stays on your
+machine. Your hardware, your tailnet, your agents.
 
 ## The wow moment
 
@@ -33,15 +33,15 @@ on your own hardware over your own network.
 ## Why it is different
 
 - **Private by construction.** The phone-to-machine link is a sealed,
-  end-to-end encrypted WebRTC DataChannel. Chat text, voice audio, files,
+  end-to-end encrypted WebSocket relay channel. Chat text, voice audio, files,
   diffs: none of it touches a third party.
-- **Voice without the cloud.** Speech is synthesized and transcribed
+- **Local speech.** Speech is synthesized and transcribed
   in-process by sherpa-onnx (kokoro for text to speech, whisper for speech to
-  text). No Python, no API key, no audio ever leaves your machine.
+  text). No Python, no API key, no audio goes to a remote speech service.
 - **Your agents, unchanged.** Claude Code, Codex, OpenCode and Pi keep
   running where they always have, in tmux (or herdr) on your machine. cyc
   wires into them; it does not replace them.
-- **Nothing between you and it.** Four Bun/TypeScript services and a PWA.
+- **Nothing between you and it.** Three Bun/TypeScript services and a PWA.
   Over your own tailnet, or plain localhost, there is no company server at
   all.
 
@@ -62,18 +62,19 @@ flowchart LR
       P[Pi]
     end
   end
-  SRV["App server<br/>(blind: login, discovery,<br/>sealed push relay)"]
-  APP <==>|"sealed E2E<br/>WebRTC DataChannel"| ENG
+  SRV["Your app-server<br/>(page, discovery,<br/>sealed data and push relay)"]
+  APP <==>|"sealed E2E over WS"| SRV
+  SRV <==>|"outbound engine WS"| ENG
   ENG <--> VOICE
   ENG <--> C & X & O & P
-  APP -.->|"signaling only,<br/>opaque strings"| SRV
-  SRV -.-> ENG
 ```
 
-One sealed, end-to-end encrypted WebRTC DataChannel between the app and the
-engine carries the entire product: chat, voice, files, diffs, terminal
-frames, plugin pages. The app server never sits in the data path; on
-localhost or your own tailnet there is no company server at all.
+One sealed, end-to-end encrypted WebSocket channel through your app-server
+carries chat, voice, files, diffs, terminal frames and plugin pages. Open the
+app-server on localhost or through your own Tailscale HTTPS origin. No company
+server is involved. Restarting the app-server interrupts active connections;
+the app reconnects, handshakes afresh and reattaches while local agents keep
+running.
 
 ## The two freedoms
 
@@ -153,7 +154,7 @@ curl -fsSL https://callyourcode.com/install.sh | sh
 Then link your phone and go:
 
 ```sh
-cyc pair      # a Local/Cloud chooser, then a link (or QR) to open on your phone
+cyc pair      # a local or Tailscale pairing link and QR
 cyc start     # start the services
 ```
 
@@ -189,7 +190,7 @@ From a checkout already on disk: `sh scripts/install.sh --local`
   cyc.
 - `app`: the PWA (Vite + TypeScript) you open on your phone.
 - `server` (:10100): serves the app, owns everything device-shaped (push,
-  settings), and runs the blind signaling relay and STUN/TURN.
+  settings), and runs the blind sealed WebSocket data relay.
 - `scripts`: the installer, service control, the `cyc` CLI, and the harness
   integration.
 - `testbench`: the reliability matrix for mux and harness binding, one Docker
@@ -208,16 +209,15 @@ Run each from its package directory:
 
 ## The privacy model, precisely
 
-- **Sealed.** The phone-to-engine channel is an end-to-end encrypted WebRTC
-  DataChannel; content keys are derived per generation, and chat and push
+- **Sealed.** The phone-to-engine channel is an end-to-end encrypted WebSocket
+  relay channel; content keys are derived per generation, and chat and push
   previews are sealed with AES-256-GCM before they ever hit the wire.
-- **The hosted app server is a blind matchmaker.** It forwards signaling
-  frames verbatim, maps a per-engine token to an owner, and forwards sealed
-  push blobs. It never sees chat text, voice audio, file or diff contents, or
-  push preview plaintext; every frame it touches is an opaque string.
+- **Your app-server is a blind data relay.** It authenticates the engine's
+  registration token, forwards sealed frames and encrypted push blobs, and
+  holds no content keys. It sees routing IDs and traffic metadata, never chat,
+  audio, file contents or push-preview plaintext.
 - **Key-gated enrolment.** An unknown device must prove it holds a live
   content-generation key before the engine enrolls it, on every transport.
-- **The local path has no server at all.** Over localhost or your own
-  tailnet, nothing of ours sits between your phone and your machine; the
-  hosted server exists only to match a phone that cannot reach the engine
-  directly.
+- **Local or Tailscale only.** Your app-server is required for browser sync,
+  including on localhost. Pairing keys stay in URL fragments and encrypted
+  device storage. Keep keys, data and app-server state when upgrading.

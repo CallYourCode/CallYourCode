@@ -2,9 +2,8 @@
  * would see. One client per cell; every opened frame is logged to
  * wire-frames.jsonl so a verdict can point at the exact frame.
  *
- * Built on the bench's sealed dialer (sealed-client.ts): signaling over the
- * engine's WS, then the DataChannel + sec handshake with the pair proof from
- * this engine's keys.json. Never a raw socket. */
+ * Built on the engine E2E sealed WS client and production relay fixture,
+ * with the pair proof from this engine's keys.json. Never a raw socket. */
 
 import { appendFileSync } from "node:fs";
 import { dialSealed, type SealedClient } from "./sealed-client.ts";
@@ -39,7 +38,7 @@ export type Wire = {
   reopen(): Promise<void>;
 };
 
-export async function openWire(engine: { url: string; reached?: string }, logPath?: string): Promise<Wire> {
+export async function openWire(engine: { url: string }, logPath?: string): Promise<Wire> {
   const frames: WireFrame[] = [];
   let seq = 0;
   let ws: SealedClient;
@@ -57,12 +56,13 @@ export async function openWire(engine: { url: string; reached?: string }, logPat
     for (const w of waiters) w(f);
   };
   const dial = async () => {
-    ws = await dialSealed(engine.url, { reached: engine.reached });
+    const firstSeq = seq;
+    ws = await dialSealed(engine.url);
     ws.onmessage = (m) => record(m);
     ws.onclose = (why) => record({ t: "_closed", why });
     /* the engine sends the sealed hello burst itself once sec-done is out
      * (security/sec.ts); the first frame back is the sessions list */
-    if (!frames.some((f) => f.t === "sessions") && !(await waitFrame((f) => f.t === "sessions", { ms: 15_000 }))) {
+    if (!frames.some((f) => f._seq >= firstSeq && f.t === "sessions") && !(await waitFrame((f) => f.t === "sessions", { ms: 15_000 }))) {
       throw new Error("no sessions frame in 15s after sec-done");
     }
   };

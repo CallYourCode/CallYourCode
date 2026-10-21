@@ -17,30 +17,12 @@ export CELL_ROOT=$ROOT CELL_OUT=$OUT CELL_ENGINE_SRC=$ENGINE_SRC
 export CELL_FAKE_URL="http://127.0.0.1:$FAKE_PORT" CELL_ENGINE_PORT=$ENGINE_PORT
 echo "cell $CELL_ID start $(date -u +%FT%TZ)" > "$OUT/cell.log"
 
-# The sealed wire is WebRTC and werift never offers loopback candidates (it
-# drops `internal` interfaces), so a netns holding only `lo` can never open a
-# DataChannel. A dummy interface gives the cell one private address that
-# routes nowhere: the netns still has no link to anything (--network none;
-# NET_ADMIN is only for this ip command). The engine stays on loopback; the
-# dialer names this address in its signaling Host header, so both ends offer
-# it as their ICE candidate (sealed-client.ts).
-CELL_ADDR=127.0.0.1
-if ip link add cell0 type dummy 2>>"$OUT/cell.log" \
-   && ip addr add 10.99.0.1/24 dev cell0 2>>"$OUT/cell.log" \
-   && ip link set cell0 up 2>>"$OUT/cell.log"; then
-  CELL_ADDR=10.99.0.1
-else
-  echo "no dummy interface (run with --cap-add NET_ADMIN); the sealed wire cannot open" >> "$OUT/cell.log"
-fi
-export CELL_ADDR
-ip -o addr >> "$OUT/cell.log" 2>&1
-
 # The private engine copy: the mount is read-only and shared by every cell;
 # node_modules come from the image (/opt/engine-deps), never from the host.
 stage() {
   local rel
   for rel in engine/agent-engine/src engine/agent-engine/package.json engine/agent-engine/public \
-             engine/shared engine/hooks engine/harness engine/skills engine/mcp/src engine/mcp/package.json scripts \
+             server/src engine/shared engine/hooks engine/harness engine/skills engine/mcp/src engine/mcp/package.json scripts \
              testbench/cell testbench/fake-model testbench/lib testbench/scenarios testbench/matrix.yaml; do
     [ -e "$ENGINE_SRC/$rel" ] || continue
     mkdir -p "$REPO/$(dirname "$rel")"
@@ -49,6 +31,7 @@ stage() {
   rm -rf "$REPO/engine/agent-engine/node_modules" "$REPO/engine/mcp/node_modules"
   ln -s /opt/engine-deps/agent-engine/node_modules "$REPO/engine/agent-engine/node_modules"
   ln -s /opt/engine-deps/mcp/node_modules "$REPO/engine/mcp/node_modules"
+  ln -s /opt/engine-deps/agent-engine/node_modules "$REPO/server/node_modules"
 }
 stage 2>>"$OUT/cell.log" || { echo "stage failed" >> "$OUT/cell.log"; }
 

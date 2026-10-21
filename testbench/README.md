@@ -1,8 +1,8 @@
 # cyc testbench
 
 The reliability matrix for the engine's mux + harness binding: one docker
-container per (harness, version, mux, scenario), a fake model as the only
-network peer, and a verdict per cell read from real evidence (sealed-wire
+container per (harness, version, mux, scenario), a fake model and scratch
+app-server relay on loopback, and a verdict per cell read from real evidence (sealed-wire
 frames, transcript files, the engine log, the fake model's `requests.jsonl`,
 pane captures). Design: adapters-design sections 9 and 10.
 
@@ -21,12 +21,12 @@ glob. The unit tests that do exist are run by path (below).
   `scripts/*.json`, scripted shell tool calls, slow-stream mode, and the
   `requests.jsonl` oracle.
 - `cell/`: what runs inside a container. `entrypoint.sh` (fake model, the
-  dummy interface, the scenario runner, artifact collection),
+  scenario runner, artifact collection),
   `engine-boot.ts` (boots the engine from the bind-mounted tree as a library),
   `driver.ts` (the scenario API: `mux()`, `engine()`, `harness()`, `fake()`,
   `wire()`, `transcript()`), `mux.ts` (tmux and herdr behind one interface),
   `harness.ts` (claude, codex, opencode, pi adapters), `wire.ts` (a sealed
-  WebRTC client, every frame recorded), `herdr-probe.ts`.
+  WebSocket client, every frame recorded), `herdr-probe.ts`.
 - `scenarios/01-bring-up.ts` .. `13-version-gate.ts`: given/when/then, one file
   each; `_lib.ts` holds the shared given/when steps.
 - `run.ts`: builds images, expands cells, runs N-wide, writes
@@ -96,7 +96,7 @@ Unit tests (by path, never by glob):
 ## What a cell is
 
     timeout --kill-after=10 420 docker run --rm --network none --memory 2g --cpus 2 \
-      --pids-limit 512 --cap-add NET_ADMIN \
+      --pids-limit 512 \
       -v <engine tree>:/engine:ro -v testbench/artifacts/cells/<cell>:/out \
       -e CELL_ID -e CELL_HARNESS -e CELL_VERSION -e CELL_MUX -e CELL_SCENARIO \
       cyc-testbench/<harness>:<version>
@@ -106,14 +106,13 @@ booted from `/engine` with `CYC_DATA_DIR=/cell/data`, the harness home under
 `/cell/home` (the harness config points at the fake model with a dummy key),
 the work dirs `/cell/work/proj` and `/cell/work/proj2`, the mux (`tmux -L cell -f
 /dev/null`, or `herdr server --session cell`). The container has no network:
-the fake model is the only peer, over loopback.
+the fake model and scratch app-server relay are peers over loopback.
 
-`NET_ADMIN` is there for one thing: `entrypoint.sh` adds a dummy interface
-`cell0` (10.99.0.1). werift never offers loopback ICE candidates, so a netns
-with only `lo` could never open the sealed DataChannel; the sealed client in
-`wire.ts` names that address in its signaling Host header. The netns still
-links to nothing (`ip link add ... type dummy`). If the cap is missing the
-cell falls back to 127.0.0.1 and the wire check reports it.
+The sealed client reuses `engine/agent-engine/src/e2e/testclient.ts` and
+`src/test-utils/relay-sink.ts`, which wraps the production app-server relay.
+Device authentication and the sealed handshake run over loopback WebSockets.
+No extra interfaces or network capabilities are needed. Engine restarts close
+clients; `wire.reopen()` authenticates again with a fresh sealed handshake.
 
 Expected verdict on today's tree: `expected/pr.json`, cell by cell (the
 lane-1 prediction of design 10 was 1 to 11 red, 12 and 13 green; the pr run

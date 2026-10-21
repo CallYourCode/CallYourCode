@@ -252,6 +252,7 @@ export class Cell {
       logPath: join(this.paths.out, "engine.log"), sink: this.sink ?? undefined,
     });
     this._engine = e;
+    this.sink = e.sink;
     this.log(`engine started pid ${e.pid} port ${e.port} data ${e.dataDir}`);
     return e;
   }
@@ -370,6 +371,8 @@ export class Cell {
   async teardown() {
     if (this._wire) { this._wire.close(); this._wire = null; }
     if (this._engine) await this._engine.kill().catch(() => {});
+    this.sink?.stop();
+    this.sink = null;
     await this.stopMux();
   }
 }

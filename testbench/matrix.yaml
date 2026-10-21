@@ -10,7 +10,7 @@
 images:
   base: cyc-testbench/base
   # Image tag for the base is a date; bump it when base.Dockerfile changes.
-  base_tag: "2026-09-02"
+  base_tag: "2026-10-21"
 
 harnesses:
   claude:
@@ -53,10 +53,6 @@ cell:
   memory: 2g
   cpus: 2
   pids_limit: 512
-  # NET_ADMIN only so cell/entrypoint.sh can add one dummy interface: werift
-  # never offers loopback ICE candidates, so a netns with only `lo` can never
-  # open the sealed DataChannel. The netns still links to nothing.
-  cap_add: [NET_ADMIN]
   # seconds; the runner wraps `docker run` in `timeout --kill-after=10 <s>`
   timeout_s: 420
   # ports inside the container (loopback is private per cell)

@@ -3,18 +3,18 @@
 # CallYourCode service lifecycle: start, stop, and uninstall the user services
 # that scripts/install.sh installed. `cyc start|stop|uninstall` exec this.
 #
-#   scripts/services.sh start        bring the 4 services up
-#   scripts/services.sh stop         take the 4 services down (leaves them installed)
+#   scripts/services.sh start        bring the 3 services up
+#   scripts/services.sh stop         take the 3 services down (leaves them installed)
 #   scripts/services.sh uninstall    remove the services + the cyc shim
 #   scripts/services.sh voice-off    stop + persistently disable ONLY the voice engine
 #   scripts/services.sh voice-on     enable + start ONLY the voice engine
 #   scripts/services.sh voice-status show whether the voice engine is enabled + active
 #
 # The services and their identifiers are exactly the ones install.sh writes:
-#   macOS: 4 LaunchAgent plists at ~/Library/LaunchAgents/<label>.plist
-#          (com.callyourcode.agent-engine, .app-server, .voice-engine, .turn)
-#   Linux: 4 systemd user units at ~/.config/systemd/user/cyc-<name>.service
-#          (cyc-agent-engine, cyc-app-server, cyc-voice-engine, cyc-turn)
+#   macOS: 3 LaunchAgent plists at ~/Library/LaunchAgents/<label>.plist
+#          (com.callyourcode.agent-engine, .app-server, .voice-engine)
+#   Linux: 3 systemd user units at ~/.config/systemd/user/cyc-<name>.service
+#          (cyc-agent-engine, cyc-app-server, cyc-voice-engine)
 #
 # uninstall NEVER touches the data dir (~/.callyourcode) or the cloned repos:
 # it only removes the service definitions and the cyc shim, so your account,
@@ -98,17 +98,17 @@ run_ok() {
 
 # The service identifiers, matching install.sh exactly.
 if [ "$OS" = "Linux" ]; then
-  START_UNITS="cyc-turn.service cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service"
-  STOP_UNITS="cyc-agent-engine.service cyc-app-server.service cyc-voice-engine.service cyc-turn.service"
+  START_UNITS="cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service"
+  STOP_UNITS="cyc-agent-engine.service cyc-app-server.service cyc-voice-engine.service"
   UNIT_DIR="$HOME/.config/systemd/user"
 else
-  START_LABELS="com.callyourcode.turn com.callyourcode.voice-engine com.callyourcode.app-server com.callyourcode.agent-engine"
-  STOP_LABELS="com.callyourcode.agent-engine com.callyourcode.app-server com.callyourcode.voice-engine com.callyourcode.turn"
+  START_LABELS="com.callyourcode.voice-engine com.callyourcode.app-server com.callyourcode.agent-engine"
+  STOP_LABELS="com.callyourcode.agent-engine com.callyourcode.app-server com.callyourcode.voice-engine"
   PLIST_DIR="$HOME/Library/LaunchAgents"
 fi
 
 # The ONE voice-engine identifier, matching install.sh, for the voice-* actions.
-# The toggle touches only this unit; the other three services are never named.
+# The toggle touches only this unit; the other two services are never named.
 VOICE_UNIT="cyc-voice-engine.service"
 VOICE_LABEL="com.callyourcode.voice-engine"
 
@@ -181,7 +181,7 @@ case "$CMD" in
   voice-off | voice-on | voice-status)
     # The voice toggle: a voiceless install is a supported setting, not a manual
     # reach past cyc into systemd/launchd. Touches ONLY the voice unit; the other
-    # three services are never named here. The engine already degrades cleanly
+    # two services are never named here. The engine already degrades cleanly
     # when voice is down (server.ts voiceHealthy() reports false), so `voice off`
     # needs no engine change to make the app hide/grey voice.
     if [ "$OS" = "Linux" ]; then
@@ -252,7 +252,7 @@ case "$CMD" in
 
     # Persist the choice so a REINSTALL honors it. install.sh reads this marker
     # and, when present, skips enabling+starting ONLY the voice unit (the other
-    # three services come up as always). Cross-platform, one file; reached only
+    # two services come up as always). Cross-platform, one file; reached only
     # once the voice unit exists (the not-installed cases above exit early).
     MARKER="$DATA_DIR/voice-disabled"
     case "$CMD" in

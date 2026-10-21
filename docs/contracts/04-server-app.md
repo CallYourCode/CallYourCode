@@ -1,100 +1,67 @@
 # 04. Server <> app
 
-## Purpose
+## Purpose and transport
 
-The app server serves the page and owns everything device-shaped: the
-bootstrap config, login (HOSTED), push subscriptions, and the device half of
-signaling (PRODUCT.md section 4: login, engine discovery, notifications, and
-nothing else). Same origin as the page, so no CORS dance and no key
-distribution problem.
+The user's own app-server serves the PWA, bootstrap config, settings, reports,
+push subscriptions and the blind sealed data relay. Deploy on localhost or
+expose its origin with Tailscale HTTPS. The app uses same-origin fetches and
+one long-lived `/device` WebSocket per engine connection.
 
-## Parties and transport
+Normative: `server/src/bootstrap/server.ts`, `routes/*`, `delivery/relay.ts`
+and the app's `contract.ts` / `client.ts`. Default app-server port is 10100.
 
-- server: `server/src/bootstrap/server.ts` (:10100) and `routes/*`.
-- app: same-origin fetches (`app/src/engine/appFetch.ts` attaches the Clerk
-  session in HOSTED, nothing in LOCAL) plus one WS per signaling attempt.
+## `GET /config`
 
-## `GET /config` (normative: `routes/config.ts`; app decoder `contract.ts loadAppConfig` / AppConfig)
+- `engines`: live announce leases `{url, engineId, host, user}`. The app uses
+  engine IDs to match pairing links and keeps URL identities stable.
+- `auth`: always `"none"`. Retained Clerk setup modules are dormant; no
+  shipped boot/config path enables login.
+- `voice`, `voiceLabel`, `voiceBases`: discovery metadata. Browser voice
+  traffic actually goes through the engine's sealed channel (contract 01).
 
-The page bootstrap, public.
-- `engines`: ANNOUNCE-ONLY `{url, engineId, host, user}` entries from the live
-  lease list; owner-scoped in HOSTED (empty without a session). The app builds
-  the handshake's `user@host` from it and matches a pairing URL's
-  `?engine=<engineId>`. An entry may be a plain URL string or an object;
-  `normalizeEngine` accepts both.
-- `auth`: `"clerk" | "none"` (+ `clerkPublishableKey` in HOSTED).
-- `rtc.iceServers`: LOCAL emits the local turn-server block (or empty); HOSTED
-  emits STUN for everyone plus per-owner TURN creds for an authenticated
-  caller. Signaling URLs are NOT served: the app derives
-  `wss://<page-origin>/device?engine=<id>` from its own origin.
-- `voice`, `voiceLabel`, `voiceBases`: served but not read by the app (voice
-  rides the engine's own origin, contract 01).
+The app caches config in localStorage for offline startup. It derives
+`ws(s)://<page-origin>/device?engine=<id>`, not a second public engine port.
 
-The app caches the config in localStorage and boots offline from the cache.
+## `/device?engine=<engineId>`
 
-## Signaling `/device?engine=<engineId>` (one WS per attempt)
+The relay sends `r-challenge {nonce}`; the device answers `r-auth {spki,
+sig}`. The relay forwards the proof in `r-open` to the engine. Only the
+engine's `r-accept` permits `r-ok`; rejection closes the socket (4401).
+Unknown/offline engine legs close 4404. The engine may admit an unknown
+device to the pairing lane, but sealed enrolment still requires the live
+pairing-key proof (contract 06).
 
-HOSTED requires a Clerk session AND that the session's owner owns that engine
-(403 otherwise); LOCAL is open. Over the socket the relay first challenges the
-device key: `r-challenge {nonce}` -> `r-auth {spki, sig}` -> `r-ok` or
-`r-reject` (`app/src/engine/rtc.ts wsSignal`; the ENGINE verifies, the relay
-stays blind). Then rtc-offer/answer/cand/fail flow verbatim as opaque strings
-(contract 05).
-```mermaid
-sequenceDiagram
-  participant A as App
-  participant S as Server (relay)
-  A->>S: WS /device?engine=(engineId)
-  S->>A: r-challenge {nonce}
-  A->>S: r-auth {spki, sig}
-  Note over S: proof forwarded, the ENGINE verifies (contract 03)
-  S-->>A: r-ok (or r-reject)
-  A->>S: rtc-offer / rtc-cand (opaque strings)
-  S-->>A: rtc-answer / rtc-cand (opaque strings)
-```
+After `r-ok`, `hello {sec}`, the sealed handshake and encrypted data all use
+the same socket. The server forwards opaque strings inside engine-leg `r`
+envelopes. Full wire, limits and cleanup: [05-websocket.md](05-websocket.md).
 
+## Push and other routes
 
-## Push, device side (`routes/push.ts`)
+`GET /push/key` returns the VAPID public key. Device routes include
+`POST /push/subscribe {subscription, label, deviceId, test?}`,
+`/push/unsubscribe`, `/push/devices`, `/push/read {sessionId}`,
+`/push/shown` and `/push/test`. One local store holds subscriptions and
+settings; encrypted previews remain unreadable to the server (contract 07).
 
-`GET /push/key` (VAPID public), `POST /push/subscribe {subscription, label,
-deviceId, test?}`, `/push/unsubscribe`, `/push/devices`,
-`POST /push/read {sessionId}` (joins the outgoing dismiss window),
-`/push/shown` (telemetry), `/push/test`. All owner-gated in HOSTED via the
-Clerk session (`owners.deviceOwner`).
-
-## Onboarding (`onboarding/onboard.ts`)
-
-`/enroll` page + `/enroll/grant` (Clerk-gated one-time `cyg_` mint) +
-`/enroll/device` device flow the engine's `cyc pair` polls (contract 03).
-
-## Also
-
-`/clientlog` (app log lines land beside engine.log, greppable on one cid),
-`/report` + `/reports` (bug reports), `/settings`, static dist with CSP
-headers (`platform/static.ts`), 320MB proxy body cap (`maxRequestBodySize`)
-matching the engine's.
+Also: `/clientlog`, `/report`, `/reports`, `/settings`, `/hosts`, `/voice`,
+`/health` and static dist. The request body allowance is 320 MiB. Host and
+browser Origin gates run before routes and upgrades. These are trusted-local
+management APIs, not a public multi-user service.
 
 ## Failure semantics
 
-- Server down: the page cold-starts from the service-worker precache and the
-  cached config; engines still connect (LOCAL signaling is same-box; an
-  already-open DataChannel never depended on the server). New signaling
-  attempts fail until it returns; the sync manager backs off.
-- HOSTED without VAPID keys refuses to boot loudly rather than serving a
-  half-working push (`bootstrap/server.ts`).
-- A wrong engineId on /device answers a ws close code, never an enumerable
-  HTTP error; revoke answers 404 for someone else's engine, never 403.
+- Server down: cached UI can cold-start offline, but all active relay
+  connections close. New browser connections wait for the server and engine
+  outbound link to return. The sync manager retries; reconnect handshakes
+  afresh and reattaches. Notifications also stop until service returns.
+- VAPID identity is generated and persisted unless explicitly supplied; an
+  ordinary reinstall must preserve it and the subscriptions it identifies.
 
 ## Security invariants
 
-- The server can never read content: it stores push endpoints and settings,
-  forwards sealed blobs and opaque signaling strings, and holds no E2E key
-  material. The pairing key rides only in a URL #fragment, which never reaches
-  this server (`pairkey.ts`).
-- HOSTED scoping is absolute: engine lists, TURN creds, push stores and
-  signaling are all keyed by the verified Clerk sub; nothing accepts an owner
-  from a request body.
-- Rate caps guard every engine-driven surface (per-engine push rate, batch
-  item caps) and the enroll endpoints; caps live in `platform/caps.ts`.
-- Client logs ship to THIS server only, and only because the same owner runs
-  it; nothing leaves the deployment.
+- The server sees routing IDs, public dial proofs, ciphertext and traffic
+  metadata, not chat, file or audio plaintext. It stores no E2E content keys.
+- Pairing keys ride only in URL fragments, never HTTP requests or logs.
+- Client logs stay on this deployment; reports are explicit submissions.
+- Keep this origin on localhost or the tailnet. Dormant Clerk code is not
+  a substitute for that deployment boundary.
