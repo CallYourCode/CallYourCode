@@ -1,14 +1,14 @@
 /* HTTP CROSS-CUTTING HELPERS (L1): the browser-origin gate, the json() answer
  * shape, and the auth gates every content/mutating route shares
  * (BRIEF-control-localhost). requireOwner answers for two callers only: the
- * engine host itself (isTrustedLocal) and the sealed DataChannel tunnel
+ * engine host itself (isTrustedLocal) and the sealed WebSocket tunnel
  * (markSealedTunnel). No bearer exists at all: the x-cyc-cap machinery is
  * DELETED (sealed-transport plan, engine enforcement), not merely ignored.
  *
  * CORS IS GONE (H1 fix). The engine used to answer every request with the
  * CORS allow-origin wildcard, which let ANY web page a browser on this host
  * visited read engine responses cross-origin. Nothing legitimate ever needed
- * it: the app reaches this engine over the sealed DataChannel tunnel only
+ * it: the app reaches this engine over the sealed WebSocket tunnel only
  * (engineCapFetch), never by browser fetch, and every non-browser caller (the
  * cyc CLI, the harness hooks, the MCP) is CORS-exempt by nature. So no
  * response carries any CORS grant header now (route-gate-surface scans for
@@ -19,7 +19,7 @@ import { isLoopback } from "./wire.ts";
 
 /* THE SEALED TUNNEL IS THE SECOND OWNER.
  *
- * A request the sealed DataChannel reassembled (tunnel-glue.ts onReq) is already
+ * A request the sealed WebSocket reassembled (tunnel-glue.ts onReq) is already
  * proven to come from an enrolled device: the channel carried it through the v2
  * sec handshake before onReq ever built a Request, so the frame behind it is
  * owner-authenticated by the transport itself, which is exactly what the old
@@ -86,7 +86,7 @@ export const json = (v: unknown, status = 200, extra?: Record<string, string>) =
  * tailnet URL, name it in APP_SERVER_URL and exactly that origin is allowed.
  *
  * The app itself never fetches this engine from a browser at all (everything
- * rides the sealed DataChannel; verified: app/src engine calls all go through
+ * rides the sealed WebSocket; verified: app/src engine calls all go through
  * engineCapFetch), so even the allowed set exists only for the machine's own
  * pages, not for any shipped call path. Stateless on purpose: pure request
  * inspection plus env reads, no session state, no token files. */
@@ -237,7 +237,7 @@ export function refuseForbiddenHost(req: Request): Response | null {
  *      and a remote direct peer has a non-loopback address whatever headers
  *      it forges. Fails closed when peer data is missing.
  *   2. The app on an enrolled device. It reaches these routes over the sealed
- *      DataChannel tunnel: onReq reassembles the request and marks
+ *      WebSocket tunnel: onReq reassembles the request and marks
  *      it (markSealedTunnel), and the channel already proved the device through
  *      the v2 sec handshake. The old bare-header cap path does not exist any
  *      more; there is no bearer at all, so a tailnet peer has nothing to
@@ -296,7 +296,7 @@ export function isTrustedLocal(req: Request, server: import("bun").Server): bool
 
 export async function requireOwner(req: Request, server: import("bun").Server): Promise<Response | null> {
   if (isTrustedLocal(req, server)) return null;
-  // The enrolled device reaches these routes over the sealed DataChannel
+  // The enrolled device reaches these routes over the sealed WebSocket
   // (onReq -> routeRequest), never over bare HTTP; no header opens this gate.
   if (fromSealedTunnel(req)) return null;
   /* The ONE refusal every unsealed content/control request gets, at route head,
@@ -322,4 +322,3 @@ export function requireLocal(req: Request, server: import("bun").Server): Respon
  * refuses a disallowed Origin, so the /ws upgrade (and every other gate) gets
  * the origin check on the same predicate, and the *.ts.net suffix it would
  * have allowed is deliberately not carried forward (see the policy comment). */
-

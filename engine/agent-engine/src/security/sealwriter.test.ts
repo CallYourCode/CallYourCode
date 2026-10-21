@@ -2,7 +2,7 @@
  *
  * A 13.5 MB download used to ride the one sealed write chain ahead of every
  * chat frame, attach page and upload ack the engine owed the same device, and
- * pour itself into the DataChannel stack faster than the pipe could drain (the
+ * pour itself into the WebSocket stack faster than the pipe could drain (the
  * engine's event loop starved for the whole download, sends hung until a
  * reload). EngineSecConn now writes through one pump with two lanes: control
  * first, and a bulk frame only when no control frame waits and the pipe has
@@ -33,7 +33,7 @@ function pipe() {
 
 function conn(drain: () => Promise<void>) {
   const out: string[] = [];
-  const c = new EngineSecConn({} as never, "u", "h", "rtc",
+  const c = new EngineSecConn({} as never, "u", "h",
     (f) => out.push((f as { k: string }).k), () => {}, () => {}, () => {}, drain);
   // The channel exists once the handshake ran; here it seals to itself.
   (c as unknown as { chan: unknown }).chan = { seal: async (inner: unknown) => inner };

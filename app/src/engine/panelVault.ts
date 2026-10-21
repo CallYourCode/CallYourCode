@@ -2,7 +2,7 @@ import {cyclog} from '@/shared/logging';
 import {openNamespace, ownDbTx} from '@/shared/blobStore';
 
 // Panel HTML cache keyed by (engineKey, pluginId, version). A plugin frontend
-// is a large HTML bundle fetched over the sealed RTC tunnel; before this store
+// is a large HTML bundle fetched over the sealed WS tunnel; before this store
 // every open paid that round-trip (a visible blank stage). Now a version-
 // matched open renders from memory or IndexedDB with no fetch at all.
 //

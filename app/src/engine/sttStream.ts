@@ -21,7 +21,7 @@ export type DcSttDeps = {
   detach: (id: string) => void;
 };
 
-export class DcSttStream implements SttStream {
+export class SealedSttStream implements SttStream {
   public failed = false;
 
   // Live-stream accounting, read on capture.clip so the owner's own recordings

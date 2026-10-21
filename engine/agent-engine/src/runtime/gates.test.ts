@@ -343,7 +343,7 @@ test("gate 4b: every glob in the default script points somewhere real", async ()
 
 test("gate 6: at most seven files boot an engine", async () => {
   /* Low single digits, per the doctrine. The four happy-path specs, the
-   * live-transport proof that must boot a real engine + real DataChannel
+   * live-transport proof that must boot a real engine + real WebSocket
    * (e2e/tunnel-wire.test.ts, the sealed req/res tunnel), the resumable
    * transfer proof that cuts a real sealed pipe mid-body
    * (e2e/transfer-chaos.test.ts), and the identity proof that has to SIGKILL

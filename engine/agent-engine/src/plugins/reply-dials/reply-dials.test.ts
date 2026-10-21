@@ -11,7 +11,7 @@
  * NO ENGINE, ANYWHERE. The store is a class over a directory; the ops are the
  * real replyDialsPlugin over the real /plugin/<id>/rpc/<op> route on a Bun.serve
  * on port 0. What neither tier can reach is the JOIN -- a `set` re-declaring the
- * plugin list and BROADCASTING it over the sealed DataChannel to a device that
+ * plugin list and BROADCASTING it over the sealed WebSocket to a device that
  * asked for nothing -- and that is e2e/plugin-rpc.test.ts's whole subject. It is
  * not duplicated here. What IS here is the plugin's half of it: the decl rebuilt
  * after a set carries the moved rung, which is what makes the broadcast worth

@@ -85,8 +85,7 @@ import { makeReconcile } from "../sessions/reconcile.ts";
 import { startAutoRestore } from "../sessions/auto-restore.ts";
 import { initMcp, agentInfo } from "./mcp.ts";
 import { initFrames, makeWsHandlers } from "../transport/frames.ts";
-import { initRtcGlue, onSignalOffer, relaySignalSock, mintRtcClient } from "../transport/rtc-glue.ts";
-import { initVoiceCtl, speakToCalls } from "../voice/voicectl.ts";
+import { initClientGlue, mintSealedClient } from "../transport/client-glue.ts";
 import { initTunnel } from "../transport/tunnel-glue.ts";
 import { initSessionVerbs, compactSession } from "../sessions/session-verbs.ts";
 import { initIngest } from "../chat/ingest.ts";
@@ -101,7 +100,6 @@ import { dirname, join } from "node:path";
 import { b64encode } from "../../../shared/e2e";
 import { loadOrCreateE2E, verifyRelayAuth } from "../security/sec";
 import { sealPushItem as sealPushItemForState, sealEngineItem as sealEngineItemForState } from "../security/sealpush";
-import { loadRtc, RTC } from "../transport/rtc";
 import { resolveRelayUrl, RelayLink } from "../transport/relay.ts";
 
 /* ============================== BOOT =======================================
@@ -240,31 +238,15 @@ const ENGINE_REPO: string | null = dirname(dirname(dirname(import.meta.dir)));
 await ensureBaseTree();
 await repairRunTree(dataDir());
 
-/* E2E v3 + WebRTC transport (#579), loaded at boot, always (no mode).
- * The engine id, identity + content keys live in the data dir's keys.json
- * (sec.ts); node-datachannel is the DataChannel stack (rtc.ts). An rtc-offer on
- * /ws opens the sealed transport; the WS is signaling-only, so a plain `hello`
- * gets transport-required. */
+/* Identity, pairing and content keys are unchanged by the transport. */
 const E2E_STATE = await loadOrCreateE2E(keysFile());
 /* requireOwner (httpx.ts) reads NO key state: it admits true loopback and the
  * in-process sealed-tunnel mark only. The x-cyc-cap bearer is deleted. */
 if (E2E_STATE.migrated) LOG.line("keys.regenerated", { backedUp: "keys.bak.json" });
 LOG.line("e2e", { fp: E2E_STATE.identity.fp, devices: E2E_STATE.devices.length });
-await loadRtc();
-if (RTC.available) console.log(`[rtc] bind=127.0.0.1+reached lib=${RTC.lib}@${RTC.version}`);
-else LOG.line("rtc.unavailable", {});
-console.log(`[e2e] fp=${E2E_STATE.identity.fp} devices=${E2E_STATE.devices.length}`);
-
-/* #579: the WS is signaling-only. A plain WS `hello` is answered with
- * `transport-required` (dial the DataChannel), and the client wire only ever
- * rides the sealed DataChannel. /ws carries rtc-offer/answer/cand and nothing
- * else. */
-console.log("[transport] ws=signaling-only (rtc DataChannel required)");
-LOG.line("transport.mode", { wsData: false, rtc: RTC.available });
-
+LOG.line("transport.mode", { transport: "sealed-ws" });
 
 // ---------------------------------------------------------------- state
-
 
 /* UPLOAD STAGING moved to uploads.ts (L2): staging dir, minted set, owner
  * paths, bind/adopt, retention. Wired here over the blob index and the
@@ -280,7 +262,6 @@ const mintedUploads = uploads.minted;
 
 /* Doc + photo directory resolution lives in session-state.ts (the blob
  * index owns the mapping). PHOTO_MAX/PHOTO_TYPES stay with the media routes. */
-
 
 /* WHAT MAY BE STORED, by content-type and by the extension it is written with.
  *
@@ -307,17 +288,7 @@ const APP_SERVER_URL = announce.appServerUrl;
 const ensureEnrolled = () => announce.ensureEnrolled();
 const dropAppToken = (why: string) => announce.dropAppToken(why);
 
-/* THE SIGNALING PATH: one outbound WS to the
- * app-server's same-origin relay (/engine leg), the ONE path in every mode.
- * This engine no longer listens for signaling itself; every device hands it an
- * rtc-offer through the app-server, so a phone that cannot reach this engine
- * directly (behind a home NAT, on cellular) works exactly as a same-machine one
- * does. Nothing but signaling crosses the relay; the DataChannel it negotiates
- * carries the same sealed wire.
- *
- * The address is the APP_SERVER_URL the engine already holds for push (default
- * http://127.0.0.1:10100 -> ws://127.0.0.1:10100/engine), resolved fresh on
- * every dial. RELAY_URL pins the /engine ws url explicitly. */
+/* One outbound socket carries every sealed device connection. */
 const relayLink = new RelayLink({
   url: async () => resolveRelayUrl(APP_SERVER_URL, E2E_STATE.engineId, process.env.RELAY_URL ?? ""),
   token: () => ensureEnrolled(),
@@ -332,7 +303,7 @@ const relayLink = new RelayLink({
     return v.ok;
   },
   log: (event, fields) => LOG.line(event, fields ?? {}),
-  onPipe: (pipe, conn) => mintRtcClient(pipe, relaySignalSock(conn)),
+  onPipe: (pipe) => mintSealedClient(pipe),
 });
 
 /* Presence first (presence.ts): notify asks it, and its one call back into
@@ -455,9 +426,7 @@ function sessionPushTitle(s: Session): string {
  * owner-gated, so an OS-side icon fetch could never answer. Pushes carry the
  * generic app icon; avatars load in-app over the sealed tunnel. */
 
-
 /* The user's global notify default + the bell resolution live in notify.ts. */
-
 
 /* Re-derive the restored queued flags now, before a single client can be told
  * about one. Each cleared flag is one appended patch line in its chat. */
@@ -473,10 +442,6 @@ initTts({
   persistPatch: (id, mts, set, unset) => persistPatch(id, mts, set, unset),
   broadcast: (m) => broadcast(m),
   restoredChats: () => restoredChats,
-  /* Agent->you live speech: the same chunks stream down any fp-gated call on
-   * the session (voicectl.ts) while the clip grows. Un-awaited: the clip is
-   * the record and the fallback, the stream is the live enrichment. */
-  streamSay: (s, msgId, chunks) => void speakToCalls(s.id, msgId, chunks, voiceFor(s.id)),
 });
 
 await sweepGrowingClips();
@@ -657,7 +622,7 @@ async function routeRequest(req: Request, server: import("bun").Server): Promise
         pongAt: 0, probeAt: 0, probeSeq: 0, cid: nextClientCid(), openedAt: Date.now(),
         tailing: null, terms: new Map(),
         remoteAddr: server.requestIP(req)?.address ?? null,
-        reachedHost: req.headers.get("host") ?? null } satisfies SockData,
+      },
     });
     return ok ? undefined as unknown as Response : new Response("expected websocket", { status: 400 });
   }
@@ -771,7 +736,7 @@ async function routeRequest(req: Request, server: import("bun").Server): Promise
    * not upgrade here any more: /voice/stt-stream is REMOVED because a WS
    * upgrade can never carry the in-process sealed-tunnel
    * mark and so could never be owner-gated. Streaming STT rides the sealed
-   * DataChannel as stt-open/stt-b/stt-close client frames (frames.ts), bridged
+   * WebSocket as stt-open/stt-b/stt-close client frames (frames.ts), bridged
    * to the voice engine over loopback by voice-proxy.ts. */
 
   /* THE ROUTE TABLE (hazard 4): one context object built at boot, one walk.
@@ -780,7 +745,6 @@ async function routeRequest(req: Request, server: import("bun").Server): Promise
     const r = await group(routesCtx, req, url, path, server);
     if (r) return r;
   }
-
 
   /* The engine's own root no longer serves the old public/ voice page (deleted:
    * its ws dial and mute frame are dead ends on the sealed wire). Point it at
@@ -1282,7 +1246,7 @@ warnRetiredEnv();
 
 /* Wire the glue before the local listener can accept an offer. The outbound
  * relay starts below, after the rest of the client wiring is ready too. */
-initRtcGlue({ e2e: E2E_STATE, engineUser: ENGINE_USER, engineHost: ENGINE_HOST,
+initClientGlue({ e2e: E2E_STATE, engineUser: ENGINE_USER, engineHost: ENGINE_HOST,
   log: (e, f) => LOG.line(e, f) });
 
 const server = Bun.serve<SockData>({
@@ -1318,7 +1282,7 @@ const server = Bun.serve<SockData>({
   fetch: (req, server) => refuseForbiddenHost(req) ?? refuseForbiddenOrigin(req) ?? routeRequest(req, server),
   /* The five ws handlers (role election, session frames, client dispatch,
    * signaling, voice relay) live in frames.ts: makeWsHandlers(). */
-  websocket: makeWsHandlers({ onSignalOffer }),
+  websocket: makeWsHandlers(),
 });
 
 /* THE SECOND LISTENER: the local API on a unix domain socket (engine-socket
@@ -1388,7 +1352,7 @@ const socketServer = Bun.serve<SockData>({
     markLocalSocket(req);
     return routeRequest(req, srv);
   },
-  websocket: makeWsHandlers({ onSignalOffer }),
+  websocket: makeWsHandlers(),
   /* idleTimeout mirrors the TCP serve so a slow upload can ride the socket.
    * Spread (not a literal key) because bun-types 1.2.0 omits idleTimeout from
    * the unix serve variant -- GenericServeOptions lacks it -- though the pinned
@@ -1480,10 +1444,7 @@ initFrames({
   terminalViewer: () => adapter.capabilities().terminalViewer,
   log: (e, f) => LOG.line(e, f),
 });
-/* Call-mode voice: the sealed-DC control (fp binding, call start/stop/speak). The
- * media path (Opus/RTP) rides the reciprocated track; this only logs and, by
- * default, sources call-mode TTS from the configured voice engine. */
-initVoiceCtl({ log: (e, f) => LOG.line(e, f) });
+
 /* The sealed req/res tunnel. onReq (frames.ts dispatch) feeds this same
  * routeRequest verbatim; the sealed channel proves the device, so onReq marks
  * the request as owner-authenticated (httpx markSealedTunnel), no cap header

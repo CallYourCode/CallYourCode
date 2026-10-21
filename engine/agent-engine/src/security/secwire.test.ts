@@ -1,27 +1,3 @@
-/* THE ENGINE'S SEALED HANDSHAKE, frame by frame (#579).
- *
- * A device peer greets with hello{sec}, EngineSecConn answers with the signed
- * `sec` frame, the device proves itself with a sealed sec-ok, the engine enrols
- * it and seals sec-done, and a c2e app frame reaches the engine dispatcher
- * decoded. Enrolment is idempotent across reconnects; a second device key adds
- * one row; a bare hello gets sec-required. Then the whole refusal matrix, which
- * is the half that matters: every one of these closes exists because the
- * alternative is an unproven device holding a live channel.
- *
- * The transport is an in-process string link, not a real DataChannel. What
- * EngineSecConn consumes is "one plaintext string per logical message" and what
- * it produces is the same; dcpipe.ts is what turns that into fragments and is
- * proven in dcpipe.test.ts. rtc.ts carries those fragments, and it is proven in
- * two places now that rtc.test.ts is gone: e2e/roundtrip.test.ts opens a real
- * node-datachannel channel to a booted engine and round-trips a multi-fragment
- * frame through it, and rtc-ice.test.ts holds the candidate-advertising rules.
- * Standing a real peer up HERE cost 25 seconds a test and proved the transport a
- * third time, not the handshake once.
- *
- * The engine half below is wired exactly the way rtc-glue.ts mintRtcClient
- * wires it: send -> pipe.send(JSON.stringify), onFrame -> the dispatcher,
- * onClose -> pipe.close, and markClosed on the pipe's own close. */
-
 import { test, expect } from "bun:test";
 import { join } from "node:path";
 import { until } from "../test-utils/wait.ts";
@@ -83,7 +59,7 @@ function link(): { client: Wire; engine: Wire } {
   return { client, engine };
 }
 
-/** The engine half, wired like rtc-glue.ts. `frames` is what the ordinary
+/** The engine half, wired like client-glue.ts. `frames` is what the ordinary
  *  dispatcher would have received: opened inner frames, never sealed ones. */
 function engineOver(wire: Wire, state: E2EState) {
   const frames: any[] = [];
@@ -92,7 +68,6 @@ function engineOver(wire: Wire, state: E2EState) {
     state,
     "example",
     "linux",
-    "rtc",
     (frame) => wire.send(JSON.stringify(frame)),
     () => readyCalls++,
     (inner) => frames.push(inner),
@@ -508,8 +483,8 @@ test("junk before hello is ignored, not answered and not fatal", async () => {
   /* THE LITERAL `null` IS IN THIS LIST, and it is the reason the list exists.
    * JSON.parse("null") SUCCEEDS, so the try/catch in feed() never saw it, and
    * the next line read `m.t` off null: "TypeError: null is not an object".
-   * rtc-glue calls feed as `void sec.feed(raw)`, so that was an unhandled
-   * rejection reachable by any peer that could open a DataChannel, before it
+   * client-glue calls feed as `void sec.feed(raw)`, so that was an unhandled
+   * rejection reachable by any peer that could open a WebSocket, before it
    * had proved anything at all. `null`, `123` and `"a string"` are all valid
    * JSON and none of them is a frame; feed() drops every non-object now. */
   for (const junk of ["{not json", "null", '"a string"', "123", '{"t":"attach"}',
@@ -538,8 +513,8 @@ test("a hello with a malformed sec offer falls back to sec-required, it does not
 });
 
 test("markClosed stops the state machine: a frame arriving after the pipe died does nothing", async () => {
-  /* rtc-glue calls markClosed from pipe.onclose. Without it a frame still in
-   * flight when the DataChannel dies would enrol a device onto a connection
+  /* client-glue calls markClosed from pipe.onclose. Without it a frame still in
+   * flight when the WebSocket dies would enrol a device onto a connection
    * that no longer exists. */
   const state = await scratchState();
   const { client, engine } = link();

@@ -1,17 +1,3 @@
-/* tunnel.ts codec vectors + drift (the sibling of dcpipe.test.ts).
- *
- * The vectors are computed from FIXED inputs and frozen into the single shared
- * copy engine/shared/fixtures/tunnel-vectors.json. tunnel.ts is one shared
- * module (engine/shared/tunnel.ts) imported by both the engine and the app
- * bundle, and the app test asserts the SAME fixture, so a change to the req/res
- * chunking on either side fails a test instead of silently framing a request
- * the other end cannot reassemble. sha256 over the concatenated frame JSON pins every byte;
- * the shapes are kept for readability.
- *
- * This is the pure codec ONLY: the wiring (engine onReq -> routeRequest, app
- * engineCapFetch -> tunnel) is repo-specific and tested at its own seam.
- */
-
 import { test, expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {

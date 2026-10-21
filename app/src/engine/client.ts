@@ -14,14 +14,13 @@ import {
   engineCapFetch,
   type EngineFetchInit,
   httpBaseOf,
-  relaySignalUrlFor,
+  relayUrlFor,
   RESEAL_GRACE_MS,
-  rtcIceServers,
   setEngineTunnel
 } from './contract';
 import {TunnelClient} from './tunnelClient';
 import {decodePage} from './decodeChat';
-import {DcSttStream} from './sttStream';
+import {SealedSttStream} from './sttStream';
 import {dispatchFrame} from './frames';
 import type {FrameContext} from './frames/types';
 import {cyclog} from '@/shared/logging';
@@ -38,9 +37,7 @@ import {
   type SecFrame,
   type SecOffer
 } from '@shared/e2e';
-import {wsSignal, RtcDial, type Signal, type RelayAuth} from './rtc';
-import {VoiceCall} from './voiceCall';
-import type {Pipe} from '@shared/dcpipe';
+import {dialRelay, type RelayAuth, type Pipe} from '@shared/ws-pipe';
 import {
   getDeviceIdentity,
   getEnginePin,
@@ -118,8 +115,6 @@ export type TransferOpts = {signal?: AbortSignal};
 
 export class WsEngineClient implements EngineClient {
   private pipe: Pipe | null = null;
-  private signal: Signal | null = null;
-  private rtc: RtcDial | null = null;
   private listeners: Listeners = {
     status: [],
     pairNeeded: [],
@@ -135,8 +130,6 @@ export class WsEngineClient implements EngineClient {
     say: [],
     sayGrow: [],
     sayDone: [],
-    sayLive: [],
-    sayLiveFail: [],
     sessionEvent: [],
     dequeued: [],
     termFrame: [],
@@ -163,6 +156,7 @@ export class WsEngineClient implements EngineClient {
   private readonly httpBase: string;
 
   private sec: SecState | null = null;
+  private writeBytes = 0;
 
   private hs: HandshakeState | null = null;
 
@@ -172,7 +166,7 @@ export class WsEngineClient implements EngineClient {
    * flight. dial()'s in-flight guard silently swallows the redial kick, and
    * when that attempt then failed (unknown-device), the client parked on
    * `held` with nobody left to wake it: PAIR tapped during the slow first
-   * hosted dial sat on "Pairing..." until a reload. The kick is remembered
+   * first dial sat on "Pairing..." until a reload. The kick is remembered
    * here, and the handshake-failure path retries instead of parking. */
   private rekeyKick = false;
 
@@ -186,8 +180,6 @@ export class WsEngineClient implements EngineClient {
    * writes. Cleared on the first successful handshake; never set by plain
    * reconnects, so everyday pinning is untouched. */
   private pairingIntent = false;
-
-  private voiceCall: VoiceCall | null = null;
 
   private readonly tunnel = new TunnelClient({
     ready: () => this.sealReady(),
@@ -234,11 +226,10 @@ export class WsEngineClient implements EngineClient {
 
     clearEngineTunnel(this.httpBase);
     this.tunnel.reset('client closed');
-    this.voiceCall?.close();
-    this.voiceCall = null;
+
     this.failSttStreams();
     pipe?.close(1000, 'app-closed');
-    this.rtc?.close('app-closed');
+
   }
 
   public on<K extends keyof EngineEvents>(ev: K, fn: EngineEvents[K]) {
@@ -379,42 +370,6 @@ export class WsEngineClient implements EngineClient {
   private voiceHealthyState = true;
   public voiceHealthy(): boolean {
     return this.voiceHealthyState;
-  }
-
-  private buildVoiceCall(): void {
-    const channel = this.rtc?.audio ?? null;
-    if (!channel) {
-      this.voiceCall = null;
-      return;
-    }
-    this.voiceCall = new VoiceCall(channel, {
-      seal: (frame) => this.sendNow(frame),
-      log: (event, fields) => cyclog(event, {engine: this.url, ...fields}),
-      closeOnMismatch: (reason) => {
-        cyclog('voice.fp-close', {
-          engine: this.url,
-          reason,
-          why:
-            'the media DTLS fingerprint did not match the sealed channel; ' +
-            'a relay re-terminated DTLS, so the pipe is torn down'
-        });
-        this.pipe?.close(4462, reason);
-        this.rtc?.close(reason);
-      }
-    });
-  }
-
-  public hasVoiceMedia(): boolean {
-    return !!this.voiceCall?.canCarryAudio;
-  }
-
-  public openMediaSttStream(
-    session: string,
-    handlers: SttStreamHandlers,
-    micTrack?: MediaStreamTrack | null
-  ): SttStream {
-    if (!this.voiceCall) throw new Error('no voice-media channel on this pipe');
-    return this.voiceCall.openCapture(session, handlers, micTrack);
   }
 
   private forgetCapabilities(why: string) {
@@ -714,10 +669,10 @@ export class WsEngineClient implements EngineClient {
     return text;
   }
 
-  private readonly sttStreams = new Map<string, DcSttStream>();
+  private readonly sttStreams = new Map<string, SealedSttStream>();
 
   public transcribeStream(handlers: SttStreamHandlers = {}): SttStream {
-    const stream = new DcSttStream(
+    const stream = new SealedSttStream(
       {
         send: (frame) => this.writeRaw(JSON.stringify(frame)),
         drain: () => this.pipe?.drain() ?? Promise.resolve(),
@@ -917,41 +872,14 @@ export class WsEngineClient implements EngineClient {
     for (const fn of this.listeners[ev]) (fn as (...a: unknown[]) => void)(...args);
   }
 
-  private async dialVia(
-    sigUrl: string,
-    iceServers: RTCIceServer[],
-    how: string,
-    auth?: RelayAuth
-  ): Promise<Pipe | null> {
-    const sig = wsSignal(sigUrl, auth);
-    this.signal = sig;
-
-    const rtc = new RtcDial(sig, iceServers, false);
-    this.rtc = rtc;
-    try {
-      return await rtc.start();
-    } catch (e) {
-      cyclog('rtc.failed', {
-        engine: this.url,
-        how,
-        err: String((e as Error)?.message ?? e),
-        why: 'the DataChannel dial failed; there is no WS-data fallback, so this is a disconnect'
-      });
-      rtc.close('dial-failed');
-      this.rtc = null;
-      this.signal = null;
-      return null;
-    }
-  }
-
-  private async relayAuthFor(relayUrl: string): Promise<RelayAuth | undefined> {
+  private async relayAuthFor(relayUrl: string): Promise<RelayAuth> {
     let engineId = '';
     try {
       engineId = new URL(relayUrl).searchParams.get('engine') ?? '';
     } catch {
       engineId = '';
     }
-    if (!engineId) return undefined;
+    if (!engineId) throw new Error("missing engine id");
     const device = await getDeviceIdentity();
     return {
       spki: device.spki,
@@ -982,7 +910,7 @@ export class WsEngineClient implements EngineClient {
   private async dialOnce() {
     this.emit('status', 'connecting');
 
-    const sigUrl = relaySignalUrlFor(this.url);
+    const sigUrl = relayUrlFor(this.url);
     if (!sigUrl) {
       cyclog('signal.none', {
         engine: this.url,
@@ -992,17 +920,15 @@ export class WsEngineClient implements EngineClient {
       this.scheduleReconnect();
       return;
     }
-    const pipe = await this.dialVia(
-      sigUrl,
-      rtcIceServers(),
-      'relay',
-      await this.relayAuthFor(sigUrl)
-    );
-    if (!pipe) {
+    let pipe: Pipe;
+    try { pipe = await dialRelay(sigUrl, await this.relayAuthFor(sigUrl)); }
+    catch (e) {
+      cyclog('ws.failed', {engine: this.url, err: String(e)});
       this.emit('status', 'disconnected');
       this.scheduleReconnect();
       return;
     }
+    if (this.closed) { pipe.close(1000, 'app-closed'); return; }
 
     this.pipe = pipe;
     cyclog('pipe.open', {engine: this.url, queued: this.pending.length, reattach: this.attachedId});
@@ -1010,8 +936,6 @@ export class WsEngineClient implements EngineClient {
     this.awaitingInboundBy = null;
     this.sec = null;
     this.hs = null;
-
-    this.buildVoiceCall();
 
     this.forgetCapabilities(
       'a new pipe: what the last one could do says ' + 'nothing about what this one can'
@@ -1021,7 +945,12 @@ export class WsEngineClient implements EngineClient {
     pipe.onclose = (code, reason) => this.onPipeClose(pipe, code, reason);
 
     try {
-      await this.handshake(pipe);
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([this.handshake(pipe), new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => reject(new Error('handshake-timeout')), 15_000);
+        })]);
+      } finally { clearTimeout(deadline); }
     } catch (e) {
       const msg = String((e as Error)?.message ?? e);
       const uh = String((e as {userHost?: string})?.userHost ?? '');
@@ -1043,9 +972,7 @@ export class WsEngineClient implements EngineClient {
       this.sec = null;
       this.hs = null;
       pipe.close(4400, 'handshake-failed');
-      this.rtc?.close('handshake-failed');
-      this.rtc = null;
-      this.signal = null;
+
       this.emit('status', 'disconnected');
       if (this.held === 'identity') {
         // trustEngine() landed during THIS attempt: retry with the trust
@@ -1071,9 +998,6 @@ export class WsEngineClient implements EngineClient {
     }
     this.rekeyKick = false;
     this.pairingIntent = false; // the deliberate-pairing window closes on success
-
-    this.signal?.close(1000, 'upgraded');
-    this.signal = null;
 
     this.sendPostHello();
   }
@@ -1150,6 +1074,8 @@ export class WsEngineClient implements EngineClient {
     });
     this.pipe = null;
     this.sec = null;
+    this.hs?.rejectSec(new Error("pipe closed"));
+    this.hs?.rejectDone?.(new Error("pipe closed"));
     this.hs = null;
     this.awaitingInboundBy = null;
 
@@ -1157,12 +1083,9 @@ export class WsEngineClient implements EngineClient {
     this.forgetCapabilities(
       'the pipe closed; a send composed while ' + 'disconnected must promise nothing'
     );
-    this.voiceCall?.close();
-    this.voiceCall = null;
+
     this.failSttStreams();
-    this.rtc?.close('pipe-closed');
-    this.rtc = null;
-    this.signal = null;
+
     this.emit('status', 'disconnected');
     this.scheduleReconnect();
   }
@@ -1194,15 +1117,6 @@ export class WsEngineClient implements EngineClient {
 
     if (frame?.t === 'res') {
       this.tunnel.onRes(frame);
-      return;
-    }
-
-    if (frame?.t === 'fp') {
-      this.voiceCall?.bindFp(frame);
-      return;
-    }
-    if (frame?.t === 'partial' || frame?.t === 'final') {
-      this.voiceCall?.onSttFrame(frame);
       return;
     }
 
@@ -1253,6 +1167,8 @@ export class WsEngineClient implements EngineClient {
     });
     this.pipe = null;
     this.sec = null;
+    this.hs?.rejectSec(new Error("pipe closed"));
+    this.hs?.rejectDone?.(new Error("pipe closed"));
     this.hs = null;
     this.awaitingInboundBy = null;
 
@@ -1260,12 +1176,9 @@ export class WsEngineClient implements EngineClient {
     try {
       pipe.close(4008, 'presumed-dead');
     } catch {}
-    this.voiceCall?.close();
-    this.voiceCall = null;
+
     this.failSttStreams();
-    this.rtc?.close('presumed-dead');
-    this.rtc = null;
-    this.signal = null;
+
     this.emit('status', 'disconnected');
     this.scheduleReconnect();
   }
@@ -1278,8 +1191,15 @@ export class WsEngineClient implements EngineClient {
     const pipe = this.pipe;
     const sec = this.sec;
     if (!pipe?.open || !sec?.ready) return false;
+    const bytes = new TextEncoder().encode(raw).byteLength;
+    if (this.writeBytes + bytes > 32 * 1024 * 1024) {
+      pipe.close(1009, 'writer-limit');
+      return false;
+    }
+    this.writeBytes += bytes;
     const chan = sec.chan;
     sec.writeChain = sec.writeChain.then(async () => {
+      if (!pipe.open || this.sec !== sec) return;
       let inner: unknown;
       try {
         inner = JSON.parse(raw);
@@ -1295,7 +1215,7 @@ export class WsEngineClient implements EngineClient {
       try {
         pipe.send(JSON.stringify(sealed));
       } catch {}
-    });
+    }).finally(() => { this.writeBytes -= bytes; });
     return true;
   }
 
@@ -1519,8 +1439,7 @@ export class WsEngineClient implements EngineClient {
   private send(frame: object): boolean {
     const raw = JSON.stringify(frame);
     if (this.sealReady()) {
-      this.writeRaw(raw);
-      return true;
+      return this.writeRaw(raw);
     }
     const t = (frame as {t?: string}).t;
     if (t === 'session-tail') return false;
@@ -1538,6 +1457,12 @@ export class WsEngineClient implements EngineClient {
       });
     }
 
+    if (this.pending.length >= 1024 || this.pending.reduce((n, s) => n + s.length, raw.length) > 16 * 1024 * 1024) {
+      cyclog('send.queue-full', {engine: this.url, t, depth: this.pending.length});
+      const f = frame as {id?: string; cid?: string};
+      if (f.cid) this.emit('sendFailed', {id: f.id ?? '', cid: f.cid, reason: 'transport queue full'});
+      return false;
+    }
     this.pending.push(raw);
     cyclog('send.queued', {
       t,

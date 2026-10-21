@@ -1,22 +1,8 @@
-/* THE SEALED REQUEST/RESPONSE TUNNEL, OVER A REAL BOOTED ENGINE.
- * The pure codec is pinned by ../tunnel.test.ts; this proves
- * the wiring: a {t:"req"} sealed onto the live DataChannel reaches the SAME
- * routeRequest the localhost server uses, and its answer comes back as chunked,
- * sealed {t:"res"} frames the app can reassemble byte-for-byte.
- *
- * Only a booted engine can prove this: the frame rides node-datachannel SCTP
- * over loopback, sealed by the engine's own keys.json, dispatched by the real
- * frames.ts, answered by the real routes. A fake pipe would agree with whatever
- * the code believes.
- *
- *   bun test --preload ./e2e/testpreload.ts e2e/tunnel.test.ts
- */
-
 import { test, expect, afterEach } from "bun:test";
 import { startEngine, openSealedClient, hasE2ETransport, PANE, type Engine } from "./harness.ts";
 import { encodeReq, ResReassembler, type ResFrame } from "../transport/tunnel.ts";
 
-/* The sealed-client specs need the DataChannel transport the e2e preload
+/* The sealed-client specs need the WebSocket transport the e2e preload
  * installs (`bun run test:e2e`); under a bare `bun test` the native WebSocket is
  * in place, the engine refuses a raw hello (#579), and they can only time out.
  * They SKIP there instead. See hasE2ETransport in harness.ts. */
@@ -113,7 +99,7 @@ sealedTest("a content route returns the same bytes direct and tunnelled, chunked
 sealedTest("the content route is TUNNEL-ONLY now: same route answers the tunnel, refuses remote HTTP", async () => {
   /* The app is tunnel-only, and the engine cut the content
    * routes to the sealed tunnel + localhost. This proves all three at once on a
-   * real booted engine, over a real sealed DataChannel. */
+   * real booted engine, over a real sealed WebSocket. */
   engine = await startEngine();
   const e = engine;
   const { ws, frames } = await openSealedClient(e);

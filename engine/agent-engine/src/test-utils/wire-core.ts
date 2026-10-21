@@ -3,7 +3,7 @@
  * server.ts's boot() is an ordered sequence of `initX({deps})` calls over a
  * route table and an adapter. That decomposition is what makes this possible:
  * almost every behaviour the old suite proved by spawning `bun run server.ts`
- * and dialling a real WebRTC DataChannel can be proven by performing the SAME
+ * and dialling a real relay WebSocket can be proven by performing the SAME
  * ordered wiring in-process, with fakes at the architecture seams.
  *
  * What is real here: every engine module, the herdr JSON-RPC framing, the

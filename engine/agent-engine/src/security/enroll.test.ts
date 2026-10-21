@@ -85,10 +85,6 @@ test("enrollOnce returns the token, forwards the session bearer, and nulls on re
   expect(seen[0].body).toMatchObject({ engineId: st.engineId, pubkey: st.identity.spki });
   expect(typeof seen[0].body.sig).toBe("string");
 
-  // HOSTED first run: the pasted one-time grant rides as the bearer
-  await enrollOnce(url, st, "cyg_pastedgrant");
-  expect(seen[1].auth).toBe("Bearer cyg_pastedgrant");
-
   // a refusal is null, not a throw
   const refusing = stubServer(() => new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 }));
   expect(await enrollOnce(refusing, st)).toBeNull();

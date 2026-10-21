@@ -17,6 +17,4 @@ export interface HandlerCtx {
   fireSay(sessionId: string, msgId: string, text: string, origin?: string, growing?: boolean): void;
   fireSayGrow(sessionId: string, msgId: string, durS?: number, chars?: number): void;
   fireSayDone(sessionId: string, msgId: string, durationS?: number): void;
-  fireSayLive(sessionId: string, msgId: string): void;
-  fireSayLiveFail(sessionId: string, msgId: string): void;
 }

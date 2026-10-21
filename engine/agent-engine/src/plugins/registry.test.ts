@@ -27,7 +27,7 @@
  * The renders here are deferred promises the test resolves by hand, so what is
  * measured is the race and not a sleep.
  *
- * The wire-level half -- the same decls riding a sealed DataChannel, and a card
+ * The wire-level half -- the same decls riding a sealed WebSocket, and a card
  * fetched from a booted engine -- is e2e/plugin-rpc.test.ts and only there.
  *
  *   bun test agent-engine/src/plugins/registry.test.ts

@@ -215,7 +215,7 @@ describe("requireOwner / requireLocal", () => {
 
   test("no x-cyc-cap header opens requireOwner: the bearer machinery is deleted", async () => {
     /* There is no cap at all any more. The enrolled device reaches these routes
-     * over the sealed DataChannel (markSealedTunnel), never a bare HTTP header,
+     * over the sealed WebSocket (markSealedTunnel), never a bare HTTP header,
      * so any x-cyc-cap value a plain-HTTP tailnet peer waves buys nothing. */
     expect((await requireOwner(req({ "x-cyc-cap": "anything-at-all" }),
       from("100.1.2.3") as any))!.status).toBe(403);

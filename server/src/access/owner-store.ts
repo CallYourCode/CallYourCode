@@ -1,17 +1,3 @@
-/* ONE OWNER'S WORLD, in one object.
- *
- * Everything device-shaped that used to be a module global -- the push store,
- * the app settings, the badge bookkeeping (`pending`) and the merged outgoing
- * window (`outNew`/`outDismiss`) -- is per owner.
- * In LOCAL mode there is exactly one of these, backed by the same files at the
- * same paths as before, so nothing on disk or in behaviour moves. In HOSTED
- * mode there is one per Clerk `sub`, under `<OWNERS_DIR>/<sub>/`, and no route
- * can reach across from one to another because a route only ever holds the
- * store the request's own token resolved to.
- *
- * The outgoing window's timer lives on the store too, so two owners batch on
- * their own clocks and one owner's flush never carries another's chats. */
-
 import { Push, carrySealed } from "../delivery/push";
 import { writePrivate } from "../../../engine/shared/runfiles.ts";
 import { BATCH_MS, BATCH_LAG_MS, TRACKED_CHATS_MAX } from "../platform/caps";

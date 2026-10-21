@@ -426,13 +426,4 @@ describe('say family', () => {
       ['sayDone', ['s1', 'm1', undefined]]
     ]);
   });
-  test('say-live and say-live-fail carry the pane and the msgId', () => {
-    const {ctx, emitted} = fakeCtx();
-    dispatchFrame(ctx, {t: 'say-live', id: 's1', msgId: 'm1'});
-    dispatchFrame(ctx, {t: 'say-live-fail', id: 's1', msgId: 'm1'});
-    expect(emitted).toEqual([
-      ['sayLive', ['s1', 'm1']],
-      ['sayLiveFail', ['s1', 'm1']]
-    ]);
-  });
 });

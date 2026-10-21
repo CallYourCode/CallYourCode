@@ -20,14 +20,8 @@ function readFlag(name: string) {
 
 const DEVLOG = readFlag('devlog');
 
-/* THE HOSTED PRIVACY GATE. A local app ships its diagnostic log automatically
- * (the sink is the user's own machine; app.log is theirs). A hosted
- * (clerk-auth) app never auto-ships: lines stay in the on-device ring and
- * leave the device only inside an explicit bug report (/report, which attaches
- * logTail). contract.ts flips this switch once /config names the mode; until
- * then NOTHING ships (fail-private), and the queue holds the early lines so a
- * local app still ships its boot the moment local is confirmed. ?devlog=1
- * forces shipping for a debugging session; ?devlog=0 forces silence anywhere. */
+/* Diagnostics go only to the local app-server after config confirms readiness.
+ * Explicit devlog=0 still silences automatic delivery. Reports remain explicit. */
 let autoShip = false;
 function shipAllowed(): boolean {
   if (DEVLOG === '0') return false;

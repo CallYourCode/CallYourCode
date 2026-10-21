@@ -1,5 +1,5 @@
 /* CLIENT FRAMES (L4 interface): the one dispatcher a WS client and a
- * DataChannel client share, the terminal ws handlers over the hub, and
+ * WebSocket client share, the terminal ws handlers over the hub, and
  * closeClient -- the only event guaranteed to arrive, so terminals and
  * presence are freed here.
  */
@@ -16,9 +16,7 @@ import { onUtterance } from "../chat/deliver.ts";
 import { onInterrupt, onCompact, onAnswer } from "../sessions/session-verbs.ts";
 import { onSttOpen, onSttChunk, onSttClose, closeSttClient } from "../voice/voice-proxy.ts";
 import { onRegister, dispatchSessionFrame } from "../runtime/mcp.ts";
-import { addRtcCand, closeRtc } from "./rtc";
 import { onReq, onReqAbort, closeTunnelClient } from "./tunnel-glue.ts";
-import { onVoiceFp, onVoiceCtl } from "../voice/voicectl.ts";
 import { broadcastSessions, sendFullSessions } from "../sessions/sessions-frame.ts";
 import type { Sock } from "./sock.ts";
 
@@ -222,14 +220,13 @@ export function onTermClose(ws: Sock, m: any) {
   D().log("term.close", { client: `c${ws.data.cid}`, session: id });
 }
 
-
 /* The client-frame dispatcher, shared by a WS client (websocket.message) and a
- * DataChannel client (the RtcSock's EngineSecConn hands it the opened inner
- * frame). ws is a Sock or a Sock-shaped RtcSock; only data/send are touched. */
+ * WebSocket client (the SealedSock's EngineSecConn hands it the opened inner
+ * frame). ws is a Sock or a Sock-shaped SealedSock; only data/send are touched. */
 export async function dispatchClientFrame(ws: Sock, m: any): Promise<void> {
   /* Same proof the WS path records in websocket.message: a frame arrived, so
-   * this page's javascript is running RIGHT NOW. Sealed DC frames never pass
-   * that handler, and leaving lastFrame at mint time made every live DataChannel
+   * this page's javascript is running RIGHT NOW. Sealed WS frames never pass
+   * that handler, and leaving lastFrame at mint time made every live WebSocket
    * look frozen once BEAT_ASSUMED_MS elapsed. */
   ws.data.lastFrame = Date.now();
   if (m.t === "visible") {
@@ -304,11 +301,6 @@ export async function dispatchClientFrame(ws: Sock, m: any): Promise<void> {
   /* Step 4c: the app walked away from an in-flight tunnelled request. Stops
    * the engine's spool (and deletes its temp file) and any streamed reply. */
   else if (m.t === "req-abort") await onReqAbort(ws, m);
-  /* Call-mode voice: the DTLS fp binding and call-mode control. Audio itself never
-   * touches this dispatch -- it rides the media track; only the text control
-   * (fp, start/stop/speak) does. */
-  else if (m.t === "fp") onVoiceFp(ws, m);
-  else if (m.t === "voice-ctl") await onVoiceCtl(ws, m);
   /* The mic stream AS DATA. Replaces the removed
    * /voice/stt-stream WS route (a WS upgrade can never carry the sealed-tunnel
    * mark): PCM rides the sealed channel as base64 chunks, the bridge in
@@ -319,7 +311,7 @@ export async function dispatchClientFrame(ws: Sock, m: any): Promise<void> {
   else if (m.t === "stt-close") onSttClose(ws, m);
 }
 
-/* Release everything a client (WS or DataChannel) was holding. The only event
+/* Release everything a client (WS or WebSocket) was holding. The only event
  * guaranteed to arrive, so terminals + presence are freed here. */
 export function closeClient(ws: Sock): void {
   clients.delete(ws);
@@ -332,11 +324,7 @@ export function closeClient(ws: Sock): void {
     wasAttachedTo: ws.data.attached ?? undefined });
 }
 
-
-/* onSignalOffer is passed IN rather than imported: rtc-glue imports this
- * module (dispatchClientFrame/closeClient), and siblings talk through
- * injected functions, never a cycle. */
-export function makeWsHandlers(glue: { onSignalOffer(ws: Sock, m: { id: string; sdp: string }): Promise<void> }): import("bun").WebSocketHandler<import("./sock.ts").SockData> {
+export function makeWsHandlers(): import("bun").WebSocketHandler<import("./sock.ts").SockData> {
   return {
     open(_ws) {
       // Role is unknown until the first message declares it.
@@ -368,41 +356,7 @@ export function makeWsHandlers(glue: { onSignalOffer(ws: Sock, m: { id: string; 
           onRegister(ws, m);
           return;
         }
-        if (m.t === "hello") {
-          /* #579: the WS is signaling-only. A plain WS `hello` never gets the
-           * plaintext burst; the engine answers `transport-required` and the app
-           * dials the DataChannel + runs the sealed v2 sec handshake there
-           * (onSignalOffer -> mintRtcClient).
-           *
-           * `can` is WHAT THIS ENGINE CAN DO, said out loud, before it is asked.
-           * There is one deployment of the app and several engines updated at
-           * different times, so "the other end is older than me" is an ordinary
-           * Tuesday. `words` (task 292) is a promise the app must not make to an
-           * engine that never heard of it; a list, not a boolean, so the next
-           * such capability is not a second frame. */
-          D().log("client.blocked", { client: `c${ws.data.cid}`, reason: "ws-transport" });
-          try { ws.send(JSON.stringify({ t: "transport-required", transport: "rtc" })); } catch {}
-          try { ws.close(4426, "transport-required"); } catch {}
-          return;
-        }
-        /* #579: a client's signaling leg. The rtc-offer is the FIRST frame; this
-         * socket becomes the DataChannel's signaling channel and carries only
-         * rtc-*. The sealed client wire rides the DataChannel. */
-        if (m.t === "rtc-offer" && typeof m.sdp === "string" && typeof m.id === "string") {
-          ws.data.role = "signal";
-          await glue.onSignalOffer(ws, m);
-          return;
-        }
-        return; // undeclared socket, ignore
-      }
-
-      if (ws.data.role === "signal") {
-        // Only rtc-* rides a signaling WS; a data frame here is dropped + logged.
-        if (m.t === "rtc-cand") addRtcCand(ws.data.rtc!, m.cand ?? null);
-        else if (m.t === "rtc-abort") {
-          if (ws.data.rtc) closeRtc(ws.data.rtc);
-          try { ws.close(1000, "abort"); } catch {}
-        } else D().log("signal.reject", { client: `c${ws.data.cid}`, t: String(m.t) });
+        ws.close(4426, "sealed-relay-required");
         return;
       }
 
@@ -411,21 +365,12 @@ export function makeWsHandlers(glue: { onSignalOffer(ws: Sock, m: { id: string; 
         return;
       }
 
-      // role === "client": one dispatcher for a WS client AND a DataChannel
-      // client (the RtcSock feeds it the OPENED inner frame, #579).
-      await dispatchClientFrame(ws, m);
+      ws.close(4426, "sealed-relay-required");
     },
 
     close(ws) {
       if (ws.data.role === "client") {
         closeClient(ws);
-        return;
-      }
-      /* A signaling WS closing tears the DataChannel down with it: its close is
-       * the sub-second "engine restarted / tab gone" signal. The
-       * pipe close then runs closeClient on the RtcSock it spawned. */
-      if (ws.data.role === "signal") {
-        if (ws.data.rtc) closeRtc(ws.data.rtc);
         return;
       }
       // For non-herdr sessions the socket closing IS the liveness signal --

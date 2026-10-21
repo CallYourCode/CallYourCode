@@ -17,8 +17,6 @@ import { CLIENTLOG_MAX_BYTES, CLIENTLOG_MAX_LINES, CLIENTLOG_MAX_CHARS,
   CLIENTLOG_RATE_MAX } from "../platform/caps";
 
 export type ClientlogDeps = {
-  hosted: boolean;
-  deviceOwner(req: Request): Promise<unknown | null>;
   log: LogFn;       // the server's own book
   applog: Logbook;  // the page's lines, written raw
 };
@@ -35,20 +33,11 @@ export function makeClientlogRoute(deps: ClientlogDeps) {
 
   return async (req: Request, path: string, srv: Srv): Promise<Response | null> => {
     if (path !== "/clientlog" || req.method !== "POST") return null;
-    /* BOUNDED FIRST (DDoS hardening): this was the one unauthenticated route
-     * that would buffer the server-wide 320MB body allowance. A real batch
-     * is 40 lines; anything past the cap is dropped whole -- still a 204,
-     * because a log sink must never make the page retry. In HOSTED the
-     * writer must be a signed-in device (sendBeacon carries the __session
-     * cookie); an anonymous line is dropped, not stored. Each client also
-     * has a per-minute line budget. */
+
     const capped = await readBodyCapped(req, CLIENTLOG_MAX_BYTES);
     if (!capped.ok || capped.value.byteLength > CLIENTLOG_MAX_BYTES) {
       deps.log("clientlog.refused", { cap: CLIENTLOG_MAX_BYTES,
         why: "the POST is larger than any real log batch; dropped, not stored" });
-      return new Response(null, { status: 204 });
-    }
-    if (deps.hosted && !(await deps.deviceOwner(req))) {
       return new Response(null, { status: 204 });
     }
     let body: any = null;

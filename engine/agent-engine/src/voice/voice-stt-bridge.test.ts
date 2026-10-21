@@ -2,7 +2,7 @@
  *
  * The mic stream used to ride a plain WS at /voice/stt-stream, which could
  * never be owner-gated (a WS upgrade cannot carry the in-process sealed-tunnel
- * mark). That route is gone; the stream now rides the sealed DataChannel as
+ * mark). That route is gone; the stream now rides the sealed WebSocket as
  * ordinary client frames:
  *
  *   app -> engine   {t:"stt-open", id, rate, format}

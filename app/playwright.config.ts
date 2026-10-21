@@ -6,13 +6,13 @@ import {refuseReporterOverride} from './e2e/guard-common';
 
 const suite = process.env.CYC_PLAYWRIGHT_SUITE || 'offline';
 
-if (suite !== 'offline' && suite !== 'gate') {
+if (suite !== 'offline' && suite !== 'gate' && suite !== 'ws-transport') {
   throw new Error(`CYC_PLAYWRIGHT_SUITE must be "offline" or "gate", got ${JSON.stringify(suite)}`);
 }
 
 const launchOptions = {args: ['--mute-audio', '--autoplay-policy=no-user-gesture-required']};
 
-const config = suite === 'gate' ? gateConfig() : offlineConfig();
+const config = suite === 'ws-transport' ? transportConfig() : suite === 'gate' ? gateConfig() : offlineConfig();
 
 export default config;
 
@@ -89,5 +89,17 @@ function offlineConfig() {
           }
         }
       : {})
+  });
+}
+
+function transportConfig() {
+  return defineConfig({
+    testDir: './e2e/gate', testMatch: 'ws-transport.spec.ts',
+    fullyParallel: false, workers: 1, retries: 0, timeout: 300_000,
+    reporter: [['list']], use: {headless: true},
+    projects: ['chromium', 'webkit'].flatMap((browserName) => [
+      {name: `${browserName}-phone`, use: {browserName: browserName as 'chromium' | 'webkit', viewport: {width: 390, height: 844}, launchOptions}},
+      {name: `${browserName}-laptop`, use: {browserName: browserName as 'chromium' | 'webkit', viewport: {width: 1280, height: 900}, launchOptions}},
+    ]),
   });
 }

@@ -33,14 +33,7 @@ vi.mock('../engine/store', () => ({
     fake.handlers.sayDone = fn;
     return () => {};
   },
-  onSayLive: (fn: Handler) => {
-    fake.handlers.sayLive = fn;
-    return () => {};
-  },
-  onSayLiveFail: (fn: Handler) => {
-    fake.handlers.sayLiveFail = fn;
-    return () => {};
-  },
+
   subscribe: (fn: Handler) => {
     fake.handlers.store = fn;
     return () => {};
@@ -226,58 +219,7 @@ describe('the say autoplay controller', () => {
     expect(sb.growingOf('m1')).toBeUndefined();
   });
 });
-describe('live-call suppression (say-live / say-live-fail)', () => {
-  const openOnScreen = (deps: {mainColumns: HTMLElement}) => {
-    deps.mainColumns.dataset.view = 'chat';
-    sessionState.activeId = 's1';
-    sessionState.autoSpeak = true;
-  };
-  test('say-live suppresses the clip auto-play, permanently without a fail', () => {
-    const {audio, deps} = mk();
-    openOnScreen(deps);
-    (fake.handlers.sayLive as Handler)(...(['s1', 'm1'] as never[]));
-    (fake.handlers.say as Handler)(...(['s1', 'm1', 'streamed live', undefined, false] as never[]));
-    expect(audio.play).not.toHaveBeenCalled();
 
-    expect(audio.updateRowAudio).toHaveBeenCalled();
-  });
-  test('say-live-fail after the clip arrived plays the held clip now', () => {
-    const {audio, deps} = mk();
-    openOnScreen(deps);
-    (fake.handlers.sayLive as Handler)(...(['s1', 'm1'] as never[]));
-    (fake.handlers.say as Handler)(...(['s1', 'm1', 'stream broke', undefined, false] as never[]));
-    expect(audio.play).not.toHaveBeenCalled();
-    (fake.handlers.sayLiveFail as Handler)(...(['s1', 'm1'] as never[]));
-    expect(audio.play).toHaveBeenCalledWith('s1', 'm1', 'stream broke');
-  });
-  test('say-live-fail before the clip arrived lets the say play normally', () => {
-    const {audio, deps} = mk();
-    openOnScreen(deps);
-    (fake.handlers.sayLive as Handler)(...(['s1', 'm1'] as never[]));
-    (fake.handlers.sayLiveFail as Handler)(...(['s1', 'm1'] as never[]));
-    expect(audio.play).not.toHaveBeenCalled();
-    (fake.handlers.say as Handler)(...(['s1', 'm1', 'late clip', undefined, false] as never[]));
-    expect(audio.play).toHaveBeenCalledWith('s1', 'm1', 'late clip');
-  });
-  test('a suppressed growing reply stays silent through say-done', () => {
-    const {audio, deps, sb} = mk();
-    openOnScreen(deps);
-    (fake.handlers.sayLive as Handler)(...(['s1', 'm1'] as never[]));
-    (fake.handlers.say as Handler)(...(['s1', 'm1', 'partial', undefined, true] as never[]));
-    expect(sb.growingOf('m1')).toBeUndefined();
-    (fake.handlers.sayDone as Handler)(...(['s1', 'm1', 4.2] as never[]));
-    expect(audio.play).not.toHaveBeenCalled();
-  });
-  test('no call, no frames: another msgId is unaffected by a suppression', () => {
-    const {audio, deps} = mk();
-    openOnScreen(deps);
-    (fake.handlers.sayLive as Handler)(...(['s1', 'm1'] as never[]));
-    (fake.handlers.say as Handler)(
-      ...(['s1', 'm2', 'ordinary reply', undefined, false] as never[])
-    );
-    expect(audio.play).toHaveBeenCalledWith('s1', 'm2', 'ordinary reply');
-  });
-});
 describe('id change carry', () => {
   test('the open chat, its stored id, tab selection and hands-free follow the rekey', () => {
     mk();

@@ -27,7 +27,7 @@ import { join } from "node:path";
 import { registerEngineE2E, unregisterEngineE2E } from "./testclient.ts";
 import { BATCH_MS, HARNESS_CWD, PANE, defaultSessionIdOf, fakeHerdr, type FakeHerdr, type Hooks }
   from "../test-utils/fake-herdr.ts";
-import { pushSink } from "../test-utils/push-sink.ts";
+import { relaySink as pushSink } from "../test-utils/relay-sink.ts";
 import { mungeCwd } from "../../../shared/claude-projects.ts";
 import { whyNotFakeCredentials, whyNotFakeServices, whyNotLocalUpstream } from "../test-utils/guardrails.ts";
 import { dataDirOf, metaForSession, readAgentMetas, readChatLog, seedAgent, seedTranscript }
@@ -44,9 +44,9 @@ export type { FakeHerdr };
 /* TRUE ONLY WHEN THE E2E TRANSPORT PRELOAD IS INSTALLED.
  *
  * The sealed-client specs (openSealedClient) speak `hello` on the wire, which
- * since #579 the engine answers ONLY over a WebRTC DataChannel: a raw WS hello
+ * since #579 the engine answers ONLY over a relay WebSocket: a raw WS hello
  * is refused (transport-required, close 4426). testpreload.ts swaps
- * globalThis.WebSocket for the TestClient shim that dials that DataChannel, and
+ * globalThis.WebSocket for the TestClient shim that dials that WebSocket, and
  * it is loaded ONLY by `bun run test:e2e` (bun test --preload), never by a bare
  * `bun test`. Without it the shim is absent, the native WebSocket is in place,
  * and a sealed spec can only time out. Specs gate on this and SKIP rather than
@@ -133,7 +133,7 @@ export type TestClient = {
 };
 
 /* THE one sealed-client helper. Dial like a real app device: the TestClient
- * shim (testpreload) takes the hello onto a DataChannel, runs sec, and sends
+ * shim (testpreload) takes the hello onto a WebSocket, runs sec, and sends
  * sec-ok with the key-required pair proof registered from this engine's
  * keys.json. Callers see opened application frames (sessions, attach-ok,
  * chat). Do not copy this into a spec. A raw-WS proof uses TestClient.Native. */
@@ -294,6 +294,7 @@ export async function startEngine(
   const engineEnv = {
     ...process.env,
     AGENT_PORT: String(port),
+    CYC_MUX: "herdr",
     AGENT_HOST: "127.0.0.1",
     ENGINE_HOST: "probe",
     HERDR_SOCKET_PATH: join(dir, "herdr.sock"),
@@ -416,7 +417,7 @@ export async function startEngine(
   });
   /* The engine's keys live at <CYC_DATA_DIR>/keys.json. The sealed client
    * reads a live content generation from that file to mint sec-ok.pair. */
-  registerEngineE2E(port, join(dir, "data", "keys.json"));
+  registerEngineE2E(port, join(dir, "data", "keys.json"), env.APP_SERVER_URL ?? sink.url);
 
   const open = async () => {
     const ws = new WebSocket(url);

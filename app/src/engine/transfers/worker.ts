@@ -587,7 +587,7 @@ async function moveBytes(row: TransferRow, client: TransferClient, bytes: Blob):
   // The PIPELINED PUT phase. The worker fires the missing segments back to
   // back, gated ONLY by the pipe's bufferedAmount drain between sends (the
   // whole flow control), and consumes each response asynchronously as a
-  // cumulative durability ack. The ordered reliable DataChannel owns delivery;
+  // cumulative durability ack. The ordered reliable WebSocket owns delivery;
   // the engine answers as it writes each segment to its own file, so the
   // responses are order-independent and a `have` is authoritative cumulative
   // state. MAX_OUTSTANDING caps the pending responses so an engine that takes

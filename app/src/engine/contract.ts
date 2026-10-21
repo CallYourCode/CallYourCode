@@ -1,4 +1,3 @@
-import {setAppAuth} from './appFetch';
 import {setLogAutoShip} from '../shared/logging';
 import {hostnameOf} from './hostNames';
 import {markSelfReload} from '@/shared/selfReload';
@@ -371,10 +370,6 @@ export type EngineEvents = {
 
   sayDone(sessionId: string, msgId: string, durationS?: number): void;
 
-  sayLive(sessionId: string, msgId: string): void;
-
-  sayLiveFail(sessionId: string, msgId: string): void;
-
   dequeued(sessionId: string, ts: number): void;
 
   sessionEvent(sessionId: string, ev: EngineSessionEvent): void;
@@ -462,12 +457,6 @@ export interface EngineClient {
   transcribe(audio: Blob): Promise<string>;
   transcribeStream(handlers?: SttStreamHandlers): SttStream;
 
-  hasVoiceMedia(): boolean;
-  openMediaSttStream(
-    session: string,
-    handlers: SttStreamHandlers,
-    micTrack?: MediaStreamTrack | null
-  ): SttStream;
   uploadFile(file: File): Promise<CycUpload>;
   uploadUrl(uploadId: string): string;
   audioUrl(msgId: string): string;
@@ -544,14 +533,12 @@ export type AppEngine =
   string | {url: string; engineId: string; host: string; user?: string | null};
 
 export type RtcIceServer = {urls: string[] | string; username?: string; credential?: string};
-type RtcConfig = {iceServers?: RtcIceServer[]};
 type AppConfig = {
   engines: AppEngine[];
   voice: string | null;
   voiceLabel?: string | null;
   auth?: 'clerk' | 'none';
   clerkPublishableKey?: string;
-  rtc?: RtcConfig;
 };
 let appConfig: AppConfig | null = (() => {
   try {
@@ -562,11 +549,7 @@ let appConfig: AppConfig | null = (() => {
   }
 })();
 
-setAppAuth(appConfig?.auth, appConfig?.clerkPublishableKey);
-/* Auto-shipping the diagnostic log is a LOCAL-only behavior (hosted is
- * report-only: shared/logging.ts). Enabled ONLY when a config is actually
- * known and does not name clerk: an unknown mode stays fail-private. */
-setLogAutoShip(!!appConfig && appConfig.auth !== 'clerk');
+setLogAutoShip(!!appConfig);
 
 export function hasCachedConfig(): boolean {
   return !!appConfig;
@@ -590,14 +573,13 @@ export async function loadAppConfig(): Promise<void> {
     });
     if (!res.ok) return;
     const cfg = (await res.json()) as AppConfig;
-    // Auth is independent of the engine list: a logged-out HOSTED user gets
+
     // engines:[] (engines are owner-scoped, so nothing is announced until a
     // session exists), but must still get the Clerk sign-in gate. Apply auth
     // BEFORE the empty-engines guard below, which only protects the cached engine
-    // list from a transient empty announce. Without this, hosted login never
+
     // mounts and the user can never sign in.
-    setAppAuth(cfg.auth, cfg.clerkPublishableKey);
-    setLogAutoShip(cfg.auth !== 'clerk');
+    setLogAutoShip(true);
     if (!Array.isArray(cfg?.engines) || !cfg.engines.length) return;
     appConfig = cfg;
     localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg));
@@ -660,26 +642,7 @@ export function configuredEngines(): AppEngineInfo[] {
   return out;
 }
 
-export function rtcIceServers(): RTCIceServer[] {
-  const list = appConfig?.rtc?.iceServers;
-  if (!Array.isArray(list)) return [];
-  const out: RTCIceServer[] = [];
-  for (const s of list.slice(0, 8)) {
-    const urls = typeof s?.urls === 'string' ? [s.urls] : Array.isArray(s?.urls) ? s.urls : [];
-    const clean = urls
-      .filter((u) => typeof u === 'string' && /^(stun|turns?):/.test(u))
-      .slice(0, 4);
-    if (!clean.length) continue;
-    if (typeof s.username === 'string' && typeof s.credential === 'string' && s.username) {
-      out.push({urls: clean, username: s.username, credential: s.credential});
-    } else {
-      out.push({urls: clean});
-    }
-  }
-  return out;
-}
-
-export function relaySignalUrlFor(engineWsUrl: string): string | null {
+export function relayUrlFor(engineWsUrl: string): string | null {
   const info = configuredEngines().find((e) => e.url === engineWsUrl);
   if (!info || !info.engineId || info.engineId === info.url) return null;
   try {

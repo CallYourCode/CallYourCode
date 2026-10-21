@@ -125,7 +125,7 @@ export class TunnelClient {
 
   // Backpressure passthrough for the transfer worker: resolves once the pipe's
   // buffered bytes fall back under its low-water mark, wired to the real
-  // `bufferedamountlow` event (dcpipe). The worker awaits this between pipelined
+  // bounded WebSocket drain polling. The worker awaits this between pipelined
   // segment PUTs so it fires no faster than the tunnel drains. No-op when the
   // transport declares no drain (tests, mocks): the send stays unthrottled.
   tunnelDrain(): Promise<void> {

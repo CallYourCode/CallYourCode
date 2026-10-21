@@ -39,7 +39,6 @@ export type TtsDeps = {
    * synthesised (voicectl.ts speakToCalls), alongside the clip growth. Optional
    * on purpose: a wiring without call-mode voice has no live path and the clip
    * stands alone, which is also the fallback when no call is up. */
-  streamSay?(s: TtsSession, msgId: string, chunks: string[]): void;
   /* The one wall-clock read in this module: whether the page a reply answers
    * is still recent enough to name on the say frame (ORIGIN_TTL_MS, fifteen
    * minutes). Defaults to the real clock, so production is unchanged; a test
@@ -151,11 +150,6 @@ export async function synthesizeFirst(s: TtsSession, msgId: string, text: string
  * reply as written words with no clip advertised on the persisted row. */
 export async function speakClip(s: TtsSession, msg: ChatMsg, chunks: string[], msgId: string): Promise<void> {
   const d = D();
-  /* AGENT->YOU LIVE SPEECH: hand the same chunks to the call-mode downlink
-   * BEFORE the first clip synthesis, so a live call hears the reply as it is
-   * rendered rather than as this batch clip. Independent of the clip: a failed
-   * stream leaves the clip (the fallback) exactly as it always was. */
-  d.streamSay?.(s, msgId, chunks);
   const first = await synthesizeFirst(s, msgId, chunks[0]);
   if (first < 0) {
     /* No clip at all. Clear the growing flag and un-claim the msgId on the

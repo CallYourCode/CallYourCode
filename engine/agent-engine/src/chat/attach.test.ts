@@ -17,7 +17,7 @@
  *
  * NO ENGINE PROCESS. wireCore performs server.ts's own ordered boot in-process,
  * and the frames go in through the SHIPPED dispatcher (dispatchClientFrame), so
- * "attach" here is the same function a sealed DataChannel client reaches.
+ * "attach" here is the same function a sealed WebSocket client reaches.
  *
  *   bun test agent-engine/src/chat/attach.test.ts
  */

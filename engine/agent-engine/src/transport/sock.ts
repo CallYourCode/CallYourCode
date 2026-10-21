@@ -1,16 +1,7 @@
-/* THE SOCKET SHAPES (L1 wire layer): what a connection to this engine IS.
- *
- * One Role per socket, one SockData attached to every Bun ServerWebSocket, and
- * the RtcSock duck-type a DataChannel client wears so the shared dispatch and
- * close paths never care which transport carried the frames. Types only; the
- * behaviour that fills these lives with the feature that owns it.
- */
-
 import type { Viewer } from "../terminal/terminal.ts";
-import type { RtcAttempt } from "./rtc";
 import type { EngineSecConn } from "../security/sec";
 
-export type Role = "session" | "client" | "signal";
+export type Role = "session" | "client";
 
 export type SockData = {
   role: Role | null;
@@ -78,39 +69,8 @@ export type SockData = {
    * reachable there). require mode uses it to accept `register` from loopback
    * only: the MCP is this host talking to itself. */
   remoteAddr: string | null;
-  /* #579. A `signal` socket carries one client's rtc-offer negotiation (rtc
-   * points at its RtcAttempt). A `client` is born only from a DataChannel and
-   * has transport:"rtc" and `sec` set to its per-connection sec state machine;
-   * `send` on such a sock seals through it. signalWs is the signaling WS that
-   * carried the offer (its close tears the DC down). There is no
-   * plain WebSocket client any more: /ws is signaling-only. */
-  transport?: "rtc";
-  rtc?: RtcAttempt | null;
   sec?: EngineSecConn | null;
-  signalWs?: Sock | null;
-  /* #Plan-C tunnel: drain the DataChannel pipe's send buffer (dcpipe
-   * backpressure), so a chunked {t:"res"} answer does not flood a slow link.
-   * Set only on a DataChannel client (mintRtcClient); a no-op elsewhere. */
   pipeDrain?: (() => Promise<void>) | null;
-  /* The Host header this socket arrived on, captured at upgrade. rtc.ts
-   * advertises the ICE candidate for THIS address (his cross-machine
-   * constraint), resolved to an interface IP in reachedAddrOf. */
-  reachedHost?: string | null;
-  /* Call-mode voice. The Opus media bridge for this DataChannel client, present
-   * only when the offer carried m=audio. The engine's own DTLS fp (from its
-   * answer SDP) and the peer's fp as it saw it over DTLS; the {t:"fp"} exchange
-   * checks the app's reported view against these and, on a match, opens the
-   * bridge's audio gate. All absent on a WS or media-less client. */
-  audio?: import("../voice/voice-media.ts").AudioBridge | null;
-  fpLocal?: string | null;
-  fpRemote?: string | null;
 };
-
 export type Sock = import("bun").ServerWebSocket<SockData>;
-
-/* A DataChannel client (#579): duck-types as a Sock for the shared
- * client dispatch/close/send, which only touch data/send/close. `send` seals
- * through the connection's EngineSecConn and writes the pipe. Cast to Sock at
- * the one rtc boundary rather than restructuring Sock across 9k lines. */
-export type RtcSock = { data: SockData; send(s: string): void; close(code?: number, reason?: string): void; readonly remoteAddr: string | null };
-
+export type SealedSock = { data: SockData; send(s: string): void; close(code?: number, reason?: string): void; readonly remoteAddr: string | null };

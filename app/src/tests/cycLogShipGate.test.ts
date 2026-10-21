@@ -1,7 +1,7 @@
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 
-/* THE HOSTED PRIVACY GATE (shared/logging.ts). Local ships the diagnostic log
- * automatically; hosted (clerk auth) is report-only, so the auto-shipper must
+/* THE DIAGNOSTIC PRIVACY GATE (shared/logging.ts). Local ships the diagnostic log
+ * automatically; disabled shipping is report-only, so the auto-shipper must
  * stay silent there, and silent BEFORE the mode is known at all (fail-private).
  * Module state is real state: every test imports a fresh copy. */
 
@@ -36,7 +36,7 @@ afterEach(() => {
 });
 
 describe('the log auto-ship gate', () => {
-  test('nothing ships before the mode is known (fail-private default)', async () => {
+  test('nothing ships before config is known (fail-private default)', async () => {
     const log = await freshLogging();
     log.cyclog('boot.one', {n: 1});
     log.cyclog('boot.two', {n: 2});
@@ -49,7 +49,7 @@ describe('the log auto-ship gate', () => {
   test('a local config enables shipping and the earlier lines go too', async () => {
     const log = await freshLogging();
     log.cyclog('early.line', {});
-    log.setLogAutoShip(true); // contract.ts: config known, auth not clerk
+    log.setLogAutoShip(true); // contract.ts: config known, local config confirmed
     log.cyclog('later.line', {});
     await vi.advanceTimersByTimeAsync(2000);
     const sent = posts.filter((p) => p.url.includes('/clientlog'));
@@ -59,15 +59,15 @@ describe('the log auto-ship gate', () => {
     expect(lines.join('\n')).toContain('later.line');
   });
 
-  test('a clerk (hosted) config keeps the shipper silent', async () => {
+  test('an explicitly disabled shipper stays silent', async () => {
     const log = await freshLogging();
-    log.setLogAutoShip(false); // contract.ts: cfg.auth === 'clerk'
-    log.cyclog('hosted.line', {});
+    log.setLogAutoShip(false); // explicit diagnostic privacy choice
+    log.cyclog('private.line', {});
     await vi.advanceTimersByTimeAsync(6000);
     expect(posts.filter((p) => p.url.includes('/clientlog'))).toHaveLength(0);
   });
 
-  test('?devlog=1 forces shipping even in hosted mode (a debugging session)', async () => {
+  test('?devlog=1 forces shipping before automatic shipping is enabled (a debugging session)', async () => {
     localStorage.setItem('cyc:devlog', '1');
     const log = await freshLogging();
     log.setLogAutoShip(false);

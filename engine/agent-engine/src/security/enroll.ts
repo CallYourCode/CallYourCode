@@ -44,24 +44,6 @@ export function loadAppToken(file: string, appServerUrl: string): string | null 
   }
 }
 
-/** The app-server base a saved enrollment names, or null when there is none.
- *  This is what lets `cyc pair` -> Cloud JUST WORK: the pair saves the token
- *  file with the enrolled base inside it, and the engine's next boot resolves
- *  its app-server address from here when no APP_SERVER_URL env is set, so no
- *  manual env or unit drop-in is ever needed to go live. A local enrollment
- *  writes the loopback base, which is the default anyway. */
-export function enrolledAppServerUrl(file: string): string | null {
-  try {
-    if (!existsSync(file)) return null;
-    const j = JSON.parse(readFileSync(file, "utf8")) as TokenFile;
-    if (j?.v !== 1 || typeof j.token !== "string" || !j.token) return null;
-    if (typeof j.appServerUrl !== "string" || !j.appServerUrl) return null;
-    return j.appServerUrl.replace(/\/+$/, "");
-  } catch {
-    return null;
-  }
-}
-
 export function saveAppToken(file: string, appServerUrl: string, token: string): void {
   const j: TokenFile = { v: 1, appServerUrl, token, issuedAt: Date.now() };
   mkdirSync(dirname(file), { recursive: true });
@@ -78,17 +60,10 @@ export function clearAppToken(file: string): void {
 /** One enrollment POST. Returns the issued token, or null on any failure
  *  (unreachable, refused, malformed answer); never throws -- the engine must
  *  boot and serve regardless, the same posture announceOnce has.
- *
- *  `bearer` is the one-time cyg_ onboarding grant for a HOSTED first run (the
- *  pair command's cloud flow, pairkey.ts: received over the device-flow poll
- *  after Google sign-in, or pasted in the manual fallback). The engine never
- *  handles a raw Clerk
- *  JWT. Empty on LOCAL, where enrollment is open. A HOSTED re-enroll after a
- *  401 needs a fresh grant too: run the pair command's Cloud path again. */
+ */
 export async function enrollOnce(
   appServerUrl: string,
   st: EnrollIdentity,
-  bearer = "",
 ): Promise<string | null> {
   if (!appServerUrl) return null;
   try {
@@ -97,7 +72,6 @@ export async function enrollOnce(
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(8000),

@@ -1,21 +1,3 @@
-/* The per-engine token store: who may announce and push, and as whom.
- *
- * One record per engineId, written at enrollment. The
- * TOKEN itself is never stored -- only its SHA-256 -- so the file on disk is
- * a lookup table, not a bag of bearer credentials. Verification is a hash of
- * the presented bearer and a map lookup; an empty store verifies nothing, so
- * every engine route fails closed by construction and HOSTED needs no boot
- * gate for push auth any more (the old H2 PUSH_TOKEN gate is superseded).
- *
- * Lifecycle (enroll() below): a new engineId is issued a token; the same
- * engineId with the same identity key and owner ROTATES (fresh token, the old
- * hash stops verifying); a different key or a different owner is refused; a
- * revoked engine is refused until restored. The file is engine-tokens.json
- * under the per-user state dir (bootstrap/server.ts: ~/.callyourcode/app-server)
- * (ENGINE_TOKENS_FILE overrides, for the same reason PUSH_FILE exists: a test
- * server must never write the store the real one reads), 0600, atomic write.
- */
-
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import { chmod, rename, unlink, writeFile } from "node:fs/promises";
@@ -24,7 +6,7 @@ import { fpOfSpki } from "../../../engine/shared/enroll-wire.ts";
 
 export type EngineTokenRec = {
   engineId: string;
-  owner: string;      // Clerk sub in HOSTED; the literal "local" in LOCAL
+  owner: string;      // Retained on disk for token-file compatibility. New records are local.
   spki: string;       // the identity pubkey the enrollment signature proved
   fp: string;         // fingerprint of spki, for humans and lists
   tokenHash: string;  // sha256 hex of the issued bearer; never the bearer
@@ -43,7 +25,7 @@ const sha256hex = (s: string) => createHash("sha256").update(s).digest("hex");
  * handful of machines; this only stops a hostile caller (or, in LOCAL, a
  * hostile network peer) minting endless engineIds and growing this store
  * without bound. Re-enrollment of an existing engineId is never counted. */
-export const ENGINES_PER_OWNER_MAX = 100;
+export const ENGINES_MAX = 100;
 
 const b64url = (bytes: Uint8Array) => {
   let bin = "";
@@ -111,7 +93,7 @@ export class EngineTokens {
   /** Issue (or rotate) the token for one proof-carrying enrollment. The
    *  caller has ALREADY verified the signature and the ts window and named
    *  the owner (Clerk sub, or "local"). */
-  async enroll(args: { engineId: string; spki: string; owner: string }): Promise<EnrollOutcome> {
+  async enroll(args: { engineId: string; spki: string }): Promise<EnrollOutcome> {
     const prev = this.byId.get(args.engineId);
     if (prev) {
       /* A revoked engine may not talk its way back in -- in LOCAL either,
@@ -121,22 +103,14 @@ export class EngineTokens {
        * or a hand-edited keys.json. A reinstalled engine has a fresh
        * engineId, so this is never the honest path. */
       if (prev.spki !== args.spki) return { ok: false, status: 403, error: "identity mismatch" };
-      /* No engine moves between owners implicitly. */
-      if (prev.owner !== args.owner) return { ok: false, status: 403, error: "owner mismatch" };
-    } else {
-      /* A NEW engineId only: one owner may not grow this store without
-       * bound. Far above any real fleet; says no rather than growing. */
-      let mine = 0;
-      for (const r of this.byId.values()) if (r.owner === args.owner) mine++;
-      if (mine >= ENGINES_PER_OWNER_MAX) {
-        return { ok: false, status: 429, error: "too many engines" };
-      }
+    } else if (this.byId.size >= ENGINES_MAX) {
+      return {ok: false, status: 429, error: "too many engines"};
     }
     const token = mintEngineToken();
     const now = Date.now();
     const rec: EngineTokenRec = {
       engineId: args.engineId,
-      owner: args.owner,
+      owner: "local",
       spki: args.spki,
       fp: await fpOfSpki(args.spki).catch(() => ""),
       tokenHash: sha256hex(token),
@@ -161,13 +135,9 @@ export class EngineTokens {
     return rec;
   }
 
-  /** Revoke one engine's token. `owner` scopes the action in HOSTED (an owner
-   *  may only touch their own engines); null means unscoped (LOCAL). A record
-   *  the caller may not see answers "not-found", never "forbidden", so the
-   *  route cannot be used to enumerate other owners' engineIds. */
-  async revoke(engineId: string, owner: string | null): Promise<"revoked" | "not-found"> {
+  async revoke(engineId: string): Promise<"revoked" | "not-found"> {
     const rec = this.byId.get(engineId);
-    if (!rec || (owner !== null && rec.owner !== owner)) return "not-found";
+    if (!rec) return "not-found";
     if (rec.revokedAt === null) {
       rec.revokedAt = Date.now();
       this.byHash.delete(rec.tokenHash); // the bearer dies with the record
@@ -179,9 +149,9 @@ export class EngineTokens {
   /** Clear a revocation so the engine's NEXT enrollment is accepted again.
    *  The old token stays dead; restore un-bars the door, it does not re-arm
    *  the bearer. */
-  async restore(engineId: string, owner: string | null): Promise<"restored" | "not-found"> {
+  async restore(engineId: string): Promise<"restored" | "not-found"> {
     const rec = this.byId.get(engineId);
-    if (!rec || (owner !== null && rec.owner !== owner)) return "not-found";
+    if (!rec) return "not-found";
     if (rec.revokedAt !== null) {
       rec.revokedAt = null;
       await this.persist();
@@ -189,12 +159,9 @@ export class EngineTokens {
     return "restored";
   }
 
-  /** The public listing: never hashes, never spki. `owner` scopes it in
-   *  HOSTED; null lists everything (LOCAL). */
-  list(owner: string | null): Array<Pick<EngineTokenRec, "engineId" | "owner" | "fp" | "issuedAt" | "rotatedAt" | "revokedAt">> {
+  list(): Array<Pick<EngineTokenRec, "engineId" | "owner" | "fp" | "issuedAt" | "rotatedAt" | "revokedAt">> {
     const out = [];
     for (const r of this.byId.values()) {
-      if (owner !== null && r.owner !== owner) continue;
       out.push({ engineId: r.engineId, owner: r.owner, fp: r.fp,
         issuedAt: r.issuedAt, rotatedAt: r.rotatedAt, revokedAt: r.revokedAt });
     }

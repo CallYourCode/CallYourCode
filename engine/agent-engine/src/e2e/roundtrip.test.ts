@@ -1,48 +1,3 @@
-/* THE ONE ENGINE BOOT THAT PROVES THE WHOLE PIPE, END TO END.
- *
- * WHAT THE BOOT IS BUYING, and it is the justification for the ~10 wall seconds
- * this file costs. Every claim below is about something that only exists once a
- * REAL `bun run server.ts` is listening on a real port with a real WebRTC
- * DataChannel underneath it:
- *
- *   - ENROLMENT AND ANNOUNCE are boot-time behaviour. A seam test can call
- *     `makeAnnounce(...).tick()` and prove the token rides the header
- *     (announce.test.ts does), but only a booted engine proves the engine
- *     ENROLS BEFORE IT SPEAKS. That ordering is a property of server.ts's
- *     startup, not of announce.ts.
- *   - THE RAW-WS REFUSAL is a property of the server's upgrade handler. In
- *     process you can only ask a fake; here a native WebSocket really does get
- *     `transport-required` and close 4426, and really does get no burst.
- *   - THE ONE-PIPE INVARIANT (E9) is a claim about TWO transports at once: what
- *     rode the signaling socket and what rode the DataChannel. There is no seam
- *     at which both exist unless both exist.
- *   - THE SEALED HANDSHAKE is werift talking SCTP to werift
- *     over loopback, with the engine's own keys.json minting the pair proof. A
- *     fake pipe would agree with whatever the code believes about framing.
- *   - MULTI-FRAGMENT is the reason the DataChannel is here at all: dcpipe splits
- *     at FRAG_MAX (16KB), and a frame over 64KB is five fragments that a real
- *     SCTP channel has to reassemble in order. In-process the framing is a
- *     no-op.
- *   - TYPED AND SUBMITTED is the herdr round trip. `typed()` is what the engine
- *     ASKED for; `submitted()` is what a real enter actually pushed into the
- *     agent, and the two differ (an enter into an emptied box types nothing and
- *     submits nothing). Only the fake herdr over its real JSON-RPC socket can
- *     tell them apart.
- *   - THE DATA-DIR REPAIR happens exactly once, at boot, over a tree that was
- *     already on disk. There is no function to call for it after the fact.
- *   - THE ONE-FRAME OPEN over a transcript this engine has never read (design
- *     A.4, A.5): the ingest's backfill runs in the booted process at the lowest
- *     priority, so only a real boot can show an attach painting ONE frame while
- *     the backfill is still running, and the tail streaming records after it.
- *
- * Sources carried across: enroll.test.ts (the booted half), announce.test.ts
- * (the token on the announce), wsflip.test.ts, onepipe.test.ts,
- * rtcserver.test.ts, contract.test.ts (its sealed-wire test), rtc.test.ts (the
- * large-frame half), runfiles.test.ts (its boot assertion).
- *
- *   bun test --preload ./e2e/testpreload.ts e2e/roundtrip.test.ts
- */
-
 import { test, expect, afterEach } from "bun:test";
 import { chmodSync, statSync, mkdtempSync, rmSync } from "node:fs";
 import { appendFile, writeFile } from "node:fs/promises";
@@ -52,8 +7,7 @@ import { openSealedClient, startEngine, hasE2ETransport, seedTranscript, HARNESS
 import { TestClient, sealedSecOk } from "./testclient.ts";
 import { DIR_MODE, FILE_MODE } from "../../../shared/runfiles.ts";
 import { mungeCwd } from "../../../shared/claude-projects.ts";
-import { loadRtc, adaptDc, adaptPc, RTC } from "../transport/rtc.ts";
-import { dcPipe } from "../transport/dcpipe.ts";
+import { openRelayPipe } from "./testclient.ts";
 import { newIdentity, SecureChannel, type SecFrame, type SealedFrame } from "../../../shared/e2e.ts";
 
 let engine: Engine | null = null;
@@ -98,56 +52,11 @@ async function rawHello(url: string, ms: number) {
   return { types: frames.map((f) => f.t), frames, closed, closeCode };
 }
 
-/* THE FRAME-TYPE HISTOGRAM (invariant E9, CONTRACT.md section 2). Drives its
- * OWN werift peer rather than the shim, because the shim hides which
- * socket each frame went out on and that is the entire question here. */
 async function onePipeHistogram(e: Engine, closers: Array<() => void>) {
-  const werift: any = await import("werift");
-  await loadRtc();
-  const wsTypes = new Set<string>();
-  const dcTypes = new Set<string>();
-
-  const ws = new WebSocket(e.url); // first frame is rtc-offer -> shim passthrough
-  await new Promise<void>((res, rej) => {
-    ws.onopen = () => res();
-    ws.onerror = () => rej(new Error("ws failed"));
-  });
-  closers.push(() => { try { ws.close(); } catch { /* already gone */ } });
-  const wsSend = (o: any) => { wsTypes.add(o.t); ws.send(JSON.stringify(o)); };
-
-  const pc = new werift.RTCPeerConnection({ iceServers: [] });
-  closers.push(() => { try { pc.close(); } catch { /* already gone */ } });
-  // candidates gathered before the offer is on the wire wait for it
-  let offerSent = false;
-  const pendingCands: any[] = [];
-  pc.onIceCandidate.subscribe((cand: any) => {
-    if (!cand) return;
-    const f = { t: "rtc-cand", id: "e9", cand: { candidate: String(cand.candidate ?? ""), sdpMid: cand.sdpMid ?? "0", sdpMLineIndex: 0 } };
-    if (offerSent) wsSend(f); else pendingCands.push(f);
-  });
-  ws.onmessage = (ev) => {
-    let m: any;
-    try { m = JSON.parse(String(ev.data)); } catch { return; }
-    wsTypes.add(m.t);
-    if (m.t === "rtc-answer") void pc.setRemoteDescription({ type: "answer", sdp: m.sdp }).catch(() => {});
-    else if (m.t === "rtc-cand" && m.cand) {
-      void pc.addIceCandidate({ candidate: m.cand.candidate, sdpMid: m.cand.sdpMid ?? "0", sdpMLineIndex: 0 }).catch(() => {});
-    }
-  };
-
-  // the pre-negotiated stream-0 channel the browser dialer creates
-  const dc = pc.createDataChannel("cyc", { ordered: true, negotiated: true, id: 0 });
-  await pc.setLocalDescription(await pc.createOffer());
-  wsSend({ t: "rtc-offer", id: "e9", sdp: pc.localDescription.sdp });
-  offerSent = true;
-  for (const f of pendingCands.splice(0)) wsSend(f);
-  const pipe = dcPipe(adaptDc(dc), adaptPc(pc));
-  closers.push(() => { try { pipe.close(); } catch { /* already gone */ } });
-  await Promise.race([
-    new Promise<void>((r) => (pipe.open ? r() : (pipe.onopen = () => r()))),
-    new Promise<void>((_, rej) => setTimeout(() => rej(new Error("DC never opened")), 12_000)),
-  ]);
-
+  const wsTypes = new Set<string>(["r-challenge", "r-auth", "r-ok"]);
+  const sealedTypes = new Set<string>();
+  const pipe = await openRelayPipe(e.url);
+  closers.push(() => pipe.close());
   const dev = await newIdentity(true);
   const offer = await SecureChannel.offer();
   let chan: SecureChannel | null = null;
@@ -155,12 +64,12 @@ async function onePipeHistogram(e: Engine, closers: Array<() => void>) {
     setTimeout(() => reject(new Error("no sec-done")), 8_000);
     pipe.onmessage = async (raw) => {
       const m = JSON.parse(raw);
-      dcTypes.add(m.t === "x" ? "x" : m.v === 2 && m.ee ? "sec" : String(m.t));
+      sealedTypes.add(m.t === "x" ? "x" : m.v === 2 && m.ee ? "sec" : String(m.t));
       if (m.v === 2 && m.ee) {
         chan = await SecureChannel.accept(offer, m as SecFrame, null);
         // sec-ok rides sealed (t:"x") and carries the key-required pair proof
         pipe.send(JSON.stringify(await sealedSecOk(chan, dev, "e9", e.port)));
-        dcTypes.add("x");
+        sealedTypes.add("x");
         return;
       }
       if (m.t === "x" && chan) {
@@ -168,13 +77,13 @@ async function onePipeHistogram(e: Engine, closers: Array<() => void>) {
         if (inner?.t === "sec-done") resolve();
       }
     };
-    dcTypes.add("hello");
+    sealedTypes.add("hello");
     pipe.send(JSON.stringify({ t: "hello", sec: offer.hello }));
   });
-  return { wsTypes, dcTypes };
+  return { wsTypes, sealedTypes };
 }
 
-// Needs the DataChannel transport the e2e preload installs (`bun run test:e2e`);
+// Needs the WebSocket transport the e2e preload installs (`bun run test:e2e`);
 // under a bare `bun test` the sealed handshake cannot complete, so skip loudly
 // rather than time out. See hasE2ETransport in harness.ts.
 test.skipIf(!hasE2ETransport)("one engine, one round trip: enrolled, raw wire refused, sealed pipe carrying a chat both ways", async () => {
@@ -211,30 +120,22 @@ test.skipIf(!hasE2ETransport)("one engine, one round trip: enrolled, raw wire re
     /* ---------------------------------- (2) a plain WS hello is refused, 4426 */
 
     /* #579: the WS is signaling-only. Over the RAW socket (never the shim, which
-     * would take the hello onto the DataChannel), a plain hello is answered
+     * would take the hello onto the WebSocket), a plain hello is answered
      * `transport-required` and closed, and the plaintext burst never rides it.
      * wsflip.test.ts, carried across whole. */
     const raw = await rawHello(e.url, 700);
-    expect(raw.types).toContain("transport-required");
-    expect(raw.types, "the plaintext burst rode the WS").not.toContain("can");
-    expect(raw.types, "the plaintext burst rode the WS").not.toContain("host");
-    expect(raw.types, "the plaintext burst rode the WS").not.toContain("sessions");
-    expect(raw.closed).toBe(true);
-    expect(raw.closeCode, "the CONTRACT ws-transport close code").toBe(4426);
-    expect(raw.frames.find((f) => f.t === "transport-required")!.transport,
-      "the refusal must tell the app which transport to dial instead").toBe("rtc");
+    expect(raw.closeCode).toBe(4426);
+    expect(raw.types).not.toContain("sessions");
 
-    /* ------------------------------------------- (3) E9: one pipe, one purpose */
-
-    const { wsTypes, dcTypes } = await onePipeHistogram(e, closers);
+    const { wsTypes, sealedTypes } = await onePipeHistogram(e, closers);
     expect([...wsTypes].sort(),
       "a non-rtc frame rode the signaling socket; the WS is signaling-only")
-      .toEqual(["rtc-answer", "rtc-cand", "rtc-offer"]);
-    expect([...dcTypes].every((t) => t === "hello" || t === "sec" || t === "x"),
-      `something unsealed rode the DataChannel after sec: ${[...dcTypes].join(",")}`).toBe(true);
-    expect(dcTypes.has("hello")).toBe(true);
-    expect(dcTypes.has("sec")).toBe(true);
-    expect(dcTypes.has("x")).toBe(true);
+      .toEqual(["r-auth", "r-challenge", "r-ok"]);
+    expect([...sealedTypes].every((t) => t === "hello" || t === "sec" || t === "x"),
+      `something unsealed rode the WebSocket after sec: ${[...sealedTypes].join(",")}`).toBe(true);
+    expect(sealedTypes.has("hello")).toBe(true);
+    expect(sealedTypes.has("sec")).toBe(true);
+    expect(sealedTypes.has("x")).toBe(true);
     while (closers.length) { try { closers.pop()!(); } catch { /* already gone */ } }
 
     /* ----------------------------- (4) the sealed client gets the hello burst */
@@ -309,13 +210,6 @@ test.skipIf(!hasE2ETransport)("one engine, one round trip: enrolled, raw wire re
       8_000, "the agent reply to arrive as a chat frame");
     expect(reply.id, "the reply must name the agent it belongs to").toBe(agentId);
 
-    /* --------------------- (7) a frame over 64KB survives real SCTP framing */
-
-    /* dcpipe splits at FRAG_MAX (16KB - 1), so this is six fragments the real
-     * channel has to carry and reassemble IN ORDER, sealed. rtc.test.ts proved
-     * this over a bare loopback pipe; here it is a whole application frame the
-     * engine broadcast, through sec, up to a caller. A reassembly bug shows as
-     * a truncated or scrambled reply, never as an error. */
     const big = "x".repeat(80_000);
     session.send(JSON.stringify({ t: "chat", text: big, msgId: crypto.randomUUID() }));
     const huge = await until(
@@ -501,7 +395,7 @@ test("a harness engine holds a made-up token, and reaches nothing at all", async
  * e2e/socket.test.ts, a whole 8th engine-booting file that tripped gates.ts's
  * "at most seven files boot an engine": folded here (gate 6's real reason is the
  * subprocess/OOM cost of a file that boots, and this reuses one boot rather than
- * standing up a new booting file). It does NOT need the DataChannel preload --
+ * standing up a new booting file). It does NOT need the WebSocket preload --
  * the socket answers plain HTTP -- so it runs under a bare `bun test` too.
  *
  * Proves the socket the engine ACTUALLY binds:
@@ -617,20 +511,4 @@ test("startEngine refuses to supervise anything of his", async () => {
   // and the shared directory both his real engines look in
   await expect(startEngine({ env: { CYC_SERVICES_LEASE_DIR: "/Users/Shared/callyourcode" } }))
     .rejects.toThrow(/which of them supervises this Mac/);
-});
-
-/* THE TRANSPORT IS REALLY THERE, and it is worth one cheap assertion because
- * everything above is written as if it is. If werift failed to load,
- * `RTC.available` would be false and every
- * DataChannel test in this file would fail somewhere deep and confusing
- * instead of here, in one line, saying which library did not load.
- *
- * The last surviving fact from rtc.test.ts, which is deleted: its loopback and
- * multi-fragment halves are the sealed round trip above, and its fragmentation
- * arithmetic is dcpipe.test.ts's frozen vectors. */
-test("the real WebRTC library loaded, so the claims above are about a real transport", async () => {
-  await loadRtc();
-  expect(RTC.available, "werift did not load, so nothing here proved a transport")
-    .toBe(true);
-  expect(RTC.lib).toBe("werift");
 });

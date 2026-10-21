@@ -1,7 +1,7 @@
 /* THE RESUMABLE TRANSFER UNDER A FLAPPING PIPE, OVER A REAL BOOTED ENGINE
  * (Lane A, the incident's failure mode). A 4 MiB voice note goes to the real
  * engine through the sealed tunnel while CYC_CHAOS_DROP_AFTER_BYTES=614400
- * kills the DataChannel every ~2.3 chunks. The client does what the app's
+ * kills the WebSocket every ~2.3 chunks. The client does what the app's
  * transfer worker does: reconnect, ask the engine what it has, send only the
  * missing chunks, finish once. What must hold at the end:
  *
@@ -11,7 +11,7 @@
  *     really happened and a chunk in flight really was lost).
  *
  * Only a booted engine can prove this: the drop is the real tunnel-glue closing
- * the real RtcSock, the resume is the real transfer route reading its own chunk
+ * the real SealedSock, the resume is the real transfer route reading its own chunk
  * dir, and finish hands the assembled file to the real /user-audio. One test,
  * not a suite (testing doctrine: engine-boot E2E stays in the low single
  * digits); the rest of Lane A is pinned by routes/transfer.test.ts and the

@@ -19,18 +19,15 @@ export async function fakeEngine(engineId?: string): Promise<FakeEngine> {
   };
 }
 
-/** POST /engines/enroll with a correctly signed body. Extra headers carry a
- *  Clerk session bearer for HOSTED specs. */
 export async function enrollEngine(
   url: string,
   eng: FakeEngine,
-  headers: Record<string, string> = {},
   ts?: number,
 ): Promise<{ status: number; token?: string; json: any }> {
   const body = await signEnroll(eng, ts);
   const res = await fetch(`${url}/engines/enroll`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   const json = (await res.json().catch(() => null)) as any;
@@ -42,10 +39,9 @@ export async function enrollEngine(
 export async function enrolledBearer(
   url: string,
   eng?: FakeEngine,
-  headers: Record<string, string> = {},
 ): Promise<{ eng: FakeEngine; token: string; bearer: { authorization: string } }> {
   const e = eng ?? await fakeEngine();
-  const r = await enrollEngine(url, e, headers);
+  const r = await enrollEngine(url, e);
   if (!r.token) throw new Error(`enrollment failed: http ${r.status} ${JSON.stringify(r.json)}`);
   return { eng: e, token: r.token, bearer: { authorization: `Bearer ${r.token}` } };
 }
