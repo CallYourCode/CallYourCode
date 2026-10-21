@@ -53,9 +53,9 @@ async function rawHello(url: string, ms: number) {
 }
 
 async function onePipeHistogram(e: Engine, closers: Array<() => void>) {
-  const wsTypes = new Set<string>(["r-challenge", "r-auth", "r-ok"]);
+  const wsTypes = new Set<string>();
   const sealedTypes = new Set<string>();
-  const pipe = await openRelayPipe(e.url);
+  const pipe = await openRelayPipe(e.url, (frame) => wsTypes.add(frame.t));
   closers.push(() => pipe.close());
   const dev = await newIdentity(true);
   const offer = await SecureChannel.offer();

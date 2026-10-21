@@ -86,7 +86,7 @@ export async function sealedSecOk(
 type Listener = (ev: any) => void;
 
 /** Raw authenticated WS for tests inspecting the sealed wire itself. */
-export async function openRelayPipe(engineUrl: string): Promise<Pipe> {
+export async function openRelayPipe(engineUrl: string, observe?: (frame: {t: string}, direction: "in" | "out") => void): Promise<Pipe> {
   const port = portOfEngineUrl(engineUrl);
   const path = e2eByPort.get(port);
   const base = relayByPort.get(port);
@@ -101,9 +101,12 @@ export async function openRelayPipe(engineUrl: string): Promise<Pipe> {
     pipe.onclose = (code) => { clearTimeout(timer); reject(new Error("relay closed: " + code)); };
     pipe.onmessage = (raw) => {
       const m = JSON.parse(raw);
+      observe?.(m, "in");
       if (m.t === "r-challenge") void signId(dev.keyPair.privateKey,
         te.encode(`${m.nonce}|${st.engineId}|cyc-relay-auth-v1`)).then((sig) => {
-          pipe.send(JSON.stringify({t: "r-auth", spki: dev.spki, sig: b64encode(sig)}));
+          const frame = {t: "r-auth", spki: dev.spki, sig: b64encode(sig)};
+          observe?.(frame, "out");
+          pipe.send(JSON.stringify(frame));
         });
       else if (m.t === "r-ok") { clearTimeout(timer); pipe.onmessage = null; pipe.onclose = null; resolve(); }
     };
@@ -141,6 +144,7 @@ export class TestClient {
   private pipe: Pipe | null = null;
   private chan: SecureChannel | null = null;
   private secReady = false;
+  private closeEmitted = false;
   private sealChain: Promise<unknown> = Promise.resolve();
 
   constructor(url: string | URL) {
@@ -154,8 +158,8 @@ export class TestClient {
     this.sig.onerror = (ev: any) => this.fire("error", ev);
     this.sig.onclose = (ev: any) => {
       // The raw session socket follows the engine process lifecycle.
-      this.readyState = 3;
-      this.fire("close", ev);
+      if (this.mode === "sealed") return;
+      this.fireClose(ev);
     };
     this.sig.onmessage = (ev: any) => this.onSig(ev);
   }
@@ -189,6 +193,7 @@ export class TestClient {
     this.readyState = 3;
     try { this.pipe?.close(); } catch {}
     try { this.sig.close(code, reason); } catch {}
+    if (this.mode === "sealed") this.fireClose({code: code ?? 1000, reason: reason ?? ""});
   }
 
   addEventListener(type: string, fn: Listener): void {
@@ -198,6 +203,13 @@ export class TestClient {
   }
   removeEventListener(type: string, fn: Listener): void {
     this.listeners.get(type)?.delete(fn);
+  }
+
+  private fireClose(event: {code: number; reason?: string}): void {
+    if (this.closeEmitted) return;
+    this.closeEmitted = true;
+    this.readyState = 3;
+    this.fire("close", event);
   }
 
   private fire(type: string, ev: any): void {
@@ -225,8 +237,10 @@ export class TestClient {
   private async dial(): Promise<void> {
     try {
       const pipe = await openRelayPipe(this.url);
+      if (this.readyState === 3) { pipe.close(); return; }
       this.pipe = pipe;
-      pipe.onclose = (code, reason) => { this.readyState = 3; this.fire("close", {code, reason}); };
+      pipe.onclose = (code, reason) => this.fireClose({code, reason});
+      this.sig.close(1000, "sealed-relay");
       await this.handshake(pipe);
     } catch (err) {
       this.fire("error", {message: String(err)});
