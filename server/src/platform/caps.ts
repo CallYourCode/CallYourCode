@@ -55,16 +55,6 @@ export const PUSH_RATE_MAX = 100;
 /** The rolling minute the cap is measured over. */
 export const PUSH_RATE_WINDOW_MS = 60_000;
 
-/* ------------------------- the unauthenticated device flow (cloud onboard) */
-/** Device-session CREATES per source per rolling window. A real pairing is
- *  ONE create (a stuck human retries a handful of times); a loop churning the
- *  500-session store meets this wall inside its first second. */
-export const ENROLL_DEVICE_RATE_MAX = 10;
-/** Polls per source per rolling window. A real engine polls every 2s, which
- *  is 30 a minute; double that so jitter never grazes the cap, while a
- *  hammer is held to one poll a second. */
-export const ENROLL_POLL_RATE_MAX = 60;
-
 /* -------------------------------------------------- the outgoing batch window */
 /* BATCH_MS is the engines' window too, and BATCH_LAG_MS is the whole trick: an
  * engine firing exactly on :10 posts here at about :10.00x, and this server

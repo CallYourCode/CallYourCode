@@ -1,32 +1,20 @@
-/* Boot the real engine inside a cell, against a real mux.
- *
- * Reuses the engine's own e2e harness (engine/agent-engine/src/e2e/harness.ts)
- * as a library for everything importable: freePort, openSealedClient,
- * framesFor, registerEngineE2E (via testclient), the guardrails and the push
- * sink. It does NOT call startEngine: on today's tree startEngine copies
- * `src/..` as agent-engine and `agent-engine/shared` (which does not exist,
- * shared/ is engine/shared) and spawns `agent-engine/src/server.ts` (the
- * server is src/runtime/server.ts), so it cannot boot an engine at all. That
- * is an engine-side path drift, outside this lane; this file mirrors its env
- * block and spawns the real server from the cell's private copy of the tree.
- *
- * The sealed client is the bench's own (sealed-client.ts), so no test preload
- * is needed; the pair proof is registered here from this engine's keys.json. */
+/* Boot a scratch engine against a real mux and the production relay fixture.
+ * Reuse the engine E2E guardrails and pair-proof registration. */
 
 import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { freePort, pushSink, whyNotFakeCredentials, whyNotFakeServices, whyNotLocalUpstream }
+import { freePort, whyNotFakeCredentials, whyNotFakeServices, whyNotLocalUpstream }
   from "../../engine/agent-engine/src/e2e/harness.ts";
+import { relaySink } from "../../engine/agent-engine/src/test-utils/relay-sink.ts";
 import { registerEngineE2E, unregisterEngineE2E } from "../../engine/agent-engine/src/e2e/testclient.ts";
 
 export { freePort };
 
 export type EngineProc = {
   port: number;
-  /** signaling: the engine's loopback /ws */
+  sink: ReturnType<typeof relaySink>;
+  /** Engine identity URL used by the E2E client to find its scratch relay. */
   url: string;
-  /** the ICE address to name in the signaling Host header (CELL_ADDR) */
-  reached: string;
   http: string;
   dataDir: string;
   /** stdout+stderr lines, "<ms> <line>", from every boot in this cell */
@@ -54,7 +42,7 @@ export type BootOpts = {
   /** reuse the data dir of a previous boot (engine restart scenarios) */
   keepData?: boolean;
   /** the push sink of a previous boot, when one is kept across restarts */
-  sink?: ReturnType<typeof pushSink>;
+  sink?: ReturnType<typeof relaySink>;
   healthMs?: number;
 };
 
@@ -81,10 +69,13 @@ export function stageEngineTree(opts: { from: string; to: string; deps?: string 
   cp("engine/mcp/src");
   cp("engine/mcp/package.json");
   cp("scripts");
+  cp("server/src");
   for (const t of ["cell", "fake-model", "lib", "scenarios", "matrix.yaml"]) cp(`testbench/${t}`);
   const deps = opts.deps ?? (existsSync("/opt/engine-deps") ? "/opt/engine-deps" : join(from, "engine"));
   const ae = join(to, "engine", "agent-engine", "node_modules");
   const mcp = join(to, "engine", "mcp", "node_modules");
+  const serverDeps = join(to, "server", "node_modules");
+  if (!existsSync(serverDeps)) symlinkSync(join(deps, "agent-engine", "node_modules"), serverDeps);
   rmSync(ae, { recursive: true, force: true });
   rmSync(mcp, { recursive: true, force: true });
   if (existsSync(join(deps, "agent-engine", "node_modules"))) symlinkSync(join(deps, "agent-engine", "node_modules"), ae);
@@ -105,14 +96,8 @@ export async function bootEngine(opts: BootOpts): Promise<EngineProc> {
   writeFileSync(join(scratch, "credentials.json"),
     JSON.stringify({ claudeAiOauth: { accessToken: "harness-not-a-real-token" } }));
   if (!existsSync(join(scratch, "services.json"))) writeFileSync(join(scratch, "services.json"), "[]");
-  const sink = opts.sink ?? pushSink();
+  const sink = opts.sink ?? relaySink();
 
-  /* CELL_ADDR: the cell's private non-loopback address (entrypoint.sh), the
-   * ICE address both ends offer. The engine itself stays on loopback: its /ws
-   * is loopback-only (routeRequest), and the address it advertises comes from
-   * the signaling Host header (rtc-glue reachedAddrOf), which the bench's
-   * dialer sets to CELL_ADDR. --host mode has no CELL_ADDR: loopback only. */
-  const addr = process.env.CELL_ADDR || "127.0.0.1";
   const engineEnv: Record<string, string> = {
     ...(process.env as Record<string, string>),
     AGENT_PORT: String(port),
@@ -177,10 +162,24 @@ export async function bootEngine(opts: BootOpts): Promise<EngineProc> {
   }
   if (!healthy) {
     proc.kill("SIGKILL");
+    await proc.exited;
+    if (!opts.sink) sink.stop();
     throw new Error(`[engine-boot] engine did not answer /health in ${healthMs}ms; last lines:\n${lines.slice(-30).join("\n")}`);
   }
+  // HTTP health can precede enrolment and the outbound relay's first retry.
+  // Do not hand a browser client an engine whose data path is not ready yet.
+  for (let i = 0; i < healthMs / 100 && !lines.some((line) => line.includes("relay.up")); i++) {
+    if (proc.exitCode !== null) break;
+    await Bun.sleep(100);
+  }
+  if (!lines.some((line) => line.includes("relay.up"))) {
+    proc.kill("SIGKILL");
+    await proc.exited;
+    if (!opts.sink) sink.stop();
+    throw new Error(`[engine-boot] relay did not connect; last lines:\n${lines.slice(-30).join("\n")}`);
+  }
   /* The sealed-client pair proof, from this engine's own keys.json. */
-  registerEngineE2E(port, join(dataDir, "keys.json"));
+  registerEngineE2E(port, join(dataDir, "keys.json"), sink.url);
 
   const stop = async (graceMs = 3000) => {
     if (proc.exitCode !== null) return;
@@ -196,7 +195,7 @@ export async function bootEngine(opts: BootOpts): Promise<EngineProc> {
     try { unregisterEngineE2E(port); } catch { /* fine */ }
   };
   return {
-    port, url: `ws://127.0.0.1:${port}/ws`, reached: addr, http, dataDir, lines, pid: proc.pid, exited: proc.exited,
+    port, sink, url: `ws://127.0.0.1:${port}/ws`, http, dataDir, lines, pid: proc.pid, exited: proc.exited,
     since: (ms) => lines.filter((l) => Number(l.slice(0, l.indexOf(" "))) >= ms),
     stop, kill,
     post: (path, body) => fetch(`${http}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),

@@ -16,7 +16,7 @@ source wins and the document is the bug.
 | 2 | engine <> app (sealed wire) | [02-engine-app.md](02-engine-app.md) | `app/src/engine/contract.ts`, `engine/agent-engine/src/transport/frames.ts` |
 | 3 | engine <> server | [03-engine-server.md](03-engine-server.md) | `engine/shared/enroll-wire.ts`, `server/src/routes/engines.ts` |
 | 4 | server <> app | [04-server-app.md](04-server-app.md) | `server/src/routes/*.ts` |
-| 5 | WebRTC transport | [05-webrtc.md](05-webrtc.md) | `engine/agent-engine/src/transport/rtc.ts`, `engine/shared/dcpipe.ts` + vectors |
+| 5 | Sealed WebSocket transport | [05-websocket.md](05-websocket.md) | `engine/shared/ws-pipe.ts`, `server/src/delivery/relay.ts`, `engine/agent-engine/src/transport/relay.ts` |
 | 6 | end-to-end encryption | [06-e2ee.md](06-e2ee.md) | `engine/shared/e2e.ts` + `engine/shared/fixtures/e2e-vectors.json` |
 | 7 | notifications | [07-notifications.md](07-notifications.md) | `server/src/routes/push.ts`, `engine/agent-engine/src/security/sealpush.ts` |
 | 8 | plugins | [08-plugins.md](08-plugins.md) | `engine/agent-engine/src/plugins/platform/spec.ts` |
@@ -33,15 +33,15 @@ fields, and unknown `kind` values are ignored or held un-rendered, never
 errors. A new feature is a new frame or a new optional field.
 
 **Sealed wire only.** Everything content-bearing between app and engine rides
-the ONE sealed DataChannel: chat, sessions, terminal, voice, plugins, files
-(tunneled HTTP as `req`/`res` frames). There is no bearer token anywhere; the
-channel is the auth (`transport/httpx.ts`). The engine trusts exactly two
+the one sealed WebSocket relay channel: chat, sessions, terminal, voice, plugins, files
+(tunneled HTTP as `req`/`res` frames). There is no browser content-route bearer token; the
+sealed channel is the auth (`transport/httpx.ts`). The engine trusts exactly two
 callers: its own host over true loopback, and the sealed tunnel.
 
-**The server is blind.** The app server does login, engine discovery, and
-notifications, nothing else. It forwards signaling frames as opaque strings and
-relays sealed push blobs it cannot open. No key, no chat text, no audio byte
-crosses it.
+**The server is blind.** The local app-server serves the page, discovery, settings,
+notifications and the load-bearing data relay. It forwards sealed frames and
+push blobs it cannot open. No content key, chat text or audio plaintext
+crosses it. App-server loss interrupts browser connections.
 
 **Records match what was measured.** An ack names the exact send (cid); a
 refusal says why and stays retriable; unread counts come from the one read

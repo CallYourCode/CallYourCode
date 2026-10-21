@@ -79,3 +79,10 @@ agent's id to act in their scope.
 
     cyc plugin usage today --session ag-3fK9x2mPq81LbR0w
     cyc plugin crons count --session ag-8Qw1nT5cZk2vXo9d
+
+## Device connection
+
+The user opens their own app-server locally or over Tailscale HTTPS and runs
+`cyc pair` for its pairing link. Browser traffic is end-to-end encrypted over
+the app-server's WebSocket relay. Keep pairing keys private; never paste them
+into a chat or log. Agent MCP traffic stays on the engine's loopback socket.

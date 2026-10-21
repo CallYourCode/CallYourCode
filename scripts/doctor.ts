@@ -155,7 +155,7 @@ export async function runDoctor(env: EngineEnv, io: DoctorIO): Promise<DoctorRes
   const target = resolveEngine(env);
   const ports = resolvePorts(env);
   out.push(`  engine: ${engineLabel(target)}`);
-  out.push(`  ports:  APP=${ports.APP_PORT} AGENT=${ports.AGENT_PORT} VOICE=${ports.VOICE_PORT} TURN=${ports.TURN_PORT}`);
+  out.push(`  ports:  APP=${ports.APP_PORT} AGENT=${ports.AGENT_PORT} VOICE=${ports.VOICE_PORT}`);
   const bunNote = bunVersionNote(io.bunVersion);
   out.push(`  bun:    ${io.bunVersion}${bunNote ? ` -- ${bunNote}` : " (pinned)"}`);
 

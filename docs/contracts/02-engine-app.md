@@ -11,10 +11,11 @@ OWN stable ids so harness churn never breaks the conversation.
 ## Parties and transport
 
 - engine: `engine/agent-engine/src/runtime/server.ts` (:10101). The WS at the
-  engine origin is SIGNALING-ONLY; a plaintext `hello` there is refused with
+  engine origin is loopback MCP/session registration only; a plaintext `hello`
+  there is refused with
   `transport-required` and close 4426 (`transport/frames.ts`).
 - app: `app/src/engine/client.ts` (WsEngineClient). All data frames ride the
-  WebRTC DataChannel `cyc` (contract 05) sealed by the v2 handshake
+  WebSocket relay (contract [05](05-websocket.md)), sealed by the v2 handshake
   (contract 06). One dispatcher serves each end whatever pipe carried it:
   engine `dispatchClientFrame` (`transport/frames.ts`), app `dispatchFrame`
   (`app/src/engine/frames/`).
@@ -34,7 +35,7 @@ EngineEvents, EngineClient) and the engine's frame producers
 words?, partials?}`, `interrupt {id}`, `compact {id}`,
 `answer {id, fingerprint, choice}`, `session-tail {id, on}`,
 `term-open/resize/input/scroll/close`, `req` / `req-abort` (the tunnel),
-`fp`, `voice-ctl`, `stt-open/stt-b/stt-close` (contract 01).
+`stt-open/stt-b/stt-close` (contract 01).
 
 `utterance.partials` is `[{id, text, upToS}]`: the words the device's
 streaming decoder already SETTLED for a recording and how far into the audio
@@ -51,8 +52,8 @@ The hello burst first (`sendHelloBurst`): `can {list}`, `plugins {list}`
 (only when the engine loaded any), `voice {url, healthy, ready, download?}`,
 `host {user, host}`, `sessions {list, tabs?}`. Then event-driven:
 `chat`, `attach-ok`, `ack {id, cid, dup, msgId?, err?}`,
-`send-failed {id, cid, reason}`, `say` / `say-grow` / `say-done` /
-`say-live` / `say-live-fail`, `session-event`, `dequeued`,
+`send-failed {id, cid, reason}`, `say` / `say-grow` / `say-done`,
+`session-event`, `dequeued`,
 `term-frame` / `term-mode` / `term-size` / `term-closed`, `answer-result`,
 `compact-result`, `session-id-changed`, `res` (tunnel), `stt-*`, `ping`.
 
@@ -136,7 +137,8 @@ by `engine/shared/fixtures/tunnel-vectors.json`: `CHUNK` 256KB, meta on the
 first frame only, `REASSEMBLE_MAX` 32MB. The engine feeds the same
 `routeRequest` localhost uses and marks the request `markSealedTunnel`
 (`transport/httpx.ts`), which with true loopback is the ONLY thing
-`requireOwner` accepts. No bearer token exists.
+`requireOwner` accepts. No browser bearer token opens a content route; the
+outbound engine relay uses a separate issued registration token.
 
 ### Message roles
 
@@ -160,6 +162,8 @@ before promising them. Unknown frames, unknown fields, and unknown
 - Liveness: 5s check; after 20s inbound silence with a visible attached chat,
   one `ping`; no frame within 10s presumes the pipe dead, redelivers unacked,
   redials via the sync manager's backoff.
+- Engine or app-server restart closes the relay clients. Every reconnect
+  makes a fresh sealed handshake, then reattaches.
 - Engine restart: sessions and chat come back from the engine's own store;
   the app re-attaches with `have` on the settled edge; terminal viewers and
   the tail re-arm per pipe (`sendPostHello`).

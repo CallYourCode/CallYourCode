@@ -88,9 +88,9 @@ sequenceDiagram
 - A device with no stored key for `kid` (never paired, wiped DB) sees the
   generic banner; tapping opens the app which syncs the real message over the
   sealed wire.
-- Server down: notifications silently stop; nothing else degrades, and the
-  engine's posts are fire-and-forget with the announce token machinery
-  handling 401s (contract 03).
+- Server down: notifications stop and browser relay connections close
+  (contract 05). Local terminal sessions keep running; the announce token
+  machinery handles 401s when service returns (contract 03).
 
 ## Security invariants
 

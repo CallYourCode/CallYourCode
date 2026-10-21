@@ -48,3 +48,10 @@ machine declares, or writing a new plugin: PLUGINS.md.
 If the app's tools are missing from this session, the `callyourcode`
 server is registered per project in `.mcp.json` and needs the engine
 running: SETUP.md.
+
+## Device connection
+
+The user opens their own app-server locally or over Tailscale HTTPS and runs
+`cyc pair` for its pairing link. Browser traffic is end-to-end encrypted over
+the app-server's WebSocket relay. Keep pairing keys private; never paste them
+into a chat or log. Agent MCP traffic stays on the engine's loopback socket.

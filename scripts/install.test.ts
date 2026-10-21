@@ -91,10 +91,11 @@ test("--dry-run Linux names the systemd unit paths and touches nothing", async (
   expect(out).toContain(join(home, ".config/systemd/user/cyc-agent-engine.service"));
   expect(out).toContain(join(home, ".config/systemd/user/cyc-app-server.service"));
   expect(out).toContain(join(home, ".config/systemd/user/cyc-voice-engine.service"));
-  expect(out).toContain(join(home, ".config/systemd/user/cyc-turn.service"));
   expect(out).toContain("+ systemctl --user daemon-reload");
-  expect(out).toContain("+ systemctl --user enable cyc-turn.service cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service");
-  expect(out).toContain("+ systemctl --user restart cyc-turn.service cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service");
+  expect(out).not.toContain("would write: " + join(home, ".config/systemd/user/cyc-turn.service"));
+  expect(out).toContain("Open the pairing link on this machine or over Tailscale.");
+  expect(out).toContain("+ systemctl --user enable cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service");
+  expect(out).toContain("+ systemctl --user restart cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service");
   // no standalone whisper unit any more: stt serves batch too
   expect(out).not.toContain("cyc-whisper.service");
 
@@ -110,22 +111,22 @@ function writeVoiceDisabledMarker(home: string) {
   writeFileSync(join(dir, "voice-disabled"), "");
 }
 
-test("marker present on Linux: enable+restart skip ONLY the voice unit; the other three stay", async () => {
+test("marker present on Linux: enable+restart skip ONLY the voice unit; the other two stay", async () => {
   const home = scratchHome();
   writeVoiceDisabledMarker(home);
   const { out, code } = await dryRun("Linux", home);
 
   expect(code).toBe(0);
-  // the three non-voice units are still enabled + restarted, voice is dropped
-  expect(out).toContain("+ systemctl --user enable cyc-turn.service cyc-app-server.service cyc-agent-engine.service");
-  expect(out).toContain("+ systemctl --user restart cyc-turn.service cyc-app-server.service cyc-agent-engine.service");
-  // the four-unit lines (with voice) must NOT appear
-  expect(out).not.toContain("+ systemctl --user enable cyc-turn.service cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service");
-  expect(out).not.toContain("+ systemctl --user restart cyc-turn.service cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service");
+  // the two non-voice units are still enabled + restarted, voice is dropped
+  expect(out).toContain("+ systemctl --user enable cyc-app-server.service cyc-agent-engine.service");
+  expect(out).toContain("+ systemctl --user restart cyc-app-server.service cyc-agent-engine.service");
+  // the three-unit lines (with voice) must NOT appear
+  expect(out).not.toContain("+ systemctl --user enable cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service");
+  expect(out).not.toContain("+ systemctl --user restart cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service");
   expect(out).toContain("voice: disabled (cyc voice off); leaving it off");
 });
 
-test("marker present on Darwin: bootstrap skips ONLY the voice plist; the other three stay", async () => {
+test("marker present on Darwin: bootstrap skips ONLY the voice plist; the other two stay", async () => {
   const home = scratchHome();
   writeVoiceDisabledMarker(home);
   const { out, code } = await dryRun("Darwin", home);
@@ -133,7 +134,6 @@ test("marker present on Darwin: bootstrap skips ONLY the voice plist; the other 
   expect(code).toBe(0);
   const gui = `gui/${process.getuid!()}`;
   const p = (label: string) => join(home, "Library/LaunchAgents", `${label}.plist`);
-  expect(out).toContain(`+ launchctl bootstrap ${gui} ${p("com.callyourcode.turn")}`);
   expect(out).toContain(`+ launchctl bootstrap ${gui} ${p("com.callyourcode.app-server")}`);
   expect(out).toContain(`+ launchctl bootstrap ${gui} ${p("com.callyourcode.agent-engine")}`);
   // the voice plist is written (unit still installed) but NEVER bootstrapped
@@ -141,12 +141,12 @@ test("marker present on Darwin: bootstrap skips ONLY the voice plist; the other 
   expect(out).toContain("voice: disabled (cyc voice off); leaving it off");
 });
 
-test("no marker: all four units enable as before (Linux) and bootstrap (Darwin)", async () => {
-  // Linux: the four-unit enable line is intact and no voice-off notice appears.
+test("no marker: all three units enable as before (Linux) and bootstrap (Darwin)", async () => {
+  // Linux: the three-unit enable line is intact and no voice-off notice appears.
   const linuxHome = scratchHome();
   const { out: linux, code: lc } = await dryRun("Linux", linuxHome);
   expect(lc).toBe(0);
-  expect(linux).toContain("+ systemctl --user enable cyc-turn.service cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service");
+  expect(linux).toContain("+ systemctl --user enable cyc-voice-engine.service cyc-app-server.service cyc-agent-engine.service");
   expect(linux).not.toContain("voice: disabled (cyc voice off)");
   expectUntouched(linuxHome);
 
@@ -168,7 +168,6 @@ test("--dry-run Darwin names the LaunchAgent plist paths and touches nothing", a
   expect(out).toContain(join(home, "Library/LaunchAgents/com.callyourcode.agent-engine.plist"));
   expect(out).toContain(join(home, "Library/LaunchAgents/com.callyourcode.app-server.plist"));
   expect(out).toContain(join(home, "Library/LaunchAgents/com.callyourcode.voice-engine.plist"));
-  expect(out).toContain(join(home, "Library/LaunchAgents/com.callyourcode.turn.plist"));
   expect(out).not.toContain("com.callyourcode.whisper.plist");
 
   expectUntouched(home);
@@ -273,9 +272,12 @@ test("the herdr-server unit runs `herdr server` and is WantedBy default.target (
 
 test("the installer never upgrades or restarts herdr (2026-09-22: a herdr server stop kills every pane)", async () => {
   const script = await Bun.file(join(REPO_ROOT, "scripts/install.sh")).text();
-  expect(script).not.toContain("herdr server stop");
-  expect(script).not.toContain("herdr.dev/install.sh | sh");
-  expect(script).not.toContain("brew upgrade herdr");
+  // Ignore comments and standalone literal echo guidance, not commands.
+  // Echo with substitutions or a trailing command must still be checked.
+  const commands = script.split("\n").filter((line) => !/^\s*(#.*|echo\s+"[^"$`]*"\s*(?:>&2)?\s*)$/.test(line)).join("\n");
+  expect(commands).not.toContain("herdr server stop");
+  expect(commands).not.toContain("herdr.dev/install.sh | sh");
+  expect(commands).not.toContain("brew upgrade herdr");
 });
 
 test("CYC_MUX=herdr opts into herdr: CYC_MUX=herdr named, herdr installed", async () => {
@@ -453,9 +455,9 @@ test("engine unit is KillMode=process so a restart never kills the tmux server +
   const engineUnit = heredocFor(script, "ENGINE_UNIT");
   expect(engineUnit.split("\n")).toContain("KillMode=process");
 
-  // Only the engine spares its children; the other three units have no
+  // Only the engine spares its children; the other two units have no
   // long-lived children to spare and keep the control-group default.
-  for (const unit of ["APP_UNIT", "VOICE_UNIT", "TURN_UNIT"]) {
+  for (const unit of ["APP_UNIT", "VOICE_UNIT"]) {
     expect(heredocFor(script, unit)).not.toContain("KillMode");
   }
 });
@@ -489,32 +491,6 @@ test("--dry-run delegates all harnesses to one harness-integration call and touc
   expect(existsSync(join(home, ".config/opencode"))).toBe(false);
   expect(existsSync(join(home, ".codex"))).toBe(false);
   expectUntouched(home);
-});
-
-/** A PATH with a fake `tailscale` first: `up` answers a tailnet, else it fails
- *  like a machine without Tailscale running. */
-function fakeTailscale(up: boolean): string {
-  const dir = scratchHome();
-  const script = up
-    ? `#!/bin/sh\ncase "$1" in status) echo '{"Self":{"DNSName":"box.tail1234.ts.net."}}';; ip) echo 100.64.0.7;; esac\n`
-    : "#!/bin/sh\nexit 1\n";
-  writeFileSync(join(dir, "tailscale"), script, { mode: 0o755 });
-  return `${dir}:${process.env.PATH}`;
-}
-
-test("no tailnet: TURN host and relay IP are 127.0.0.1, never a .local hostname", async () => {
-  const home = scratchHome();
-  const { out, code } = await dryRun("Darwin", home, { PATH: fakeTailscale(false) });
-  expect(code).toBe(0);
-  expect(out).toContain("turn: host=127.0.0.1 ip=127.0.0.1");
-  expect(out).not.toMatch(/turn: host=\S*\.local/);
-});
-
-test("tailnet up: TURN host is the MagicDNS name and the relay IP its tailnet IPv4", async () => {
-  const home = scratchHome();
-  const { out, code } = await dryRun("Linux", home, { PATH: fakeTailscale(true) });
-  expect(code).toBe(0);
-  expect(out).toContain("turn: host=box.tail1234.ts.net ip=100.64.0.7");
 });
 
 test("the voice engine gets a daily restart: a jittered timer on Linux, a calendar job on macOS", async () => {
@@ -553,3 +529,110 @@ test("the daily restart script waits for quiet and skips a voice-off install", a
     quiet.stop(true)
   }
 })
+
+// Real installer effects, exclusively in a fake source tree and scratch HOME.
+// Every external service/dependency command is stubbed; no user manager called.
+test("upgrade removes obsolete transport safely, preserves data, and is idempotent", async () => {
+  const repo = localRepoFixture(true);
+  const home = scratchHome();
+  const data = join(home, ".callyourcode");
+  const units = join(home, ".config/systemd/user");
+  const bin = join(home, ".local/bin");
+  mkdirSync(units, { recursive: true });
+  mkdirSync(data, { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(home, ".bun/bin"), { recursive: true });
+  writeFileSync(join(home, ".bun/bin/bun"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const kept = ["keys.json", "app-server/push-subs.json", "app-server/app-settings.json", "state/app-server-url", "agents/ag-test/meta.json", "voice-disabled"];
+  for (const name of kept) {
+    mkdirSync(join(data, name, ".."), { recursive: true });
+    writeFileSync(join(data, name), `keep-${name}`);
+  }
+  writeFileSync(join(data, "turn.env"), "obsolete-secret");
+  writeFileSync(join(units, "cyc-turn.service"), "[Service]\nExecStart=/bin/true\n");
+  for (const name of ["agent-engine", "app-server"]) {
+    writeFileSync(join(units, `cyc-${name}.service`), `[Service]\nEnvironmentFile=${data}/turn.env\nEnvironment=KEEP=yes\nExecStart=/bin/true\n`);
+  }
+  writeFileSync(join(bin, "rm"), `#!/bin/sh
+set -eu
+for arg in "$@"; do
+  if [ "$arg" = "$HOME/.callyourcode/turn.env" ]; then
+    if grep -q 'EnvironmentFile=.*turn.env' "$HOME"/.config/systemd/user/cyc-agent-engine.service "$HOME"/.config/systemd/user/cyc-app-server.service; then exit 43; fi
+    echo 'remove-obsolete-env refs=none' >> "$HOME/commands"
+  fi
+done
+exec /bin/rm "$@"
+`, { mode: 0o755 });
+  writeFileSync(join(bin, "loginctl"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  writeFileSync(join(bin, "systemctl"), `#!/bin/sh
+set -eu
+echo "$*" >> "$HOME/commands"
+if [ "$2" = daemon-reload ]; then
+  if grep -q 'EnvironmentFile=.*turn.env' "$HOME"/.config/systemd/user/cyc-agent-engine.service "$HOME"/.config/systemd/user/cyc-app-server.service; then exit 42; fi
+fi
+`, { mode: 0o755 });
+  for (let i = 0; i < 2; i++) {
+    const proc = Bun.spawn(["sh", join(repo, "scripts/install.sh"), "--local"], {
+      env: { ...process.env, HOME: home, CYC_FAKE_OS: "Linux", CYC_MUX: "tmux", CYC_FAKE_TMUX: "present", CYC_FAKE_BZIP2: "present", CYC_PORT_BASE: "23000" },
+      stdout: "pipe", stderr: "pipe",
+    });
+    const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    expect({ code: await proc.exited, err }).toEqual({ code: 0, err: "" });
+    expect(out).not.toContain("deps: bun install in turn");
+    expect(existsSync(join(data, "turn.env"))).toBe(false);
+    expect(existsSync(join(units, "cyc-turn.service"))).toBe(false);
+    for (const name of ["agent-engine", "app-server", "voice-engine"]) {
+      const unit = join(units, `cyc-${name}.service`);
+      expect(await Bun.file(unit).text()).not.toMatch(/turn\.env|cyc-turn/);
+      const verify = Bun.spawn(["systemd-analyze", "verify", unit], { env: { ...process.env, HOME: home }, stdout: "pipe", stderr: "pipe" });
+      const diagnostics = await new Response(verify.stderr).text();
+      expect({ code: await verify.exited, diagnostics }).toEqual({ code: 0, diagnostics: "" });
+    }
+    for (const name of kept) {
+      expect(await Bun.file(join(data, name)).text()).toBe(`keep-${name}`);
+    }
+  }
+  const commands = await Bun.file(join(home, "commands")).text();
+  expect(commands.match(/remove-obsolete-env refs=none/g)?.length).toBe(2);
+  expect(commands.match(/stop cyc-turn.service/g)?.length).toBe(1);
+  expect(commands.match(/disable cyc-turn.service/g)?.length).toBe(1);
+});
+
+test("macOS upgrade unloads and removes an obsolete plist without keeping transport env", async () => {
+  const repo = localRepoFixture(true);
+  const home = scratchHome();
+  const bin = join(home, ".local/bin");
+  const plists = join(home, "Library/LaunchAgents");
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(plists, { recursive: true });
+  mkdirSync(join(home, ".bun/bin"), { recursive: true });
+  mkdirSync(join(home, ".callyourcode"), { recursive: true });
+  writeFileSync(join(home, ".bun/bin/bun"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  writeFileSync(join(home, ".callyourcode/turn.env"), "obsolete");
+  writeFileSync(join(plists, "com.callyourcode.turn.plist"), "old");
+  writeFileSync(join(bin, "launchctl"), `#!/bin/sh
+set -eu
+echo "$*" >> "$HOME/commands"
+# Only the obsolete job is initially loaded.
+if [ "$1" = print ]; then
+  [ "$2" = "gui/$(id -u)/com.callyourcode.turn" ] && [ -f "$HOME/Library/LaunchAgents/com.callyourcode.turn.plist" ]
+else exit 0; fi
+`, { mode: 0o755 });
+  for (let i = 0; i < 2; i++) {
+    const proc = Bun.spawn(["sh", join(repo, "scripts/install.sh"), "--local"], {
+      env: { ...process.env, HOME: home, CYC_FAKE_OS: "Darwin", CYC_MUX: "tmux", CYC_FAKE_TMUX: "present", CYC_FAKE_BZIP2: "present", CYC_PORT_BASE: "24000" },
+      stdout: "pipe", stderr: "pipe",
+    });
+    await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    expect(await proc.exited).toBe(0);
+    expect(existsSync(join(plists, "com.callyourcode.turn.plist"))).toBe(false);
+    expect(existsSync(join(home, ".callyourcode/turn.env"))).toBe(false);
+    for (const name of ["agent-engine", "app-server"]) {
+      const plist = await Bun.file(join(plists, `com.callyourcode.${name}.plist`)).text();
+      expect(plist).not.toContain("TURN_");
+      expect(plist).toContain("<key>CYC_PORT_BASE</key>");
+      expect(plist).toContain("<string>24000</string>");
+    }
+  }
+  expect((await Bun.file(join(home, "commands")).text()).match(/bootout .*com.callyourcode.turn/g)?.length).toBe(1);
+});

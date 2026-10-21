@@ -309,7 +309,10 @@ test("an engine refusal is exit 1 with the engine's reason", async () => {
 
 test("explicit help is success (exit 0); no command and unknown are usage (exit 2)", async () => {
   const f = fake();
-  expect((await cli(["help"], env(f.url))).code).toBe(0);
+  const help = await cli(["help"], env(f.url));
+  expect(help.code).toBe(0);
+  expect(help.out).toContain("local or Tailscale pairing link");
+  expect(help.out).not.toContain("Cloud");
   expect((await cli(["--help"], env(f.url))).code).toBe(0);
   expect((await cli([], env(f.url))).code).toBe(2);
   const unknown = await cli(["frobnicate"], env(f.url));

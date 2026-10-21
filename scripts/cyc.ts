@@ -148,7 +148,7 @@ const USAGE = [
   "  stop                                    stop the services (scripts/services.sh stop)",
   "  uninstall                               remove the services + the cyc shim; keeps ~/.callyourcode and the repos",
   "  voice off|on|status                     toggle only the voice engine; off makes a voiceless install stick (no boot restart)",
-  "  pair                                    link a device: Local/Cloud chooser, then the link to open",
+  "  pair                                    link a device: local or Tailscale pairing link",
   "  model whisper|kokoro [size|variant]     show / set a voice model (engine/agent-engine/src/runtime/model.ts)",
   "  agents                                  list every agent on this engine",
   "  agent rename <agentId> <name>           rename that agent (\"\" clears the override)",

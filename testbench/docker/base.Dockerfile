@@ -8,7 +8,7 @@
 # engine with --network none.
 #
 # Build context: testbench/artifacts/ctx (prepared by run.ts), which holds
-#   deps/agent-engine/{package.json,bun.lock,patches/}
+#   deps/agent-engine/{package.json,bun.lock}
 #   deps/mcp/{package.json,bun.lock}
 # No file from any home directory is ever copied in. The last step is the
 # key tripwire: the build fails if anything under /root contains "sk-".
@@ -29,7 +29,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl unzip xz-utils git python3 procps tmux coreutils iproute2 \
+      ca-certificates curl unzip xz-utils git python3 procps tmux coreutils \
  && rm -rf /var/lib/apt/lists/* \
  && tmux -V
 
@@ -58,8 +58,7 @@ RUN curl -fsSL -o /usr/local/bin/herdr \
  && chmod +x /usr/local/bin/herdr \
  && herdr --version
 
-# Engine dependencies, installed from the repo's own lockfile (werift is a
-# patched dependency; bun install applies patches/). The cell symlinks these
+# Engine dependencies, installed from the repo's own lockfile. The cell symlinks these
 # into its private copy of the engine tree as node_modules.
 COPY deps/agent-engine /opt/engine-deps/agent-engine
 COPY deps/mcp /opt/engine-deps/mcp

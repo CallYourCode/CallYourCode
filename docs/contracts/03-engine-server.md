@@ -1,114 +1,75 @@
 # 03. Engine <> server
 
-## Purpose
+## Purpose and topology
 
-"The server is only for notifications and login and engine discovery"
-(PRODUCT.md). The engine reaches OUT to the app server for exactly three
-things: enrolling its identity for a token, announcing its address into the
-discovery lease list, and posting sealed push items. Plus one outbound socket
-so signaling can reach an engine behind NAT. The server is never the transport
-and never sees content.
+The engine reaches the user's local or Tailscale app-server for signed
+identity enrolment, discovery leases, settings, encrypted push delivery and
+one outbound data-relay WebSocket. The app-server is load-bearing for browser
+connections, but holds no content keys and cannot decrypt payloads.
 
-## Parties and transport
+Parties: `terminal/announce.ts`, `security/enroll.ts`, `chat/notify.ts`,
+`transport/relay.ts` in the engine; `routes/engines.ts`, `routes/push.ts`,
+`bootstrap/server.ts` and `delivery/relay.ts` in the server.
+`APP_SERVER_URL` defaults to `http://127.0.0.1:10100`.
 
-- engine: `terminal/announce.ts` (+ `terminal/discovery.ts`,
-  `security/enroll.ts`) dials `APP_SERVER_URL` (default
-  `http://127.0.0.1:10100`); `transport/relay.ts` holds ONE outbound WS to
-  `<app-server>/engine`.
-- server: `server/src/routes/engines.ts`, `routes/push.ts`,
-  `bootstrap/server.ts` (/engine upgrade), `delivery/relay.ts`.
+## Enrolment (normative: `engine/shared/enroll-wire.ts`)
 
-## Enrollment (normative: `engine/shared/enroll-wire.ts`)
+The engine signs `cyc-enroll-v1\n<engineId>\n<spki>\n<ts>` with its ECDSA
+identity and POSTs `/engines/enroll {engineId, pubkey, ts, sig}`. The server
+checks the signature and `ENROLL_SKEW_MS` (10 minutes), then issues an opaque
+per-engine `cyt_` token. Re-enrolment with a different identity key is refused.
+There is one local store, no account chooser or remote onboarding service.
 
-The engine signs the canonical string `cyc-enroll-v1\n<engineId>\n<spki>\n<ts>`
-with its ECDSA identity key and POSTs
-`/engines/enroll {engineId, pubkey, ts, sig}`. The server verifies the
-signature, bounds `ts` by `ENROLL_SKEW_MS` (10 min), and answers a per-engine
-opaque `cyt_` token. HOSTED additionally requires WHO: a one-time `cyg_`
-onboarding grant (redeemed exactly once, signature checked first) or the
-owner's Clerk session; the owner is the verified sub, never a body claim.
-LOCAL enrolls open on the trusted network as owner "local". A re-enroll for
-the same engineId under a different key or owner is refused.
+`GET /engines/enrolled` lists records; `POST /engines/revoke {engineId,
+restore?}` revokes or restores one. These are trusted-deployment management
+routes, protected by the server Host/Origin gates, not a login boundary.
 
-Tokens are opaque. `/engines/verify` is a possession-proof introspection that
-trades a token for `{ok, engineId, owner}`.
+## Announce and settings
 
-## Announce
+On boot and heartbeat the engine POSTs `/engines/announce {engineId, host,
+user, url, rev, ts}`, bearing its issued token. The body's engine ID must
+match the token (403 otherwise). `lastSeen` is the server's clock. `/engines`
+and `/config` serve leased entries; expired leases disappear. The app tests
+liveness by connecting. Existing engine URLs remain persisted identities.
 
-On boot and every heartbeat the engine POSTs
-`/engines/announce {engineId, host, user, url, rev, ts}` with
-`Authorization: Bearer cyt_`. The body's engineId must equal the token's
-(403 "engine mismatch"); the lease owner is the token's owner in HOSTED;
-`lastSeen` is the SERVER's clock, never the engine's ts. The lease list is
-what `/engines` and `/config` serve; a lapsed lease drops silently. The app,
-not the server, decides online/offline by connecting. Batch push replies name
-`truncated` and `dropped` so an engine can requeue instead of trusting a bare
-200.
+The engine polls `/settings` using its token when available, bare otherwise.
+It writes `state/app-server-url` so `cyc pair` can print the deployment's link
+from an environment-less shell.
+
+## Relay (normative: contract [05](05-websocket.md))
+
+The engine dials `/engine?engine=<engineId>` with its issued bearer token,
+including on localhost. The upgrade binds the socket to that engine ID.
+
+Inbound `r-open {c, auth:{nonce, spki, sig}}` carries the device-key dial
+proof. The engine verifies `nonce|engineId|cyc-relay-auth-v1` against its
+device state: enrolled devices admitted, unknown devices through the pairing
+lane, revoked devices refused. `r-accept` / `r-reject` return the verdict.
+Both directions carry `{t:"r", c, f:"<opaque string>"}` and `r-close`.
+
+After acceptance, contract 06's handshake and all sealed application traffic
+continue over this same relay connection. A relay loss closes clients;
+there is no detached browser path.
 
 ## Push
 
-`/push/notify` and `/push/batch`, Bearer cyt_, sealed items (contract 07 owns
-the shapes and batching rules).
-
-## Relay leg (normative: the `transport/relay.ts` header)
-
-The engine holds one outbound WS to `/engine` (HOSTED: authed by the cyt_
-bearer, introspected in-process; LOCAL: `?engine=<id>` open). Down it the
-server forwards each device leg inside its envelope:
-- in `{t:"r-open", c, rtc:{iceServers}, auth?}` / `{t:"r", c, f:"<frame
-  string>"}` / both `{t:"r-close", c, code}`;
-- out `{t:"r"}` answers and `r-accept` / `r-reject` verdicts.
-
-The engine, not the relay, verifies the device-key dial proof carried in
-`r-open.auth` (`sec.ts verifyRelayAuth`: signature over
-`nonce | engineId | "cyc-relay-auth-v1"` (`RELAY_AUTH_CONTEXT`); enrolled
-devices always admitted, unknown keys through a pairing lane, revoked
-refused). A conn dying before the DataChannel opened tears the attempt down;
-after, the pipe stands alone, so chats survive server restarts.
-```mermaid
-sequenceDiagram
-  participant E as Engine
-  participant S as App server
-  participant D as Device
-  E->>S: POST /engines/enroll {engineId, pubkey, ts, sig}
-  S-->>E: cyt_ token (opaque)
-  loop boot + heartbeat
-    E->>S: POST /engines/announce (Bearer cyt_)
-  end
-  E->>S: ONE outbound WS to /engine
-  D->>S: dial (contract 04)
-  S->>E: r-open {c, rtc, auth}
-  Note over E: the ENGINE verifies the device key proof, the relay stays blind
-  S->>E: r {c, f} signaling, forwarded verbatim
-  E-->>S: r answers, r-accept / r-reject
-  Note over D,E: DataChannel opens, the pipe stands alone,<br/>chats survive server restarts
-```
-
-
-## Settings poll
-
-The engine reads `/settings`, bearing its token when it has one and polling
-bare otherwise (`chat/notify.ts`, `announce.ts peekToken`), so a local
-tokenless engine is never forced to enroll.
+`/push/notify` and `/push/batch` accept sealed items with the engine token.
+Contract 07 owns shapes, batching, truncation and drop acknowledgement.
+The engine never receives browser subscriptions or VAPID private keys.
 
 ## Failure semantics
 
-- No APP_SERVER_URL: announce and push are no-ops; the engine boots and serves
-  regardless. The server is never load-bearing for a local session.
-- 401 anywhere drops the stored token; the next tick re-enrolls, with a
-  `ENROLL_RETRY_MS` (30s) backoff, so a wiped server store self-heals.
-- The relay WS redials with jittered exponential backoff
-  (`RELAY_BACKOFF_MIN_MS` 5s .. `RELAY_BACKOFF_MAX_MS` 60s); a relay refusal
-  (close 4401) drops the token via `onAuthReject`.
-- The engine writes `state/app-server-url` at boot so `cyc pair` prints a
-  phone-reachable link even from an env-less ssh shell.
+- Without a reachable app-server, local agent sessions still run, but browser
+  sync and notifications cannot work.
+- 401 drops the stored token; the announce tick re-enrols with a 30s retry
+  backoff. A relay 4401 invokes the same auth-rejection path.
+- Relay retry uses 5 to 60 seconds exponential backoff plus jitter. Replacing
+  an engine socket closes its clients, not their underlying terminal sessions.
 
 ## Security invariants
 
-- The engine never holds a Clerk credential; the page mints the one-time grant
-  and the engine trades it plus its signed identity (`pairkey.ts` cloud flow).
-- A token speaks only for its own engineId and owner; cross-owner announce or
-  push is impossible by the token->owner map (`enroll.ts`).
-- The E2E pairing key NEVER rides any of these calls; nothing on this boundary
-  can decrypt content or push previews.
-- Engine identity private keys never leave `keys.json` (0600, atomic).
+- A token speaks only for its engine ID; it is not a content-decryption key.
+- The pairing/content key never rides these HTTP calls or relay envelopes
+  except encrypted inside the end-to-end handshake.
+- Engine identity private keys remain in `keys.json` (0600, atomic).
+- The app-server must be exposed only locally or on the user's tailnet.

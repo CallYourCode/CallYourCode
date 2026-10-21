@@ -28,7 +28,7 @@ test("unitEnvFromCat pulls Environment= lines, tolerating the quoted form", () =
     "[Service]",
     "Environment=CYC_PORT_BASE=20200",
     'Environment="CYC_ENGINE_URL=unix:/x.sock"',
-    "EnvironmentFile=/home/t/.callyourcode/turn.env",
+    "EnvironmentFile=/home/t/.callyourcode/ignored.env",
     "ExecStart=bun run x.ts",
   ].join("\n");
   expect(unitEnvFromCat(cat)).toEqual({

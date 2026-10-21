@@ -48,14 +48,12 @@ function expectUntouched(home: string) {
 }
 
 const START_UNITS = [
-  "cyc-turn.service",
   "cyc-voice-engine.service",
   "cyc-app-server.service",
   "cyc-agent-engine.service",
 ];
 const STOP_UNITS = [...START_UNITS].reverse();
 const START_LABELS = [
-  "com.callyourcode.turn",
   "com.callyourcode.voice-engine",
   "com.callyourcode.app-server",
   "com.callyourcode.agent-engine",
@@ -65,7 +63,7 @@ const STOP_LABELS = [...START_LABELS].reverse();
 // ---------------------------------------------------------------------------
 // start
 
-test("start on Linux starts TURN, voice, app, then agent engine", async () => {
+test("start on Linux starts voice, app, then agent engine", async () => {
   const home = scratchHome();
   const { out, code } = await dryRun("Linux", home, ["start", "--dry-run"]);
 
@@ -92,7 +90,7 @@ test("start on Darwin bootstraps each service (dry-run path) and names cyc pair"
 // ---------------------------------------------------------------------------
 // stop
 
-test("stop on Linux stops agent engine, app, voice, then TURN", async () => {
+test("stop on Linux stops agent engine, app, voice", async () => {
   const home = scratchHome();
   const { out, code } = await dryRun("Linux", home, ["stop", "--dry-run"]);
 
@@ -193,8 +191,8 @@ function installVoiceFixture(os: string, home: string) {
   return path;
 }
 
-const OTHER_UNITS = ["cyc-turn", "cyc-app-server", "cyc-agent-engine"];
-const OTHER_LABELS = ["com.callyourcode.turn", "com.callyourcode.app-server", "com.callyourcode.agent-engine"];
+const OTHER_UNITS = ["cyc-app-server", "cyc-agent-engine"];
+const OTHER_LABELS = ["com.callyourcode.app-server", "com.callyourcode.agent-engine"];
 
 test("voice-off on Linux stops + disables ONLY the voice unit", async () => {
   const home = scratchHome();
@@ -205,7 +203,7 @@ test("voice-off on Linux stops + disables ONLY the voice unit", async () => {
   expect(out).toContain("+ systemctl --user stop cyc-voice-engine.service");
   expect(out).toContain("+ systemctl --user disable cyc-voice-engine.service");
   expect(out).toContain("voice: OFF");
-  for (const u of OTHER_UNITS) expect(out).not.toContain(u); // the other three are never named
+  for (const u of OTHER_UNITS) expect(out).not.toContain(u); // the other two are never named
 });
 
 test("voice-on on Linux enables + starts the voice unit", async () => {
