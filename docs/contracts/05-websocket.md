@@ -62,8 +62,11 @@ result is accepted once, never retried; a dropped write closes the socket.
 Congestion past the bound disconnects rather than buffering without limit.
 There is no credit protocol in the current runtime.
 
-Additional bounds: 32 device legs per engine, 30 opens per engine per rolling
-minute, 15 seconds to authenticate, and 16 KiB for pre-auth device frames.
+Additional bounds: 32 device legs per engine, 30 opens per engine per fixed
+60-second window, 15 seconds to authenticate, and 16 KiB for pre-auth device
+frames. Each engine's window starts at its first open and resets on the first
+open at least 60 seconds later. This is not a rolling limit: opens clustered
+around a reset can exceed 30 within a rolling minute.
 Authenticated connections have no fixed lifetime or frame-count cutoff;
 server WS `idleTimeout` is zero. The sealed client also bounds its pending
 reader to 1024 frames / 32 MiB and its handshake to 15 seconds.

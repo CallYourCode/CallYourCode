@@ -272,9 +272,12 @@ test("the herdr-server unit runs `herdr server` and is WantedBy default.target (
 
 test("the installer never upgrades or restarts herdr (2026-09-22: a herdr server stop kills every pane)", async () => {
   const script = await Bun.file(join(REPO_ROOT, "scripts/install.sh")).text();
-  expect(script).not.toContain("herdr server stop");
-  expect(script).not.toContain("herdr.dev/install.sh | sh");
-  expect(script).not.toContain("brew upgrade herdr");
+  // Ignore comments and standalone literal echo guidance, not commands.
+  // Echo with substitutions or a trailing command must still be checked.
+  const commands = script.split("\n").filter((line) => !/^\s*(#.*|echo\s+"[^"$`]*"\s*(?:>&2)?\s*)$/.test(line)).join("\n");
+  expect(commands).not.toContain("herdr server stop");
+  expect(commands).not.toContain("herdr.dev/install.sh | sh");
+  expect(commands).not.toContain("brew upgrade herdr");
 });
 
 test("CYC_MUX=herdr opts into herdr: CYC_MUX=herdr named, herdr installed", async () => {
