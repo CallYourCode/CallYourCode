@@ -42,6 +42,8 @@ export function registerOfflineWorker(): void {
   const register = () => {
     navigator.serviceWorker.register(SW_URL, {scope: '/'}).then(
       (reg) => {
+        // Static updates must remain discoverable even without engine sync.
+        void reg.update().catch(() => {});
         try {
           logSwState(reg);
         } catch {
@@ -51,6 +53,13 @@ export function registerOfflineWorker(): void {
       () => {}
     );
   };
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    void navigator.serviceWorker
+      .getRegistration()
+      .then((reg) => reg?.update())
+      .catch(() => {});
+  });
   if (document.readyState === 'complete') register();
   else window.addEventListener('load', register, {once: true});
 }
