@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CallYourCode: your coding agents in a chat app</title>
-<meta name="description" content="Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Your machine, no company server in the path.">
+<meta name="description" content="Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Open your own app-server locally or over Tailscale.">
 <link rel="canonical" href="https://callyourcode.com/">
 <link rel="icon" href="/media/favicon.svg?v=2" type="image/svg+xml">
 <link rel="icon" href="/media/favicon.ico?v=2" sizes="any">
@@ -12,21 +12,21 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="CallYourCode">
 <meta property="og:title" content="CallYourCode: call your coding agents from anywhere">
-<meta property="og:description" content="Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Your machine, no company server in the path.">
+<meta property="og:description" content="Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Open your own app-server locally or over Tailscale.">
 <meta property="og:url" content="https://callyourcode.com/">
 <meta property="og:image" content="https://callyourcode.com/media/og-card.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="CallYourCode: call your coding agents from anywhere">
-<meta name="twitter:description" content="Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Your machine, no company server in the path.">
+<meta name="twitter:description" content="Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Open your own app-server locally or over Tailscale.">
 <meta name="twitter:image" content="https://callyourcode.com/media/og-card.png">
 <script>try { document.documentElement.dataset.theme = localStorage.getItem("cyc-theme") || "dark"; } catch (e) { document.documentElement.dataset.theme = "dark"; }</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" onload="this.onload=null;this.rel='stylesheet'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"></noscript>
-<link rel="stylesheet" href="/styles.css?v=38">
+<link rel="stylesheet" href="/styles.css?v=39">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -35,7 +35,7 @@
   "alternateName": "cyc",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "macOS, Linux",
-  "description": "Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Your machine, no company server in the path.",
+  "description": "Talk to your own coding agents from your phone, in your own voice. Claude Code, Codex, OpenCode and Pi, over a sealed end-to-end channel. Open your own app-server locally or over Tailscale.",
   "url": "https://callyourcode.com/",
   "downloadUrl": "https://callyourcode.com/install.sh",
   "softwareHelp": "https://callyourcode.com/docs/",
@@ -64,7 +64,6 @@ posthog.init('phc_BnpdJUMZTqESqCLk4xduxHecYMrb9YMvUeQAvt2JDF5e',{api_host:'https
       <a href="https://github.com/CallYourCode/CallYourCode">GitHub</a>
       <button class="theme-toggle" type="button" title="Toggle theme">light</button>
     </nav>
-    <a class="btn-login" href="https://app.callyourcode.com">App</a>
   </div>
 </header>
 
@@ -78,6 +77,7 @@ posthog.init('phc_BnpdJUMZTqESqCLk4xduxHecYMrb9YMvUeQAvt2JDF5e',{api_host:'https
       </div>
       <div class="copy-rest">
       <p class="subhead">Claude Code, Codex, OpenCode and Pi already live in a terminal on your machine. CallYourCode puts every one of them in your pocket as a chat with a voice. You speak, the words land in the pane, the agent works, and it speaks the result back.</p>
+      <p class="subhead">Open the app from your own app-server on this machine, or on your phone over your Tailscale network. Run <code>cyc pair</code> for the link.</p>
       <div class="install">
         <code>curl -fsSL https://callyourcode.com/install.sh | sh</code>
         <button type="button" data-copy aria-label="Copy install command"><svg class="ic-copy" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h9"/></svg><svg class="ic-check" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M20 6L9 17l-5-5"/></svg></button>
@@ -145,7 +145,7 @@ posthog.init('phc_BnpdJUMZTqESqCLk4xduxHecYMrb9YMvUeQAvt2JDF5e',{api_host:'https
         </div>
         <div>
           <h3>Voice-first replies</h3>
-          <p>The spoken line lands before the text bubble. Voice is synthesized and transcribed on the machine, no cloud, no audio leaving it.</p>
+          <p>The spoken line lands before the text bubble. Voice is synthesized and transcribed on your machine, then sent over the sealed channel to your phone.</p>
         </div>
       </div>
     </div>
@@ -187,15 +187,15 @@ posthog.init('phc_BnpdJUMZTqESqCLk4xduxHecYMrb9YMvUeQAvt2JDF5e',{api_host:'https
 
   <section class="privacy wrap">
     <p class="eyebrow">Privacy</p>
-    <h2 class="section-title">No company server in the data path.</h2>
+    <h2 class="section-title">Your machine, your Tailscale network.</h2>
     <div class="grid">
       <div>
         <h3>Sealed end to end</h3>
-        <p>One encrypted WebRTC channel carries chat, voice, files and diffs straight between phone and machine.</p>
+        <p>Chat, voice, files and diffs travel over a WebSocket, sealed end to end with AES-256-GCM. Your pairing key lets you enrol a device.</p>
       </div>
       <div>
-        <h3>Voice stays local</h3>
-        <p>Transcription and synthesis run on your machine. No audio and no transcript ever leaves it.</p>
+        <h3>Voice runs on your machine</h3>
+        <p>Transcription and synthesis run on your machine. Audio and text travel between your phone and engine over the sealed channel.</p>
       </div>
       <div>
         <h3>Open source</h3>

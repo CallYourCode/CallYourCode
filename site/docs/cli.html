@@ -22,7 +22,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" onload="this.onload=null;this.rel='stylesheet'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"></noscript>
-<link rel="stylesheet" href="/styles.css?v=38">
+<link rel="stylesheet" href="/styles.css?v=39">
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-T6R7KN61JP"></script>
 <script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag('js',new Date());gtag('config','G-T6R7KN61JP');</script>
 <script>
@@ -43,7 +43,6 @@ posthog.init('phc_BnpdJUMZTqESqCLk4xduxHecYMrb9YMvUeQAvt2JDF5e',{api_host:'https
       <a href="https://github.com/CallYourCode/CallYourCode">GitHub</a>
       <button class="theme-toggle" type="button" title="Toggle theme">light</button>
     </nav>
-    <a class="btn-login" href="https://app.callyourcode.com">App</a>
   </div>
 </header>
 
@@ -64,7 +63,7 @@ posthog.init('phc_BnpdJUMZTqESqCLk4xduxHecYMrb9YMvUeQAvt2JDF5e',{api_host:'https
 cyc start     # start the services
 cyc help      # the full command set</pre>
       <h2>What is inside</h2>
-      <p>engine/agent-engine (:10101) drives the multiplexer, holds the chat log, seals the transport and delivers to and from panes. engine/voice-engine (:10102) runs in-process sherpa-onnx TTS and STT behind a loopback-only contract. server (:10100) serves the app, owns push and settings, and runs the blind signaling relay and STUN/TURN. app is the PWA you open on your phone.</p>
+      <p>engine/agent-engine (:10101) drives the multiplexer, holds the chat log, seals the transport and delivers to and from panes. engine/voice-engine (:10102) runs in-process sherpa-onnx TTS and STT behind a loopback-only contract. server (:10100) is your own app-server: it serves the app, owns push and settings, and relays sealed WebSocket frames between your phone and engine. app is the PWA you open from that server locally or over Tailscale.</p>
     </article>
   </div>
 </main>

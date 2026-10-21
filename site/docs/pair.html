@@ -22,7 +22,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" onload="this.onload=null;this.rel='stylesheet'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"></noscript>
-<link rel="stylesheet" href="/styles.css?v=38">
+<link rel="stylesheet" href="/styles.css?v=39">
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-T6R7KN61JP"></script>
 <script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag('js',new Date());gtag('config','G-T6R7KN61JP');</script>
 <script>
@@ -43,7 +43,6 @@ posthog.init('phc_BnpdJUMZTqESqCLk4xduxHecYMrb9YMvUeQAvt2JDF5e',{api_host:'https
       <a href="https://github.com/CallYourCode/CallYourCode">GitHub</a>
       <button class="theme-toggle" type="button" title="Toggle theme">light</button>
     </nav>
-    <a class="btn-login" href="https://app.callyourcode.com">App</a>
   </div>
 </header>
 
@@ -60,10 +59,11 @@ posthog.init('phc_BnpdJUMZTqESqCLk4xduxHecYMrb9YMvUeQAvt2JDF5e',{api_host:'https
     <p class="eyebrow">Docs</p>
     <article>
 <h1>Pair your phone</h1>
-      <pre>cyc pair      # a Local/Cloud chooser, then a link (or QR) to open on your phone
+      <pre>cyc pair      # open locally or print a Tailscale link and QR for your phone
 cyc start     # start the services</pre>
-      <p>The pairing key is the one secret, and it moves out of band: shown on the machine, entered on the phone by link, QR or typed, even on localhost. It travels in a URL fragment, which never reaches any server, log or Referer.</p>
-      <p>A device that cannot prove it holds the key gets a pairing screen, not a connection. A changed engine identity stops the app with an explicit decision, never auto-trust.</p>
+      <p>The app opens from your own app-server on your machine. For phone access, use the Tailscale HTTPS link printed by <code>cyc pair</code> with both devices on your tailnet. A localhost link works only on the machine running the app-server.</p>
+      <p>Use the pairing key shown on your machine to enrol your phone by link, QR or typed key, even on localhost. It travels in a URL fragment, which browsers do not send in HTTP requests or the Referer header. Keep the link and QR private: they contain your pairing key.</p>
+      <p>A new device must prove it holds the pairing key before the engine enrols it. Returning devices authenticate with their enrolled device key. A changed engine identity requires an explicit trust or pairing decision.</p>
       <h2>Voice models</h2>
       <p>About 1 GB of voice models download in the background on first boot; each voice capability switches on the moment its files land.</p>
     </article>
