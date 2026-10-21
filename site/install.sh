@@ -344,6 +344,9 @@ run chmod 0700 "$DATA_DIR"
 #                       existing secret (rotating it would break live creds).
 #   TURN_HOST           this box's tailnet MagicDNS name (clients STUN it there).
 #   TURN_EXTERNAL_IP    this box's tailnet IPv4 (TURN relay candidate address).
+#   Without a tailnet both are 127.0.0.1: the app runs on this machine, and a
+#   `.local` hostname can resolve IPv6-only on macOS while TURN listens on IPv4,
+#   so ICE never pairs (reported on a Mac, 2026-09-23).
 TURN_ENV="$DATA_DIR/turn.env"
 TURN_REALM=callyourcode
 
@@ -374,11 +377,15 @@ else
 fi
 
 # Tailnet identity for the ICE list: MagicDNS name (trailing dot stripped) and
-# IPv4. Both are read-only probes that fall back when tailscale is not up.
+# IPv4. Both are read-only probes; with no tailnet, localhost.
 _ts_json="$(tailscale status --json 2>/dev/null || true)"
 TURN_HOST="$(printf '%s' "$_ts_json" | "$BUN" -e 'const t=await Bun.stdin.text();let d={};try{d=JSON.parse(t)}catch{}process.stdout.write((((d.Self||{}).DNSName)||"").replace(/\.$/,""))' 2>/dev/null || true)"
-[ -n "$TURN_HOST" ] || TURN_HOST="$(hostname 2>/dev/null || echo localhost)"
-TURN_EXTERNAL_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+if [ -n "$TURN_HOST" ]; then
+  TURN_EXTERNAL_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+else
+  TURN_HOST=127.0.0.1
+  TURN_EXTERNAL_IP=127.0.0.1
+fi
 
 # The static secret: reuse the one already on disk, else mint a fresh one. In
 # dry-run we neither read nor write; a placeholder keeps the service templates
@@ -502,6 +509,36 @@ if [ "$OS" = "Linux" ]; then
   # cyc-* unit) down when the last session closes.
   run loginctl enable-linger "$(id -un)"
 
+  # --- herdr server: exists and ENABLED for boot (only when herdr is the mux) ---
+  # After a reboot the engine's unit comes back but the mux must too, or the +
+  # menu's reopen fails with a bare "Failed to connect" (k8plus power-cut,
+  # 2026-09-29: shikher's herdr-server.service was DISABLED, so the engine
+  # retried the down mux forever and every recent-agent tap failed). herdr's own
+  # installer writes this unit; we only ENSURE it exists and is enabled for the
+  # next boot (linger, above, is what lets an enabled user unit start at boot
+  # with no login). We never `--now` it: a `herdr server` already running must
+  # not be restarted (that exits every open pane), and enabling alone never
+  # starts a second one.
+  if [ "$MUX" = "herdr" ]; then
+    HERDR_UNIT="$HOME/.config/systemd/user/herdr-server.service"
+    if [ ! -f "$HERDR_UNIT" ]; then
+      write_file "$HERDR_UNIT" <<EOF
+[Unit]
+Description=herdr server
+
+[Service]
+ExecStart=%h/.local/bin/herdr server
+Restart=always
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+EOF
+      run systemctl --user daemon-reload
+    fi
+    run systemctl --user enable herdr-server.service
+  fi
+
   ENGINE_UNIT="$HOME/.config/systemd/user/cyc-agent-engine.service"
   APP_UNIT="$HOME/.config/systemd/user/cyc-app-server.service"
   VOICE_UNIT="$HOME/.config/systemd/user/cyc-voice-engine.service"
@@ -577,6 +614,34 @@ OOMPolicy=kill
 WantedBy=default.target
 EOF
 
+  # The voice engine's daily restart: a timer fires once a day at a random time
+  # between 03:00 and 05:00 local, and the script waits for no live speech
+  # before restarting (scripts/voice-daily-restart.sh).
+  VOICE_RESTART_UNIT="$HOME/.config/systemd/user/cyc-voice-restart.service"
+  VOICE_RESTART_TIMER="$HOME/.config/systemd/user/cyc-voice-restart.timer"
+  write_file "$VOICE_RESTART_UNIT" <<EOF
+[Unit]
+Description=CallYourCode voice engine daily restart (waits for quiet)
+
+[Service]
+Type=oneshot
+Environment=VOICE_PORT=$VOICE_PORT_VAL
+ExecStart=/bin/sh $REPO_DIR/scripts/voice-daily-restart.sh
+EOF
+
+  write_file "$VOICE_RESTART_TIMER" <<EOF
+[Unit]
+Description=CallYourCode voice engine daily restart
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=2h
+Persistent=false
+
+[Install]
+WantedBy=timers.target
+EOF
+
   write_file "$TURN_UNIT" <<EOF
 [Unit]
 Description=CallYourCode STUN/TURN
@@ -606,6 +671,8 @@ EOF
   fi
   run systemctl --user enable $CYC_ENABLE_UNITS
   run systemctl --user restart $CYC_ENABLE_UNITS
+  # the daily voice restart; the script itself skips a voice-off install
+  run systemctl --user enable --now cyc-voice-restart.timer
 else
   ENGINE_PLIST="$HOME/Library/LaunchAgents/com.callyourcode.agent-engine.plist"
   APP_PLIST="$HOME/Library/LaunchAgents/com.callyourcode.app-server.plist"
@@ -729,6 +796,43 @@ $PLIST_PORT_BASE_ENV
 </plist>
 EOF
 
+  # The voice engine's daily restart at 03:00 local; the script adds up to 2h of
+  # jitter and waits for no live speech (scripts/voice-daily-restart.sh).
+  VOICE_RESTART_PLIST="$HOME/Library/LaunchAgents/com.callyourcode.voice-restart.plist"
+  write_file "$VOICE_RESTART_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>VOICE_PORT</key>
+		<string>$VOICE_PORT_VAL</string>
+	</dict>
+	<key>Label</key>
+	<string>com.callyourcode.voice-restart</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>$REPO_DIR/scripts/voice-daily-restart.sh</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>3</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>$DATA_DIR/logs/voice-restart.log</string>
+	<key>StandardOutPath</key>
+	<string>$DATA_DIR/logs/voice-restart.log</string>
+</dict>
+</plist>
+EOF
+
   write_file "$TURN_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -781,9 +885,9 @@ EOF
   # Without the marker, all four bootstrap exactly as before.
   if [ -f "$VOICE_DISABLED_MARKER" ]; then
     echo "voice: disabled (cyc voice off); leaving it off"
-    CYC_BOOTSTRAP_PLISTS="$TURN_PLIST $APP_PLIST $ENGINE_PLIST"
+    CYC_BOOTSTRAP_PLISTS="$TURN_PLIST $APP_PLIST $ENGINE_PLIST $VOICE_RESTART_PLIST"
   else
-    CYC_BOOTSTRAP_PLISTS="$TURN_PLIST $VOICE_PLIST $APP_PLIST $ENGINE_PLIST"
+    CYC_BOOTSTRAP_PLISTS="$TURN_PLIST $VOICE_PLIST $APP_PLIST $ENGINE_PLIST $VOICE_RESTART_PLIST"
   fi
   for plist in $CYC_BOOTSTRAP_PLISTS; do
     label=$(basename "$plist" .plist)
