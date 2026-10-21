@@ -21,7 +21,9 @@ test("agent source choice persists and immediately displays Codex weekly rather 
   expect(await plugin.rpc!["get-source"]({ session: null, agent: null }, {})).toEqual({ source: "claude" });
   await plugin.rpc!["set-source"]({ session: null, agent: null }, { source: "codex" });
   const out = await plugin.card!.render();
-  expect(out.html).toContain("Codex");
+  expect((out as { source?: string }).source).toBe("codex");
+  // the app's lit logo names the provider; the head is the account alone
+  expect(out.html).not.toContain("Codex");
   expect(out.html).toContain("pi@example.test");
   expect(out.html).toContain("37%");
   expect(out.html).not.toContain("claude@example.test");
