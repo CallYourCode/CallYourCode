@@ -50,8 +50,8 @@ trap cleanup EXIT INT TERM
 #                 place "the harness ASKS the guardrails" can be broken
 #
 # SPEC_BOOT carries the preload the e2e script sets (package.json test:e2e),
-# because e2e/roundtrip.test.ts dials over a DataChannel and the shim that
-# swaps WebSocket for it lives there. Running it without the preload would fail
+# because e2e/roundtrip.test.ts uses the sealed WebSocket TestClient shim
+# installed there. Running it without the preload would fail
 # for a reason that has nothing to do with the mutation.
 SPEC_LIMITS=agent-engine/src/storage/limits.test.ts
 SPEC_GUARDS=agent-engine/src/test-utils/guardrails.test.ts

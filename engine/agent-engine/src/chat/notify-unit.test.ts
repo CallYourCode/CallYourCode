@@ -17,9 +17,8 @@ import type { Sock } from "../transport/sock.ts";
 
 const mkClients = new Set<Sock>();
 beforeEach(() => {
-  /* Both singletons are reset before each wiring: initNotify kicks a hosted
-   * settings refresh and arms the ceiling interval, and a second wiring on top
-   * of a live one would fire the first's timers into the second's deps. */
+  /* Both singletons are reset before each wiring so timers from the previous
+   * wiring cannot fire into the next wiring's deps. */
   resetNotify();
   resetPresence();
   mkClients.clear();

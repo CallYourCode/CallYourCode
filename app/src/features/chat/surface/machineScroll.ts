@@ -33,8 +33,7 @@ export function machineTopOf(el: Element): number {
 // V4 scroll diagnostic (Lane C step 0). Always-on, rate-limited cyclog lines
 // that name every writer of the message scroller's scroll position and why it
 // ran. A home-screen PWA cannot set ?cycscroll=1, so these ship unconditionally
-// via the existing cyclog (which is already gated by the hosted-privacy switch
-// and shipped with dev=<device>). Rate-limited to at most 1 line / 2s PER KEY;
+// via the existing cyclog. Rate-limited to at most 1 line / 2s PER KEY;
 // the next allowed line for a key carries the count suppressed since the last.
 const DIAG_RATE_MS = 2000;
 const diagAt = new Map<string, number>();

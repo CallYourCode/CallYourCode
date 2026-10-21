@@ -959,9 +959,8 @@ export function createSettingsPane(deps: SettingsPaneDeps) {
 
   const enginesSection = createEnginesSection({onTeardown: deps.onTeardown});
 
-  // Log out sits at the very bottom, and ONLY on the hosted app with Clerk auth
-  // active and a real session. In LOCAL mode (auth 'none') it never appears; the
-  // card starts hidden and reveals itself once a live token is confirmed.
+  // Log out sits at the very bottom. The card starts hidden and reveals itself
+  // only when Clerk auth is active and a live token is confirmed.
   const logoutRow = srow({
     icon: 'user',
     title: 'Log out',

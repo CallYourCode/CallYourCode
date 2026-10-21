@@ -11,13 +11,13 @@
  *      direct peer has a non-loopback address whatever headers it forges, so
  *      the pair is what separates "a script on this machine" from "a peer the
  *      proxy handed us". Missing peer data fails CLOSED.
- *   2. AN ENROLLED DEVICE reaching in over the SEALED DATACHANNEL TUNNEL (Plan
- *      C): onReq marks the request and requireOwner treats the mark as the
- *      owner. The old remote x-cyc-cap HEADER path is retired -- a tailnet peer
- *      holding a valid cap gets nothing over plain HTTP now. This file drives
- *      the real Bun.serve over the socket, so it cannot mint the in-process
- *      tunnel mark; it proves the HTTP side: a cross-host request, cap or not,
- *      is refused. The tunnel-side pass is proven in e2e/tunnel-wire.test.ts.
+ *   2. AN ENROLLED DEVICE reaching in over the SEALED WEBSOCKET TUNNEL through
+ *      the local app-server: onReq marks the request and requireOwner treats
+ *      the mark as the owner. The old remote x-cyc-cap HEADER path is retired --
+ *      a tailnet peer holding a valid cap gets nothing over plain HTTP now.
+ *      This file drives the real Bun.serve over the socket, so it cannot mint
+ *      the in-process tunnel mark; it proves the HTTP side: a cross-host request,
+ *      cap or not, is refused. The tunnel-side pass is proven in e2e/tunnel-wire.test.ts.
  *
  * WHAT THIS FILE IS FOR, and what it deliberately is not. httpx.test.ts owns
  * the unit facts about isTrustedLocal / requireOwner / requireLocal. This is
