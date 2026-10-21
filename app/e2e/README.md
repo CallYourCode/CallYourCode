@@ -63,7 +63,7 @@ consecutive full runs leave `git status --porcelain e2e` empty.
 
 - `offline/rig.ts` -- boots the page against the static bundle, isolation,
   key seeding, fixtures.
-- `offline/engine.ts` -- a fake sealed engine over the DataChannel wire.
-- `offline/wsshim.ts` -- a WebSocket stand-in for `RTCPeerConnection` so specs
-  can carry frames without real RTC.
+- `offline/engine.ts` -- a fake sealed engine over WebSocket.
+- `offline/wsshim.ts` -- a WebSocket server wrapper that attaches the seal
+  handshake and terminates tracked clients on close.
 - `gate/gaterig.ts` -- the gate's engine harness.
