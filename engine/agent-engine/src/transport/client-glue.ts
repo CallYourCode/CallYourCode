@@ -65,14 +65,16 @@ export function mintSealedClient(pipe: Pipe): void {
   data.sec = sec;
   data.pipeDrain = () => pipe.drain();
   let pendingBytes = 0;
+  let pendingFrames = 0;
   let readChain = Promise.resolve();
   pipe.onmessage = (raw) => {
     const bytes = new TextEncoder().encode(raw).byteLength;
-    if (pendingBytes + bytes > 32 * 1024 * 1024) { pipe.close(1009, "reader-limit"); return; }
+    if (pendingFrames >= 1024 || pendingBytes + bytes > 32 * 1024 * 1024) { pipe.close(1009, "reader-limit"); return; }
     pendingBytes += bytes;
+    pendingFrames++;
     readChain = readChain.then(async () => { if (!closed) await sec.feed(raw); })
       .catch(() => pipe.close(4400, "bad-frame"))
-      .finally(() => { pendingBytes -= bytes; });
+      .finally(() => { pendingBytes -= bytes; pendingFrames--; });
   };
   pipe.onclose = cleanup;
 }

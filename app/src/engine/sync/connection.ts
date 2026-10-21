@@ -248,6 +248,9 @@ export function schedule(engineKey: string): number {
 
 // The client sealed a pipe (status 'connected').
 export function noteSealed(engineKey: string): void {
+  // A sealed same-origin WS proves the local/Tailscale route works even when
+  // navigator.onLine reports no Internet. A later disconnect still backs off.
+  online = true;
   const e = engine(engineKey);
   clearTimer(e);
   e.hostSeen = false;

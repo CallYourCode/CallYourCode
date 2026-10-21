@@ -9,7 +9,7 @@ import {b64urlencode} from '../../../shared/e2e';
 const dir = await mkdtemp(join(tmpdir(), 'cyc-ws-app-'));
 await mkdir(join(dir, 'home'));
 const appPort = await freePort();
-const origin = `http://127.0.0.1:${appPort}`;
+const origin = `http://localhost:${appPort}`;
 const root = resolve(import.meta.dir, '../../../..');
 let app: {kill(): void; exited: Promise<number>; readonly exitCode: number | null};
 const bootApp = async () => {
@@ -76,7 +76,8 @@ const control = Bun.serve({port: 0, hostname: '127.0.0.1', async fetch(req) {
     return Response.json({devices: state.devices.map((d) => ({fp: d.fp, revoked: d.revokedAt !== null}))});
   }
   if (path === '/info') return Response.json({origin, engineUrl: engine.url, engineId: keys.engineId,
-    key: b64urlencode(newestGen(keys).keyBytes), submitted: engine.submitted(), lines: engine.lines.slice(-100)});
+    key: b64urlencode(newestGen(keys).keyBytes), submitted: engine.submitted(), lines: engine.lines.slice(-100),
+    appLog: (await Bun.file(join(dir, "logs/app.log")).text().catch(() => "")).split("\n").slice(-100)});
   if (path === '/reply') {
     const body = await req.json() as {text: string; speak?: boolean};
     session.send(JSON.stringify({t: body.speak ? 'speak' : 'chat', text: body.text, msgId: crypto.randomUUID()}));

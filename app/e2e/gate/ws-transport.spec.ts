@@ -32,9 +32,9 @@ test.beforeEach(async () => {
 });
 test.afterEach(async ({page}, testInfo) => {
   if (control) {
-    const state = await info().catch(() => null);
+    const state = {...await info().catch(() => null), browser: await page.evaluate(() => ({hidden: document.hidden, online: navigator.onLine, secure: isSecureContext, mediaRecorder: typeof MediaRecorder, mic: (window as any).__gateMic && {error: (window as any).__gateMic.error, installed: (window as any).__gateMic.installed, constraints: (window as any).__gateMic.constraints, ready: (window as any).__cycPipeline?.initialized}})).catch(() => null)};
     await testInfo.attach('scratch-engine-state', {body: JSON.stringify(state), contentType: 'application/json'});
-    if (testInfo.status !== testInfo.expectedStatus) console.log('SCRATCH ENGINE', JSON.stringify(state));
+    if (testInfo.status !== testInfo.expectedStatus) console.log('SCRATCH DIAGNOSTICS', JSON.stringify({browser: state.browser, engine: state.lines?.slice(-12), app: state.appLog?.slice(-12)}));
   }
   if (control) await action('/stop').catch(() => {});
   if (proc && proc.exitCode === null) {
@@ -55,7 +55,7 @@ test('production sealed WS: pairing, chat, large hashed transfer, STT, restarts 
       await unpaired.goto(`${rig.origin}/?engine=${rig.engineId}&testhooks=1${key ? '#pair=' + key : '#app'}`);
       await expect(unpaired.getByRole('button', {name: 'Pair', exact: true}).last()).toBeVisible({timeout: 20_000});
       if (key) {
-        await unpaired.getByRole('button', {name: 'Pair', exact: true}).last().click();
+        await unpaired.locator('.cyc-pairing-row.is-confirm').getByRole('button', {name: 'Pair', exact: true}).click();
         await unpaired.waitForTimeout(1500);
       }
       expect(await unpaired.locator('.cyc-session-entry').count()).toBe(0);
@@ -64,8 +64,9 @@ test('production sealed WS: pairing, chat, large hashed transfer, STT, restarts 
   }
   const sockets: string[] = [];
   page.on('websocket', (ws) => sockets.push(ws.url()));
+  await page.bringToFront();
   await page.goto(`${rig.origin}/?engine=${rig.engineId}&testhooks=1#pair=${rig.key}`);
-  await page.getByRole('button', {name: 'Pair', exact: true}).last().click();
+  await page.locator('.cyc-pairing-row.is-confirm').getByRole('button', {name: 'Pair', exact: true}).click();
   const row = page.locator('.cyc-session-entry').first();
   await expect(row).toBeVisible({timeout: 30_000});
   await row.click();
@@ -147,23 +148,32 @@ test('real call UI captures synthetic microphone PCM and plays a growing spoken 
   test.setTimeout(60_000);
   await page.addInitScript(() => {
     localStorage.setItem('cyc-toolbar-call', '1');
-    const state = {constraints: null as MediaStreamConstraints | null, gain: null as GainNode | null, tracks: [] as MediaStreamTrack[]};
+    const state = {installed: false, error: '', constraints: null as MediaStreamConstraints | null, gain: null as GainNode | null, tracks: [] as MediaStreamTrack[]};
     (window as any).__gateMic = state;
-    navigator.mediaDevices.getUserMedia = async (constraints) => {
+    // WebKit's headless build may omit native device enumeration. The only
+    // injected seam is the synthetic microphone; its MediaStream is real.
+    const capture = async (constraints: MediaStreamConstraints) => {
       state.constraints = constraints;
+      try {
       const context = new AudioContext();
-      await context.resume();
+      void context.resume();
       const source = context.createOscillator(); source.frequency.value = 190;
       const gain = context.createGain(); gain.gain.value = 0;
       const destination = context.createMediaStreamDestination();
       source.connect(gain); gain.connect(destination); source.start();
       state.gain = gain; state.tracks = destination.stream.getTracks();
       return destination.stream;
+      } catch (error) { state.error = String(error); throw error; }
     };
+    try {
+      Object.defineProperty(navigator, 'mediaDevices', {value: {getUserMedia: capture}, configurable: true});
+      state.installed = navigator.mediaDevices.getUserMedia === capture;
+    } catch (error) {state.error = 'install: ' + String(error);}
   });
   const rig = await info();
+  await page.bringToFront();
   await page.goto(`${rig.origin}/?engine=${rig.engineId}&testhooks=1#pair=${rig.key}`);
-  await page.getByRole('button', {name: 'Pair', exact: true}).last().click();
+  await page.locator('.cyc-pairing-row.is-confirm').getByRole('button', {name: 'Pair', exact: true}).click();
   await page.locator('.cyc-session-entry').first().click();
   await expect(page.locator('.cyc-composer-input').first()).toBeVisible();
   await page.evaluate(() => {
@@ -173,6 +183,8 @@ test('real call UI captures synthetic microphone PCM and plays a growing spoken 
     w.__cycStore.onSayGrow(() => w.__gateVoice.grows++);
     w.__cycStore.onSayDone(() => w.__gateVoice.done++);
   });
+  expect(await page.evaluate(() => typeof MediaRecorder), 'native MediaRecorder is required; do not replace it with a fake recorder to pass the voice gate').toBe('function');
+  expect(await page.evaluate(() => (window as any).__gateMic.installed)).toBe(true);
   await page.locator('.cyc-conv-toggle:visible').first().click({timeout: 10_000});
   await expect.poll(() => page.evaluate(() => !!(window as any).__cycPipeline.handsFreeSessionId)).toBe(true);
   await page.evaluate(() => {(window as any).__gateMic.gain.gain.value = 0.15;});

@@ -159,6 +159,7 @@ export class WsEngineClient implements EngineClient {
 
   private sec: SecState | null = null;
   private writeBytes = 0;
+  private writeJobs = 0;
 
   private hs: HandshakeState | null = null;
 
@@ -1202,11 +1203,12 @@ export class WsEngineClient implements EngineClient {
     const sec = this.sec;
     if (!pipe?.open || !sec?.ready) return false;
     const bytes = new TextEncoder().encode(raw).byteLength;
-    if (this.writeBytes + bytes > 32 * 1024 * 1024) {
+    if (this.writeJobs >= 1024 || this.writeBytes + bytes > 32 * 1024 * 1024) {
       pipe.close(1009, 'writer-limit');
       return false;
     }
     this.writeBytes += bytes;
+    this.writeJobs++;
     const chan = sec.chan;
     sec.writeChain = sec.writeChain.then(async () => {
       if (!pipe.open || this.sec !== sec) return;
@@ -1225,7 +1227,7 @@ export class WsEngineClient implements EngineClient {
       try {
         pipe.send(JSON.stringify(sealed));
       } catch {}
-    }).finally(() => { this.writeBytes -= bytes; });
+    }).finally(() => { this.writeBytes -= bytes; this.writeJobs--; });
     return true;
   }
 
