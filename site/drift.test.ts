@@ -1,7 +1,7 @@
 // site/drift.test.ts -- guards the served installer against drift.
 //
 // scripts/install.sh is the single source of truth. site/build.sh copies it to
-// site/install.sh so Cloudflare Pages can serve it verbatim at
+// site/install.sh so the static site can serve it verbatim at
 // https://callyourcode.com/install.sh. This test fails the moment the two
 // files differ, so the committed copy stays faithful to the source and CI can
 // catch a stale copy before it ships.

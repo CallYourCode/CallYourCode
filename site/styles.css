@@ -50,7 +50,7 @@ a:hover { text-decoration: underline; }
 .brand .badge { width: 28px; height: 28px; flex: none; }
 .brand .badge img { width: 28px; height: 28px; border-radius: 7px; display: block; }
 .brand .name { font-family: "IBM Plex Mono", monospace; font-weight: 600; font-size: 15px; }
-.site-nav { display: flex; gap: 6px; font-size: 14px; align-items: center; }
+.site-nav { display: flex; margin-left: auto; gap: 6px; font-size: 14px; align-items: center; }
 .site-nav a { color: var(--muted); padding: 6px 10px; border-radius: 6px; }
 .site-nav a:hover { color: var(--ink); text-decoration: none; }
 .theme-toggle {
@@ -58,15 +58,6 @@ a:hover { text-decoration: underline; }
   border-radius: 6px; padding: 6px 11px;
   font-family: "IBM Plex Mono", monospace; font-size: 12px; cursor: pointer;
 }
-.btn-login {
-  margin-left: auto; flex: none;
-  border: 0; background: transparent; color: var(--muted);
-  padding: 6px 10px; border-radius: 6px; cursor: pointer;
-  font-family: "IBM Plex Sans", system-ui, sans-serif; font-size: 14px;
-  text-decoration: none; display: inline-flex; align-items: center;
-}
-.btn-login:hover { color: var(--ink); }
-
 /* type */
 .eyebrow { margin: 0 0 8px; font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--copper); letter-spacing: .02em; }
 h1.hero-title {
@@ -106,7 +97,6 @@ h2.section-title { margin: 0; font-size: 32px; line-height: 1.12; font-weight: 7
   .site-nav { gap: 1px; }
   .site-nav a { padding: 6px 7px; }
   .theme-toggle { padding: 6px 9px; }
-  .btn-login { padding: 7px 13px; font-size: 13px; }
 }
 @media (max-width: 900px) {
   .hero .shot.duo { padding-block: 9% 9%; }
