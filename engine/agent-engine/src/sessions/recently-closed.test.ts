@@ -130,20 +130,22 @@ async function reopen(h: ServedRoutes, agentId: string, resume: boolean): Promis
   return h.post("/new-session", { agentId, resume });
 }
 
-test("reopen with resume replays the harness --resume verb AND the CYC_AGENT_ID", async () => {
-  const { c, http: h } = await routed();
-  await seedDead(
-    { agentId: AG(1), name: "Ada", harness: "claude", cwd: HARNESS_CWD, sessionId: UUID },
-    Date.now()
-  );
-  const res = await reopen(h, AG(1), true);
-  const body = (await res.json()) as { ok: boolean; paneId?: string; agentId?: string };
-  expect(body.ok, JSON.stringify(body)).toBe(true);
-  expect(body.agentId, "reopened UNDER THE OLD id, so name/photo/chat survive").toBe(AG(1));
-  const typed = c.herdr.texts.find((t) => t.paneId === body.paneId)?.text ?? "";
-  expect(typed).toContain(`CYC_AGENT_ID=${AG(1)}`);
-  expect(typed, "the claude --resume verb onto the stored session id").toContain(`--resume ${UUID}`);
-});
+for (const agentId of [AG(1), "ag-bzoutreachP1n01"]) {
+  test(`reopen with resume replays the harness --resume verb AND the CYC_AGENT_ID (${agentId})`, async () => {
+    const { c, http: h } = await routed();
+    await seedDead(
+      { agentId, name: "Ada", harness: "claude", cwd: HARNESS_CWD, sessionId: UUID },
+      Date.now()
+    );
+    const res = await reopen(h, agentId, true);
+    const body = (await res.json()) as { ok: boolean; paneId?: string; agentId?: string };
+    expect(body.ok, JSON.stringify(body)).toBe(true);
+    expect(body.agentId, "reopened UNDER THE OLD id, so name/photo/chat survive").toBe(agentId);
+    const typed = c.herdr.texts.find((t) => t.paneId === body.paneId)?.text ?? "";
+    expect(typed).toContain(`CYC_AGENT_ID=${agentId}`);
+    expect(typed, "the claude --resume verb onto the stored session id").toContain(`--resume ${UUID}`);
+  });
+}
 
 test("reopen per harness carries the resume verb (codex, opencode)", async () => {
   for (const [harness, needle] of [["codex", "resume"], ["opencode", "--session"]] as const) {

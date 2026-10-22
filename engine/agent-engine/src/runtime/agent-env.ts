@@ -16,13 +16,12 @@
  *   bun test agent-engine/src/runtime/agent-env.test.ts
  */
 
-/* `ag-` plus 16 base64url chars: exactly what agentmeta.ts mintAgentId emits.
- * base64url is [A-Za-z0-9_-], so the class admits `-` and `_` and nothing that
- * a shell would read as an operator. */
-const AGENT_ID_RE = /^ag-[A-Za-z0-9_-]{16}$/;
+/* Existing ids use the store grammar in ids.ts. Its base64url charset admits
+ * nothing that a shell would read as an operator. */
+import { AGENT_ID_RE } from "./ids.ts";
 
 /** Prefix a launch command with the child's stable agent id. Throws on an id
- *  that does not match the mint's shape, BEFORE the id touches a command line. */
+ *  outside the store grammar, BEFORE the id touches a command line. */
 export function withAgentEnv(command: string, agentId: string): string {
   if (!AGENT_ID_RE.test(agentId)) {
     throw new Error(`refusing to inject a malformed agent id onto a command line: ${JSON.stringify(agentId)}`);

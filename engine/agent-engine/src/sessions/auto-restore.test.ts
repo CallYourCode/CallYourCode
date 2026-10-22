@@ -6,6 +6,7 @@ import type { MultiplexerAdapter } from "../adapters/mux-adapter.ts";
 import { until } from "../test-utils/wait.ts";
 import { sessions, type Session } from "./session-state.ts";
 import { incarnation, restoreDecision, shellProcess, startAutoRestore, type RunningAgent } from "./auto-restore.ts";
+import { recordHookBind, resetHookAnnounce } from "../terminal/hook-announce.ts";
 
 const record: RunningAgent = {
   agentId: "ag-0123456789abcdef", running: true, paneId: "w1:p1", workspace: "w1",
@@ -130,6 +131,131 @@ for (const seeded of [false, true]) {
       server.stop(true);
       sessions.clear();
       for (const [id, s] of priorSessions) sessions.set(id, s);
+      for (const [key, value] of Object.entries(env)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+const recoveryIds = ["ag-nktLTW7CPaG6SriW", "ag-giIV9kN7thgwlFdt", "ag-bzoutreachP1n01", "ag-L8tdr9Dn02ev24jK"];
+const invalidRecords = [
+  { value: { ...record, agentId: "ag-bad;id" }, field: "agentId" },
+  { value: { ...record, running: "true" }, field: "running" },
+  { value: { ...record, cwd: 42 }, field: "cwd" },
+  { value: { ...record, sessionId: "w1:p1" }, field: "sessionId" },
+  { value: { ...record, attempted: { bootId: "old" } }, field: "attempted.herdrInstance" },
+  { value: null, field: "record" },
+];
+const loadCases = [
+  { name: "four existing ids restore and remain observed", invalid: undefined, corrupt: undefined },
+  ...invalidRecords.map((invalid) => ({ name: `bad ${invalid.field} skips only its record`, invalid, corrupt: undefined })),
+  ...["{broken", JSON.stringify({ version: 2, agents: [] }), "null", JSON.stringify({ version: 1, agents: {} })]
+    .map((corrupt) => ({ name: `invalid state ${corrupt} is moved aside without disabling recording`, invalid: undefined, corrupt })),
+];
+for (const scenario of loadCases) {
+  test(scenario.name, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cyc-restore-load-"));
+    const env = { CYC_DATA_DIR: process.env.CYC_DATA_DIR, HERDR_SOCKET_PATH: process.env.HERDR_SOCKET_PATH };
+    const priorSessions = new Map(sessions);
+    const path = join(dir, "state", "running-agents.json");
+    const badPath = `${path}.bad-123456789`;
+    const rows = recoveryIds.map((agentId, i) => ({ ...record, agentId, paneId: `w1:p${i + 1}`,
+      cwd: join(dir, String(i)), sessionId: `${i + 1}1111111-1111-4111-8111-111111111111` }));
+    const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+    const notices: string[] = [], commands: string[] = [];
+    let agentEvent: (() => void) | undefined;
+    let live = true;
+    process.env.CYC_DATA_DIR = dir;
+    process.env.HERDR_SOCKET_PATH = join(dir, "herdr.sock");
+    const server = Bun.listen({
+      unix: process.env.HERDR_SOCKET_PATH,
+      socket: {
+        data(sock, chunk) {
+          for (const line of chunk.toString().trim().split("\n")) {
+            const msg = JSON.parse(line);
+            const panes = live ? [...sessions.values()].map((s) => ({ pane_id: s.muxHandle, workspace_id: "w1",
+              cwd: s.cwd, agent: "pi", agent_session: { value: s.harnessSessionId } })) : [];
+            sock.write(JSON.stringify({ id: msg.id, result: { snapshot: { panes, agents: panes } } }) + "\n");
+          }
+        },
+      },
+    });
+    const interval = spyOn(globalThis, "setInterval");
+    const readRows = (): RunningAgent[] => JSON.parse(readFileSync(path, "utf8")).agents;
+    try {
+      sessions.clear();
+      resetHookAnnounce();
+      mkdirSync(join(dir, "state"));
+      const text = scenario.corrupt ?? JSON.stringify({ version: 1, agents: [...rows, ...(scenario.invalid ? [scenario.invalid.value] : [])] });
+      writeFileSync(path, text);
+      startAutoRestore({
+        now: () => 123456789,
+        adapter: {
+          onAgents: (cb: () => void) => { agentEvent = cb; },
+          resumeCommand: (_harness: string, sid: string) => `pi --resume ${sid}`,
+          async spawn(opts: { command: string; cwd: string }) {
+            const r = rows.find((r) => r.cwd === opts.cwd)!;
+            commands.push(opts.command);
+            sessions.set(r.agentId, { agentId: r.agentId, muxHandle: r.paneId, alive: true, viaMux: true,
+              cwd: r.cwd, agent: { id: "pi" }, harnessSessionId: r.sessionId } as Session);
+            recordHookBind(r.paneId, r.sessionId!, 1);
+            return { handle: r.paneId };
+          },
+        } as unknown as MultiplexerAdapter,
+        log: (event, fields) => { events.push({ event, fields }); },
+        notify: async (body) => { notices.push(body); },
+      });
+      // A bad record/file must still reach startup completion, not restore.disabled.
+      await until(() => events.some(({ event }) => event === "restore.summary" || event === "restore.disabled"), { what: "recovery completion" });
+      expect(events.map(({ event }) => event)).not.toContain("restore.disabled");
+      expect(agentEvent).toBeDefined();
+      if (scenario.corrupt !== undefined) {
+        expect(events.map(({ event }) => event)).toContain("restore.state.invalid");
+        expect(readFileSync(badPath, "utf8")).toBe(text);
+        expect(existsSync(path)).toBe(false);
+        expect(notices).toHaveLength(1);
+        expect(commands).toHaveLength(0);
+        const r = rows[2]!;
+        sessions.set(r.agentId, { agentId: r.agentId, muxHandle: r.paneId, alive: true, viaMux: true,
+          cwd: r.cwd, agent: { id: "pi" }, harnessSessionId: r.sessionId } as Session);
+        await until(() => {
+          if (existsSync(path)) return true;
+          agentEvent!();
+          return false;
+        }, { what: "recording after invalid state" });
+        expect(readRows()).toEqual([{ ...r, ...incarnation() }]);
+      } else {
+        expect(commands).toEqual(rows.map((r) => `env CYC_AGENT_ID=${r.agentId} pi --resume ${r.sessionId}`));
+        expect(readRows().map((r) => r.agentId)).toEqual(recoveryIds);
+        expect(events.filter(({ event }) => event === "restore.detected")).toHaveLength(4);
+        const invalid = events.filter(({ event }) => event === "restore.record.invalid");
+        if (scenario.invalid) {
+          expect(invalid).toHaveLength(1);
+          expect(invalid[0]!.fields.field).toBe(scenario.invalid.field);
+          if (scenario.invalid.value) expect(invalid[0]!.fields.agentId).toBe(scenario.invalid.value.agentId);
+        } else expect(invalid).toHaveLength(0);
+        expect(existsSync(badPath)).toBe(false);
+        expect(notices).toHaveLength(1);
+        expect(notices[0]).toContain("Restored 4 agents.");
+        // Subsequent observations must still record deliberate stops for all ids.
+        live = false;
+        for (const s of sessions.values()) s.alive = false;
+        await until(() => {
+          if (readRows().every((r) => !r.running)) return true;
+          agentEvent!();
+          return false;
+        }, { what: "stops for all restored ids" });
+        expect(events.filter(({ event }) => event === "restore.stopped")).toHaveLength(4);
+      }
+    } finally {
+      for (const result of interval.mock.results) if (result.type === "return") clearInterval(result.value);
+      interval.mockRestore();
+      server.stop(true);
+      sessions.clear();
+      for (const [id, s] of priorSessions) sessions.set(id, s);
+      resetHookAnnounce();
       for (const [key, value] of Object.entries(env)) {
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }

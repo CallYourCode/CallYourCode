@@ -131,6 +131,28 @@ let cleanup: (() => void) | null = null;
 afterEach(() => { delete process.env.CYC_PI_EVENT_SOCK; if (cleanup) { cleanup(); cleanup = null; } });
 
 describe("the pi output extension", () => {
+  test("--cyc-agent-id accepts existing store ids and rejects unsafe or out-of-bounds values", () => {
+    const argv = process.argv;
+    const previous = process.env.CYC_AGENT_ID;
+    try {
+      for (const id of ["ag-bzoutreachP1n01", "ag-0123456789abcdef", "ag-x", `ag-${"x".repeat(64)}`]) {
+        delete process.env.CYC_AGENT_ID;
+        process.argv = [...argv, "--cyc-agent-id", id];
+        activate({ ...stubPi(), registerFlag() {} } as any);
+        expect(String(process.env.CYC_AGENT_ID), id).toBe(id);
+      }
+      for (const id of ["ag-", `ag-${"x".repeat(65)}`, "ag-x;rm", "ag-$(id)", "ag-x y", "ag-é", "ag-x\n"]) {
+        delete process.env.CYC_AGENT_ID;
+        process.argv = [...argv, "--cyc-agent-id", id];
+        activate({ ...stubPi(), registerFlag() {} } as any);
+        expect(process.env.CYC_AGENT_ID, id).toBeUndefined();
+      }
+    } finally {
+      process.argv = argv;
+      if (previous === undefined) delete process.env.CYC_AGENT_ID; else process.env.CYC_AGENT_ID = previous;
+    }
+  });
+
   test("streams session identity, a message and a tool as frames with stable ids", async () => {
     const sockPath = join(tmpdir(), `pi-ext-${process.pid}-${Date.now()}.sock`);
     const engine = await fakeEngine(sockPath);

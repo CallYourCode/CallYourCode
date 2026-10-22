@@ -42,7 +42,8 @@ export { dataDir, logsDir };
  * scan at boot reads directory names off disk and a plugin name arrives from a
  * spec, so both are held to a strict charset before they touch a path: nothing
  * with a slash or a dot can pass, so no id can escape its directory. */
-export const AGENT_ID_RE = /^ag-[A-Za-z0-9_-]{1,64}$/;
+import { AGENT_ID_RE } from "../runtime/ids.ts";
+export { AGENT_ID_RE };
 export const PLUGIN_NAME_RE = /^[a-z0-9-]{1,64}$/;
 
 export function safeAgentId(id: string): boolean {

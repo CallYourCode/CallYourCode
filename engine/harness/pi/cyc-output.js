@@ -354,7 +354,8 @@ function activate(pi, deps) {
       pi.registerFlag(flag, { type: "string", description: "cyc native pane launch context" });
       const at = process.argv.indexOf(`--${flag}`);
       const value = at >= 0 ? process.argv[at + 1] : null;
-      if (value && (flag !== "cyc-agent-id" || /^ag-[A-Za-z0-9_-]{16}$/.test(value))) process.env[env] = value;
+      // Mirror agent-engine/src/runtime/ids.ts: existing ids, not just minted lengths.
+      if (value && (flag !== "cyc-agent-id" || /^ag-[A-Za-z0-9_-]{1,64}$/.test(value))) process.env[env] = value;
     }
   }
   /* THE REPLY CHANNEL (reply-channel.js): register speak/chat/show so a pi agent

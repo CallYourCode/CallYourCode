@@ -58,10 +58,13 @@ describe("the grammars themselves", () => {
     expect(TMUX_PANE_RE.test("%3~1~2")).toBe(true);
     expect(TMUX_PANE_RE.test("%3~1")).toBe(false);
   });
-  test("isAgentId is the mint's shape", () => {
-    expect(isAgentId(AGENT)).toBe(true);
-    expect(isAgentId("ag-short")).toBe(false);
-    expect(isAgentId(CLAUDE)).toBe(false);
+  test("isAgentId accepts existing store ids with 1..64 shell-safe body characters", () => {
+    for (const id of [AGENT, "ag-bzoutreachP1n01", "ag-short", "ag-x", `ag-${"x".repeat(64)}`, "ag-_-0"]) {
+      expect(isAgentId(id), id).toBe(true);
+    }
+    for (const id of [CLAUDE, "ag-", `ag-${"x".repeat(65)}`, "ag-x;id", "ag-$(id)", "ag-x y", "ag-é", "ag-x\n", null, 42]) {
+      expect(isAgentId(id), String(id)).toBe(false);
+    }
   });
   test("the announce route's grammar admits every harness id and no pane id", () => {
     for (const id of [CLAUDE, CODEX, PI, OPENCODE]) expect(ANNOUNCE_ID_RE.test(id), id).toBe(true);

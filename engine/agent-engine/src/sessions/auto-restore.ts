@@ -8,7 +8,7 @@ import { rpc, socketPath } from "../terminal/herdr.ts";
 import { hookBindFor, hookAnnouncementVersion } from "../terminal/hook-announce.ts";
 import type { MultiplexerAdapter } from "../adapters/mux-adapter.ts";
 import { withAgentEnv } from "../runtime/agent-env.ts";
-import { isHarnessSessionId } from "../runtime/ids.ts";
+import { AGENT_ID_RE, isHarnessSessionId } from "../runtime/ids.ts";
 import { agentIdOfProc } from "../runtime/agents.ts";
 import { sessions } from "./session-state.ts";
 import { bindSpawnedPane } from "./carry.ts";
@@ -78,17 +78,33 @@ function persist(path: string, rows: RunningAgent[]): void {
   const d = openSync(dir, "r");
   try { fsyncSync(d); } finally { closeSync(d); }
 }
-function load(path: string): RunningAgent[] {
+function load(path: string, log: Log): RunningAgent[] {
   let text: string;
   try { text = readFileSync(path, "utf8"); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return []; throw e; }
   const value = JSON.parse(text);
-  if (value.version !== 1 || !Array.isArray(value.agents)) throw new Error("invalid running intent file");
+  if (!value || value.version !== 1 || !Array.isArray(value.agents)) throw new Error("invalid running intent file");
+  const rows: RunningAgent[] = [];
   for (const r of value.agents) {
-    if (!/^ag-[A-Za-z0-9_-]{16}$/.test(r.agentId) || typeof r.running !== "boolean" ||
-        !["paneId", "workspace", "cwd", "harness", "bootId", "herdrInstance"].every((k) => typeof r[k] === "string") ||
-        !(r.sessionId === null || isHarnessSessionId(r.sessionId))) throw new Error("invalid running agent record");
+    let field: string | undefined;
+    if (!r || typeof r !== "object" || Array.isArray(r)) field = "record";
+    else if (typeof r.agentId !== "string" || !AGENT_ID_RE.test(r.agentId)) field = "agentId";
+    else if (typeof r.running !== "boolean") field = "running";
+    else {
+      field = ["paneId", "workspace", "cwd", "harness", "bootId", "herdrInstance"].find((k) => typeof r[k] !== "string");
+      if (!field && !(r.sessionId === null || isHarnessSessionId(r.sessionId))) field = "sessionId";
+      if (!field && r.attempted !== undefined) {
+        if (!r.attempted || typeof r.attempted !== "object" || Array.isArray(r.attempted)) field = "attempted";
+        else if (typeof r.attempted.bootId !== "string") field = "attempted.bootId";
+        else if (typeof r.attempted.herdrInstance !== "string") field = "attempted.herdrInstance";
+      }
+    }
+    if (field) {
+      log("restore.record.invalid", { ...(typeof r?.agentId === "string" ? { agentId: r.agentId } : {}), field });
+      continue;
+    }
+    rows.push(r);
   }
-  return value.agents;
+  return rows;
 }
 async function duplicate(r: RunningAgent, snap: Snapshot): Promise<boolean> {
   for (const p of snap.panes) {
@@ -120,11 +136,15 @@ export function startAutoRestore(deps: {
   const now = deps.now ?? Date.now;
   const log: Log = (event, fields) => { console.log(`[${event}] ${JSON.stringify(fields)}`); deps.log(event, fields); };
   const path = join(dataDir(), "state", "running-agents.json");
-  let rows: RunningAgent[];
-  try { rows = load(path); } catch (e) {
-    log("restore.disabled", { error: String(e) });
+  let rows: RunningAgent[] = [];
+  try { rows = load(path, log); } catch (e) {
+    const badPath = `${path}.bad-${now()}`;
+    log("restore.state.invalid", { error: String(e), badPath });
     void deps.notify(`Restored 0 agents. Recovery state could not be read: ${String(e)}`).catch(() => {});
-    return;
+    try { renameSync(path, badPath); } catch (moveError) {
+      log("restore.state.invalid", { error: String(moveError), badPath, operation: "move-aside" });
+    }
+    // Invalid recovery state must not disable observation of current agents.
   }
   let observing = false;
   let active = false;
