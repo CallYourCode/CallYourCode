@@ -21,8 +21,15 @@ test("the portable `env` form is used, not a bare shell assignment (fish parses 
 test("a real minted id always passes the charset gate", () => {
   for (let i = 0; i < 200; i++) {
     const aid = mintAgentId();
+    expect(aid).toMatch(/^ag-[A-Za-z0-9_-]{16}$/);
     expect(() => withAgentEnv("claude", aid)).not.toThrow();
     expect(withAgentEnv("claude", aid)).toBe(`env CYC_AGENT_ID=${aid} claude`);
+  }
+});
+
+test("existing store ids need not have the mint's 16-character body", () => {
+  for (const aid of ["ag-bzoutreachP1n01", "ag-x", `ag-${"x".repeat(64)}`, "ag-short", "ag-3fK9x2mPq81LbR0w-extra"]) {
+    expect(withAgentEnv("pi --resume", aid)).toBe(`env CYC_AGENT_ID=${aid} pi --resume`);
   }
 });
 
@@ -31,8 +38,11 @@ test("a malformed id is refused BEFORE it reaches a command line", () => {
     "",
     "ag-",
     "notanid",
-    "ag-tooShort",
-    "ag-3fK9x2mPq81LbR0w-extra",
+    `ag-${"x".repeat(65)}`,
+    "ag-$(id)",
+    "ag-x|id",
+    "ag-x y",
+    "ag-é",
     "ag-3fK9x2mPq81LbR0;rm -rf /", // a shell-injection attempt
     "ag-3fK9x2mPq81LbR0 ",         // trailing space
     "ag-3fK9x2mPq81LbR0\n",        // a newline

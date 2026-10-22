@@ -1,7 +1,7 @@
 /* THE ID GRAMMARS, in one place. Three kinds of id cross the engine and only
  * one of them may ever name a conversation:
  *
- *   agent id      `ag-` + 16 base64url chars: the engine's own, the key of
+ *   agent id      `ag-` + 1..64 base64url chars (minted ids use 16): the key of
  *                 everything (agents/<agentId>/, the wire, the bindings).
  *   harness id    what the coding agent calls its session: a UUID (claude,
  *                 pi, codex's UUIDv7) or opencode's `ses_` + alphanumerics.
@@ -27,8 +27,8 @@ export const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F
 /* opencode (and codex's `ses_` spelling): `ses_` + 20..40 alphanumerics. */
 export const SES_RE = /^ses_[A-Za-z0-9]{20,40}$/;
 
-/* The engine's own agent id (mintAgentId in agentmeta.ts). */
-export const AGENT_ID_RE = /^ag-[A-Za-z0-9_-]{16}$/;
+/* Existing agent ids match the store grammar, not only mintAgentId's length. */
+export const AGENT_ID_RE = /^ag-[A-Za-z0-9_-]{1,64}$/;
 
 /* The pane shapes. herdr's public pane id is `w<ws>:p<pane>` (the ws and pane
  * parts are base36-ish tokens: "w7:p1", "w9:p1G", "wD:p1"); tmux's is `%N`,

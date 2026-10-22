@@ -119,7 +119,8 @@ const ctxFor = (leafId?: string) => ({
 // AGENT_PORT (default 10101). Pin it at a refused loopback port for the whole
 // file so no session_start emitted by these tests can reach a real engine on
 // :10101; the announce is fail-silent, so a refused port is a no-op. Tests
-// that assert the POST override AGENT_PORT at their own capture server.
+// that assert the POST override CYC_ENGINE_URL and AGENT_PORT at their own
+// capture server, since CYC_ENGINE_URL takes precedence.
 let prevAgentPort: string | undefined;
 beforeAll(() => { prevAgentPort = process.env.AGENT_PORT; process.env.AGENT_PORT = "1"; });
 afterAll(() => {
@@ -131,6 +132,28 @@ let cleanup: (() => void) | null = null;
 afterEach(() => { delete process.env.CYC_PI_EVENT_SOCK; if (cleanup) { cleanup(); cleanup = null; } });
 
 describe("the pi output extension", () => {
+  test("--cyc-agent-id accepts existing store ids and rejects unsafe or out-of-bounds values", () => {
+    const argv = process.argv;
+    const previous = process.env.CYC_AGENT_ID;
+    try {
+      for (const id of ["ag-bzoutreachP1n01", "ag-0123456789abcdef", "ag-x", `ag-${"x".repeat(64)}`]) {
+        delete process.env.CYC_AGENT_ID;
+        process.argv = [...argv, "--cyc-agent-id", id];
+        activate({ ...stubPi(), registerFlag() {} } as any);
+        expect(String(process.env.CYC_AGENT_ID), id).toBe(id);
+      }
+      for (const id of ["ag-", `ag-${"x".repeat(65)}`, "ag-x;rm", "ag-$(id)", "ag-x y", "ag-é", "ag-x\n"]) {
+        delete process.env.CYC_AGENT_ID;
+        process.argv = [...argv, "--cyc-agent-id", id];
+        activate({ ...stubPi(), registerFlag() {} } as any);
+        expect(process.env.CYC_AGENT_ID, id).toBeUndefined();
+      }
+    } finally {
+      process.argv = argv;
+      if (previous === undefined) delete process.env.CYC_AGENT_ID; else process.env.CYC_AGENT_ID = previous;
+    }
+  });
+
   test("streams session identity, a message and a tool as frames with stable ids", async () => {
     const sockPath = join(tmpdir(), `pi-ext-${process.pid}-${Date.now()}.sock`);
     const engine = await fakeEngine(sockPath);
@@ -236,7 +259,9 @@ describe("the pi output extension", () => {
       },
     });
     const prevPort = process.env.AGENT_PORT;
+    const prevEngineUrl = process.env.CYC_ENGINE_URL;
     process.env.AGENT_PORT = String(server.port);
+    process.env.CYC_ENGINE_URL = `http://127.0.0.1:${server.port}`;
     try {
       const pi = stubPi();
       activate(pi as any);
@@ -253,7 +278,10 @@ describe("the pi output extension", () => {
       pi.emit("model_select", { type: "model_select", model: { id: "claude-opus-5-5" } }, ctxFor());
       expect(await reposted).toMatchObject({ sessionId: "sess-abc", model: "claude-opus-5-5" });
     } finally {
-      process.env.AGENT_PORT = prevPort;
+      if (prevPort === undefined) delete process.env.AGENT_PORT;
+      else process.env.AGENT_PORT = prevPort;
+      if (prevEngineUrl === undefined) delete process.env.CYC_ENGINE_URL;
+      else process.env.CYC_ENGINE_URL = prevEngineUrl;
       server.stop(true);
       announce.announcedSessions.clear();
     }
@@ -443,7 +471,9 @@ describe("the pi output extension", () => {
     cleanup = () => engine.close();
     process.env.CYC_PI_EVENT_SOCK = sockPath;
     const prevPort = process.env.AGENT_PORT;
+    const prevEngineUrl = process.env.CYC_ENGINE_URL;
     process.env.AGENT_PORT = String(s.port);
+    process.env.CYC_ENGINE_URL = `http://127.0.0.1:${s.port}`;
     try {
       const pi = stubPi();
       activate(pi as any);
@@ -455,6 +485,8 @@ describe("the pi output extension", () => {
       s.stop();
       if (prevPort === undefined) delete process.env.AGENT_PORT;
       else process.env.AGENT_PORT = prevPort;
+      if (prevEngineUrl === undefined) delete process.env.CYC_ENGINE_URL;
+      else process.env.CYC_ENGINE_URL = prevEngineUrl;
     }
     const posts = s.captured.filter((c) => c.path === "/harness/announce");
     expect(posts.length).toBe(1);
