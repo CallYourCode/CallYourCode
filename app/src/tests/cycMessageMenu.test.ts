@@ -119,6 +119,7 @@ describe('menu contents', () => {
     const texts = opened[0]!.map((i) => i.text);
     expect(texts).toEqual(['Reply', 'Copy', 'Quote', 'Pin', 'Delete']);
     opened[0]!.find((i) => i.text === 'Delete')!.onClick();
+    expect(deps.setPinned).toHaveBeenCalledWith(session, session.messages[1], false);
     expect(deps.removeMessage).toHaveBeenCalledWith(session, session.messages[1]);
     opened[0]!.find((i) => i.text === 'Reply')!.onClick();
     expect(deps.startReply).toHaveBeenCalledWith(session, session.messages[1]);
@@ -260,6 +261,22 @@ describe('menu text actions share the stamp path', () => {
     opened.at(-1)!.find((i) => i.text === 'Delete')!.onClick();
     expect(deps.setPinned).toHaveBeenCalledWith(session, session.messages[1], false);
     expect(deps.removeMessage).toHaveBeenCalledWith(session, session.messages[1]);
+  });
+  test('delete supersedes a pending pin before the engine confirms it', () => {
+    const {api, deps, session} = mk();
+    api.openMessageMenu(messageFor(2), AT);
+    opened.at(-1)!.find((i) => i.text === 'Pin')!.onClick();
+    // The pin intent is queued or in flight, but confirmed settings are unchanged.
+    expect(deps.isPinned(session, session.messages[1])).toBe(false);
+    api.openMessageMenu(messageFor(2), AT);
+    opened.at(-1)!.find((i) => i.text === 'Delete')!.onClick();
+    expect(vi.mocked(deps.setPinned).mock.calls).toEqual([
+      [session, session.messages[1], true],
+      [session, session.messages[1], false]
+    ]);
+    expect(deps.removeMessage).toHaveBeenCalledWith(session, session.messages[1]);
+    expect(vi.mocked(deps.setPinned).mock.invocationCallOrder[1])
+      .toBeLessThan(vi.mocked(deps.removeMessage).mock.invocationCallOrder[0]);
   });
   test('a message without text has only reply and delete', () => {
     const {api, session} = mk();

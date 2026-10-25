@@ -153,7 +153,8 @@ export function installMessageMenu(deps: MessageMenuDeps) {
           text: 'Delete',
           danger: true,
           onClick: () => {
-            if (deps.isPinned(s, m)) deps.setPinned(s, m, false);
+            // Supersede queued or in-flight pins too, even before settings confirm them.
+            deps.setPinned(s, m, false);
             deps.removeMessage(s, m);
           }
         }
