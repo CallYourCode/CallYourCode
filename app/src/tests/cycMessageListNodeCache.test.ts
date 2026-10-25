@@ -115,6 +115,28 @@ describe('a row leaving and re-entering the window re-attaches its node', () => 
   });
 });
 
+test('a cached bubble reattaches with current pin settings, not its cached stamp state', () => {
+  const s = denseChat() as Chat & {settings: {pins: Array<{id: string}>}};
+  s.settings = {pins: []};
+  const {scroll, inner} = mount();
+  scroll.scrollTop = 40_000;
+  paint(inner, s);
+  const mids = Array.from(midsIn(inner));
+  const id = mids[Math.floor(mids.length / 2)];
+  const node = rowOf(inner, id)!;
+  for (const pinned of [true, false]) {
+    scroll.scrollTop = 200_000;
+    paint(inner, s);
+    expect(rowOf(inner, id)).toBeNull();
+    s.settings.pins = pinned ? [{id}] : [];
+    scroll.scrollTop = 40_000;
+    paint(inner, s);
+    expect(rowOf(inner, id)).toBe(node);
+    expect(!!node.querySelector('[aria-label="Pinned"]')).toBe(pinned);
+  }
+  clearMessages(inner);
+});
+
 describe('scrolling up keeps the overlap in place and prepends the entering rows', () => {
   test('an overlapping row is the SAME element after scrolling up; no duplicate rows', () => {
     CURRENT = denseChat();

@@ -37,15 +37,35 @@ export const SERVICE_CONTENT_UTILS =
 const REPLY_LINE = 'relative text-sm leading-5 whitespace-nowrap text-ellipsis overflow-hidden';
 
 // Message timestamp parts and placements.
+// Caption-less media keeps its metadata deliberately quiet, including pins.
+const STAMP_ICON_UTILS =
+  'me-1 text-[length:inherit] leading-none text-inherit opacity-70 [.cyc-message.cyc-msg-media-only_&]:hidden';
 const STAMP_ACT_UTILS =
-  // Caption-less media keeps its metadata deliberately quiet.
-  'cyc-stamp-act relative inline-flex cursor-pointer items-center border-0 bg-none p-0 me-1 text-[length:inherit] leading-none text-inherit opacity-70 active:opacity-100 [.cyc-message.cyc-msg-media-only_&]:hidden ' +
-  "after:content-[''] after:absolute after:-inset-1";
+  'cyc-stamp-act relative inline-flex cursor-pointer items-center border-0 bg-none p-0 active:opacity-100 ' +
+  STAMP_ICON_UTILS + " after:content-[''] after:absolute after:-inset-1";
 
 function stampActBtn(name: CycIconName, act: string, label: string): HTMLButtonElement {
   const b = h('button', STAMP_ACT_UTILS, {'data-act': act, title: label, 'aria-label': label});
   b.append(makeIcon(name));
   return b;
+}
+
+// Pins are chat settings, not message content. Patch the shared footer in place
+// on each list paint, including reused and reattached cached bubbles.
+export function setMessagePin(node: HTMLElement, pinned: boolean): void {
+  for (const stamp of node.querySelectorAll<HTMLElement>('.cyc-stamp')) {
+    const existing = stamp.querySelector('.cyc-stamp-pin');
+    if (!pinned) {
+      existing?.remove();
+    } else if (!existing) {
+      const copy = stamp.querySelector('[data-act="copy"]');
+      if (!copy) continue;
+      const icon = makeIcon('pin', 'cyc-stamp-pin cursor-default ' + STAMP_ICON_UTILS);
+      icon.setAttribute('role', 'img');
+      icon.setAttribute('aria-label', 'Pinned');
+      copy.before(icon);
+    }
+  }
 }
 
 function buildStampParts(m: CycMessage): (HTMLElement | string)[] {

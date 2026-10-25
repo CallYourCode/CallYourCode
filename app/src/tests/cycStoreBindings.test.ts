@@ -1,4 +1,5 @@
-import {beforeEach, describe, expect, test, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
+import {createScrollOwner} from '../features/chat/surface/scrollOwner';
 type Handler = (...a: never[]) => void;
 const fake = vi.hoisted(() => ({
   handlers: {} as Record<string, Handler>,
@@ -276,6 +277,109 @@ describe('the follow binding', () => {
     sessionState.activeId = null;
     (fake.handlers.store as Handler)();
     expect(deps.hub.render).toHaveBeenCalledWith(true);
+  });
+});
+describe('arrival follows transcript growth, not header layout', () => {
+  let frames: FrameRequestCallback[];
+  let teardowns: (() => void)[];
+  beforeEach(() => {
+    frames = [];
+    teardowns = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb));
+  });
+  afterEach(() => {
+    for (const teardown of teardowns) teardown();
+    vi.unstubAllGlobals();
+  });
+  const flushFrames = () => {
+    for (const cb of frames.splice(0)) cb(0);
+  };
+  function open(atBottom = false) {
+    const session = {id: 's1', messages: [{id: 'm1', ts: 1}], settings: {pins: [{id: 'm1'}]}};
+    fake.active = session;
+    const {cs} = mk();
+    const size = {total: 5000, content: 4700};
+    const scroll = cs.messageListScroll;
+    Object.defineProperties(scroll, {
+      scrollHeight: {get: () => size.total},
+      clientHeight: {value: 800}
+    });
+    Object.defineProperty(cs.messageListInner, 'scrollHeight', {get: () => size.content});
+    scroll.scrollTop = size.total - scroll.clientHeight - (atBottom ? 0 : 180);
+    // Use the real owner: header changes must be carried by its resize settle,
+    // not interpreted as message arrivals by the store subscription.
+    const owner = createScrollOwner({
+      scroll,
+      silentScrollTo: (top) => {
+        scroll.scrollTop = top;
+      },
+      scrollToBottom: () => {
+        scroll.scrollTop = size.total - scroll.clientHeight;
+      },
+      rewindowWrite: vi.fn(),
+      rewindow: vi.fn(),
+      listBanked: () => false,
+      isMachineScroll: () => true,
+      modelTop: () => scroll.scrollTop,
+      nearBottomPx: () => scroll.clientHeight / 3,
+      isPinned: () => atBottom,
+      notePin: vi.fn(),
+      distToEnd: () => size.total - scroll.clientHeight - scroll.scrollTop,
+      isLanding: () => false,
+      isDividerHeld: () => false,
+      reseatDivider: () => false,
+      bankShift: vi.fn(),
+      onTeardown: (teardown) => teardowns.push(teardown)
+    });
+    cs.nearBottom = owner.nearBottom;
+    cs.followArrival = vi.fn(owner.followArrival);
+    cs.recomputeNearBottom = vi.fn(owner.recomputeNearBottom);
+    fake.handlers.store();
+    flushFrames();
+    cs.followArrival.mockClear();
+    const toggle = (pinned: boolean) => {
+      session.settings.pins = pinned ? [{id: 'm1'}] : [];
+      const padDelta = pinned ? 58 : -58;
+      size.total += padDelta;
+      // Browsers clamp an end offset when the scroll extent shrinks.
+      scroll.scrollTop = Math.min(scroll.scrollTop, size.total - scroll.clientHeight);
+      fake.handlers.store();
+      owner.settleResize(padDelta);
+      flushFrames();
+    };
+    return {cs, session, size, scroll, toggle};
+  }
+  test('last-pin bar hide/show holds a mid-history reader at the same transcript position', () => {
+    const {cs, scroll, toggle} = open();
+    const before = scroll.scrollTop;
+    toggle(false);
+    expect(scroll.scrollTop).toBe(before - 58);
+    toggle(true);
+    expect(scroll.scrollTop).toBe(before);
+    expect(cs.followArrival).not.toHaveBeenCalled();
+  });
+  test('last-pin bar hide/show keeps an at-bottom reader at the bottom', () => {
+    const {cs, scroll, size, toggle} = open(true);
+    toggle(false);
+    expect(scroll.scrollTop).toBe(size.total - scroll.clientHeight);
+    toggle(true);
+    expect(scroll.scrollTop).toBe(size.total - scroll.clientHeight);
+    expect(cs.followArrival).not.toHaveBeenCalled();
+  });
+  test('late transcript growth still follows for a near-bottom reader', () => {
+    const {cs, size} = open();
+    size.content += 80;
+    size.total += 80;
+    fake.handlers.store();
+    flushFrames();
+    expect(cs.followArrival).toHaveBeenCalledOnce();
+  });
+  test('a new message still follows for a near-bottom reader', () => {
+    const {cs, session} = open();
+    session.messages.push({id: 'm2', ts: 2});
+    fake.handlers.store();
+    flushFrames();
+    expect(cs.followArrival).toHaveBeenCalledOnce();
   });
 });
 describe('the arrival read report', () => {
