@@ -498,6 +498,12 @@ function buildApp() {
         engine.cancelAttachmentSend(sessionId, mid);
       }
     },
+    isPinned: (s, m) => !!engine.get(s.id)?.settings?.pins?.some((p) => p.id === m.id),
+    setPinned: (s, m, pinned) => {
+      void engine.setMessagePinned(s.id, m.id, pinned).then((ok) => {
+        if (!ok) toast(pinned ? 'Could not pin message' : 'Could not unpin message');
+      });
+    },
     removeMessage: (s, m) => {
       s.messages.splice(s.messages.indexOf(m), 1);
       render();

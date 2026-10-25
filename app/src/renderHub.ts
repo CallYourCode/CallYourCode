@@ -303,6 +303,9 @@ export function createRenderHub(deps: RenderHubDeps) {
       sessionState.activeId ?? '',
       deps.mainColumns.dataset.view ?? '',
       s ? cvOf(s) : 'none',
+      // Pins are header inputs, not transcript content. A settings-only
+      // broadcast must repaint the strip even when no message row changed.
+      s ? JSON.stringify((s as CycEngineSession).settings?.pins ?? []) : '',
       d.replyLevel,
       d.complexity,
       d.verbosityOn ? 1 : 0,
@@ -542,6 +545,7 @@ export function createRenderHub(deps: RenderHubDeps) {
         msgBody: body,
         events: `${ev.length}#${evLast ? evLast.ts : -1}`,
         runs: `${runs.length}#${runFold}`,
+        pins: JSON.stringify(es.settings?.pins ?? []),
         status: s.status ?? '',
         thinking: s.thinking ? 1 : 0,
         turnSince: s.turnSince ?? 0,

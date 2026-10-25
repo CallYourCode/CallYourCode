@@ -1,3 +1,4 @@
+import type {MessagePin} from '@shared/message-pins';
 import {setLogAutoShip} from '../shared/logging';
 import {hostnameOf} from './hostNames';
 import {markSelfReload} from '@/shared/selfReload';
@@ -77,6 +78,7 @@ export type EngineSessionSettings = {
   activity?: boolean;
   /** The owner's list star: a mark on the row, no global default. */
   starred?: boolean;
+  pins?: MessagePin[];
 };
 
 export type EngineSession = {

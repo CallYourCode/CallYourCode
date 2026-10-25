@@ -17,6 +17,7 @@
  *   bun test agent-engine/src/sessions/session-state.test.ts
  */
 
+import { MESSAGE_PIN_CAP, parseMessagePins, rowIdOfMessage, type MessagePin } from "../../../shared/message-pins.ts";
 import { writeAtomicPrivate } from "../../../shared/runfiles.ts";
 import { settingsFile, stateFile, agentDocsDir, agentDocStateDir, agentPhotosDir, agentThumbsDir } from "../storage/datadir.ts";
 import { ChatStore, newChatId } from "../chat/chatstore.ts";
@@ -145,7 +146,7 @@ export function resolveSession(key: string): Session | undefined {
 export type PhotoRec = { file: string; mime: string; ts: number };
 /** `starred` is a mark the owner puts on a chat in the list (a star and a
  *  gold wash on the row); unlike mute and the bell it has no global default. */
-export type SessionSettings = { muted?: boolean; notify?: boolean; starred?: boolean };
+export type SessionSettings = { muted?: boolean; notify?: boolean; starred?: boolean; pins?: MessagePin[] };
 export type SeenRec = { doneSeq: number; seenDoneSeq: number };
 
 /** Everything this engine keeps ABOUT an agent that is not the live Session
@@ -253,7 +254,7 @@ export function settingsOf(sessionId: string): SessionSettings {
  *  Every change is broadcast so the other devices move in the same breath. */
 export function applySessionSettings(
   sessionId: string,
-  patch: Partial<Record<keyof SessionSettings, boolean | null>>,
+  patch: { [K in keyof SessionSettings]?: SessionSettings[K] | null },
 ): void {
   const cur: SessionSettings = { ...settingsOf(sessionId) };
   for (const [k, v] of Object.entries(patch)) {
@@ -265,6 +266,32 @@ export function applySessionSettings(
   else delete st.display.settings;
   scheduleAgentSave(sessionId);
   deps?.broadcastSessions();
+}
+
+/** The device sends an operation, never a replacement list: concurrent pins on
+ * different devices cannot overwrite one another. Snippets come from the log. */
+export function setMessagePinned(id: string, messageId: string, pinned: boolean): void {
+  const chat = sessions.get(id)?.chat ?? restoredChats.get(id) ?? [];
+  const pins = (settingsOf(id).pins ?? []).filter((p) => p.id !== messageId);
+  const m = chat.find((m) => rowIdOfMessage(m) === messageId);
+  if (pinned && m?.text.trim()) {
+    const existing = settingsOf(id).pins?.find((p) => p.id === messageId);
+    pins.unshift(existing ?? {
+      id: messageId, role: m.role, ts: m.ts, seq: m.seq,
+      snippet: m.text.slice(0, 120), pinnedAt: Date.now(),
+    });
+  }
+  pins.sort((a, b) => b.pinnedAt - a.pinnedAt);
+  applySessionSettings(id, { pins: pins.slice(0, MESSAGE_PIN_CAP) });
+}
+
+/** Missing log rows have no destination. Drop their pins without a toast. */
+export function pruneMessagePins(id: string, chat: ChatMsg[]): void {
+  const pins = settingsOf(id).pins;
+  if (!pins?.length) return;
+  const ids = new Set(chat.map(rowIdOfMessage));
+  const kept = pins.filter((p) => ids.has(p.id));
+  if (kept.length !== pins.length) applySessionSettings(id, { pins: kept });
 }
 
 // ---- restored read state --------------------------------------------------
@@ -482,8 +509,10 @@ export async function loadSessionState(d: SessionStateDeps): Promise<void> {
       if (typeof o.muted === "boolean") st.muted = o.muted;
       if (typeof o.notify === "boolean") st.notify = o.notify;
       if (typeof o.starred === "boolean") st.starred = o.starred;
+      if (Array.isArray(o.pins)) st.pins = parseMessagePins(o.pins);
       if (Object.keys(st).length) stateOf(id).display.settings = st;
     }
+    pruneMessagePins(id, restoredChats.get(id) ?? []);
     const r = meta.read;
     if (r && typeof r === "object") {
       const read = stateOf(id).read;

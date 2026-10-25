@@ -1,3 +1,6 @@
+import type {MessagePin} from '@shared/message-pins';
+import {makeIcon, makeIconButton} from '@/components/iconGlyphs';
+import {openMenu} from '@/components/popupMenu';
 import type {EngineAgentRun} from '../../../engine/contract';
 import {h} from '../../../components/domHelpers';
 
@@ -117,12 +120,17 @@ type AgentsBar = {
   refresh: () => void;
   el: HTMLElement;
 
-  update: (runs: EngineAgentRun[]) => void;
+  update: (runs: EngineAgentRun[], pins?: MessagePin[]) => void;
 
   reset: () => void;
 };
 
-type Entry = {run: EngineAgentRun; running: boolean};
+type Entry = {run?: EngineAgentRun; pin?: MessagePin; running: boolean};
+type PinActions = {
+  goTo?: (pin: MessagePin) => void;
+  unpin?: (pin: MessagePin) => void;
+};
+const entryKey = (e: Entry) => e.pin ? 'pin:' + e.pin.id : 'run:' + e.run.toolUseId;
 
 function fmtElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -132,7 +140,7 @@ function fmtElapsed(ms: number): string {
   return `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ''}`;
 }
 
-export function createAgentsBar(): AgentsBar {
+export function createAgentsBar(actions: PinActions = {}): AgentsBar {
   // `min-h-13` (3.25rem == the populated wrapper's 44px + p-1 8px) keeps a stable
   // strip height whether it shows the running-agents wrapper or only the jump pill;
   // it is inert when `cyc-off` (display:none) and when populated (already 52px).
@@ -157,7 +165,7 @@ export function createAgentsBar(): AgentsBar {
   const content = h(
     'div',
     'cyc-bar-content cyc-agents-strip-content pointer-events-none ' +
-      'flex flex-col justify-end overflow-visible! min-w-0 ms-2 h-10 relative'
+      'flex flex-col flex-1 justify-end overflow-visible! min-w-0 ms-2 h-10 relative'
   );
   // Idle title uses muted ink; `!` beats the accent base.
   const title = h(
@@ -179,7 +187,17 @@ export function createAgentsBar(): AgentsBar {
   const task = h('span', 'cyc-agents-task min-w-0 overflow-hidden text-ellipsis whitespace-nowrap');
   const age = h('span', 'cyc-agents-age flex-none whitespace-pre');
   content.append(title, subtitle);
-  wrapper.append(rail.el, content);
+  const goTo = makeIconButton('next', 'cyc-pin-goto cyc-off flex-none size-9! text-base!');
+  goTo.type = 'button';
+  goTo.title = 'Go to message';
+  goTo.setAttribute('aria-label', 'Go to message');
+  goTo.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const pin = entries[cycleIndex]?.pin;
+    if (pin) actions.goTo?.(pin);
+  });
+  wrapper.append(rail.el, content, goTo);
 
 
   const slot = h(
@@ -193,7 +211,42 @@ export function createAgentsBar(): AgentsBar {
   let entries: Entry[] = [];
   let cycleIndex = 0;
 
+  let holdTimer = 0;
+  let suppressClick = false;
+  const cancelHold = () => { clearTimeout(holdTimer); holdTimer = 0; };
+  const pinMenu = (event: MouseEvent | PointerEvent) => {
+    const pin = entries[cycleIndex]?.pin;
+    if (!pin) return;
+    suppressClick = true;
+    openMenu([
+      {icon: 'next', text: 'Go to message', onClick: () => actions.goTo?.(pin)},
+      {icon: 'pin', text: 'Unpin', onClick: () => actions.unpin?.(pin)}
+    ], event, {triggerElement: wrapper});
+  };
+  wrapper.addEventListener('contextmenu', (event) => {
+    cancelHold();
+    pinMenu(event);
+  });
+  let sx = 0, sy = 0;
+  wrapper.addEventListener('pointerdown', (event) => {
+    cancelHold();
+    suppressClick = false;
+    if (event.pointerType === 'mouse' || event.target instanceof Element && event.target.closest('button')) return;
+    sx = event.clientX; sy = event.clientY;
+    if (entries[cycleIndex]?.pin) holdTimer = window.setTimeout(() => {
+      holdTimer = 0;
+      suppressClick = true;
+      pinMenu(event);
+    }, 650);
+  });
+  wrapper.addEventListener('pointermove', (event) => {
+    if (Math.hypot(event.clientX - sx, event.clientY - sy) > 10) cancelHold();
+  });
+  wrapper.addEventListener('pointerup', cancelHold);
+  wrapper.addEventListener('pointercancel', cancelHold);
+  wrapper.addEventListener('pointerleave', cancelHold);
   wrapper.addEventListener('click', () => {
+    if (suppressClick) { suppressClick = false; return; }
     if (entries.length < 2) return;
     cycleIndex = (cycleIndex + 1) % entries.length;
     paint();
@@ -212,12 +265,23 @@ export function createAgentsBar(): AgentsBar {
     el.classList.remove('cyc-off');
 
     const running = entries.filter((e) => e.running).length;
-    if (running > 0) title.textContent = `${running} agent${running === 1 ? '' : 's'} running`;
-    else title.textContent = `${entries.length} agent${entries.length === 1 ? '' : 's'} done`;
-    el.classList.toggle('cyc-agents-idle', running === 0);
-
+    const agents = entries.filter((e) => e.run).length;
     if (cycleIndex >= entries.length) cycleIndex = 0;
     const e = entries[cycleIndex];
+    el.classList.toggle('cyc-agents-idle', running === 0 || !!e.pin);
+    goTo.classList.toggle('cyc-off', !e.pin);
+    rail.update({total: entries.length, active: cycleIndex});
+    if (e.pin) {
+      title.replaceChildren(makeIcon('pin', 'text-xs me-1'),
+        document.createTextNode(e.pin.role === 'user' ? 'Pinned, you' : 'Pinned message'));
+      task.textContent = e.pin.snippet;
+      age.textContent = '';
+      subtitle.replaceChildren(task, age);
+      subtitle.classList.remove('cyc-agents-pi', 'cyc-agents-entry-done');
+      return;
+    }
+    if (running > 0) title.textContent = `${running} agent${running === 1 ? '' : 's'} running`;
+    else title.textContent = `${agents} agent${agents === 1 ? '' : 's'} done`;
     const run = e.run;
     task.textContent = run.desc || '(no description)';
     if (e.running) age.textContent = ` · ${fmtElapsed(now - run.ts)}`;
@@ -244,7 +308,7 @@ export function createAgentsBar(): AgentsBar {
     rail.update({total: Math.max(1, entries.length), active: cycleIndex});
   }
 
-  function update(runs: EngineAgentRun[]) {
+  function update(runs: EngineAgentRun[], pins: MessagePin[] = []) {
     const now = Date.now();
     const next: Entry[] = [];
 
@@ -256,12 +320,13 @@ export function createAgentsBar(): AgentsBar {
       if (r.endedTs !== null && now - r.endedTs < doneWindowMs())
         next.push({run: r, running: false});
     }
+    next.push(...[...pins].sort((a, b) => b.pinnedAt - a.pinnedAt).map((pin) => ({pin, running: false})));
     const changedShape =
       next.length !== entries.length ||
       next.some(
-        (e, i) => e.run.toolUseId !== entries[i]?.run.toolUseId || e.running !== entries[i]?.running
+        (e, i) => entryKey(e) !== (entries[i] && entryKey(entries[i])) || e.running !== entries[i]?.running
       );
-    if (changedShape) cycleIndex = 0;
+    if (changedShape) { cancelHold(); cycleIndex = 0; }
     entries = next;
     paint();
   }
@@ -273,6 +338,7 @@ export function createAgentsBar(): AgentsBar {
 
     refresh: paint,
     reset: () => {
+      cancelHold();
       cycleIndex = 0;
       entries = [];
       paint();

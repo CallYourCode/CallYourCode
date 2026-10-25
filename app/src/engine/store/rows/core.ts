@@ -79,17 +79,8 @@ export type RowTuple = {id: string; seq: number; ts: number; kind: RowKind; ek?:
 //     increasing within a session. Only rows from an engine that predates mid
 //     minting reach it.
 // Namespaced `m:`/`m@` so a message id can never collide with an event id.
-export function rowIdOfMessage(m: {
-  cid?: string;
-  mid?: string;
-  ts: number;
-  role: string;
-  text: string;
-}): string {
-  if (m.cid) return `m:c:${m.cid}`;
-  if (m.mid) return `m:${m.mid}`;
-  return `m@${m.ts}|${m.role}|${m.text}`;
-}
+export {rowIdOfMessage} from '@shared/message-pins';
+import {rowIdOfMessage} from '@shared/message-pins';
 
 // Stamp a message with its one durable id (rowIdOfMessage). Every builder calls
 // this at construction, so a message object carries its own name from birth and

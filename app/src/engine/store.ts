@@ -1233,6 +1233,21 @@ export function setSessionSettings(
   return drain.whenSettled(row.id);
 }
 
+// Pin operations share the settings intent transport, but coalesce per message.
+// A device never sends its whole pin list over another device's newer list.
+export function setMessagePinned(sessionId: string, messageId: string, pinned: boolean): Promise<boolean> {
+  const s = sessions.get(sessionId);
+  if (!s) return Promise.resolve(false);
+  const row = intents.put({
+    id: 'spin:' + sessionId + ':' + (crypto.randomUUID?.() ?? Date.now().toString(36)),
+    engineKey: s.engineKey, sessionId, kind: 'session-settings',
+    coalesceKey: 'spin:' + sessionId + ':' + messageId,
+    payload: {paneId: s.paneId, patch: {pin: {id: messageId, pinned}}} satisfies SessionSettingsPayload
+  });
+  drain.kick(s.engineKey);
+  return drain.whenSettled(row.id);
+}
+
 drain.registerExecutor('session-settings', async (intent: Intent): Promise<DrainOutcome> => {
   const p = intent.payload as SessionSettingsPayload;
   const res = await postIntent(
@@ -1243,7 +1258,7 @@ drain.registerExecutor('session-settings', async (intent: Intent): Promise<Drain
   if (res.ok === true) return 'done';
   if (res.outcome !== 'transient') {
     const s = sessions.get(intent.engineKey + '|' + p.paneId);
-    if (s) showSessionSettings(s, s.confirmedSettings, p.patch as SessionSettingsPatch);
+    if (s && !('pin' in p.patch)) showSessionSettings(s, s.confirmedSettings, p.patch as SessionSettingsPatch);
   }
   return res.outcome;
 });

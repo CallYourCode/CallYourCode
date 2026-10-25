@@ -770,3 +770,60 @@ const seedRead = (id: string, read: {
     ...(read.filedTs ? { filedTs: read.filedTs } : {}),
   },
 });
+
+// Pins use the same settings persistence and sessions broadcast as the star.
+test("message pins add, deduplicate, remove, cap and broadcast per agent", async () => {
+  const msgs = Array.from({ length: 55 }, (_, i) => ({
+    id: A, mid: `mr-${i}`, cid: i === 0 ? "own-send" : undefined,
+    role: i === 0 ? "user" : "claude", ts: i + 1, text: "x".repeat(150), seq: i,
+  }));
+  await seed(S1, { agentId: A }, msgs);
+  await S.loadSessionState(deps);
+  S.setMessagePinned(A, "m:c:own-send", true);
+  const first = S.settingsOf(A).pins![0];
+  expect(first).toMatchObject({id: "m:c:own-send", role: "user", ts: 1, seq: 0, snippet: "x".repeat(120)});
+  expect(first.pinnedAt).toBeGreaterThan(0);
+  S.setMessagePinned(A, "m:c:own-send", true);
+  expect(S.settingsOf(A).pins).toEqual([first]);
+  S.setMessagePinned(A, "m:c:own-send", false);
+  expect(S.settingsOf(A).pins).toEqual([]);
+  for (let i = 1; i < 55; i++) S.setMessagePinned(A, `m:mr-${i}`, true);
+  expect(S.settingsOf(A).pins).toHaveLength(50);
+  expect(S.settingsOf(A).pins![0].id).toBe("m:mr-54");
+  expect(S.settingsOf(A).pins!.some((p) => p.id === "m:mr-1")).toBe(false);
+  expect(broadcasts).toBe(57);
+  expect(S.settingsOf("another-agent").pins).toBeUndefined();
+});
+
+test("pins persist through save and restart; missing messages are quietly pruned", async () => {
+  await seed(S1, { agentId: A }, [{id: A, mid: "mr-kept", role: "claude", text: "kept", ts: 10, seq: 0}]);
+  await S.loadSessionState(deps);
+  S.sessionStateReady();
+  S.setMessagePinned(A, "m:mr-kept", true);
+  const path = join(data, "agents", A, "meta.json");
+  await until(async () => (await Bun.file(path).json()).settings?.pins?.length === 1,
+    { what: "pin persisted to agent meta" });
+  const saved = S.settingsOf(A).pins!;
+  S.resetForTest();
+  await S.loadSessionState(deps);
+  expect(S.settingsOf(A).pins).toEqual(saved);
+  // An id not present in the log cannot leave a dangling pin.
+  S.setMessagePinned(A, "m:missing", true);
+  expect(S.settingsOf(A).pins).toEqual(saved);
+  S.pruneMessagePins(A, []);
+  expect(S.settingsOf(A).pins).toEqual([]);
+  // A stale persisted pin is dropped at boot too, before a device sees it.
+  const meta = await Bun.file(path).json();
+  meta.settings.pins.push({...saved![0], id: "m:gone"});
+  await Bun.write(path, JSON.stringify(meta));
+  S.resetForTest();
+  await S.loadSessionState(deps);
+  expect(S.settingsOf(A).pins).toEqual(saved);
+  S.sessionStateReady();
+  S.setMessagePinned(A, "m:mr-kept", false);
+  await until(async () => (await Bun.file(path).json()).settings?.pins?.length === 0,
+    { what: "unpin persisted" });
+  S.resetForTest();
+  await S.loadSessionState(deps);
+  expect(S.settingsOf(A).pins).toEqual([]);
+});

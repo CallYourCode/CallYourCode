@@ -1,3 +1,4 @@
+import type { MessagePin } from "../../../shared/message-pins.ts";
 /* agents/<agentId>/meta.json: the per-agent record (the design).
  *
  * Everything `.run` kept in per-session side files (names.json, voices.json,
@@ -56,7 +57,7 @@ export type AgentMeta = {
   name?: string;
   voice?: string;
   photo?: { file: string; mime: string; ts: number };
-  settings?: { muted?: boolean; notify?: boolean; starred?: boolean };
+  settings?: { muted?: boolean; notify?: boolean; starred?: boolean; pins?: MessagePin[] };
   read?: AgentRead;
   seeded?: boolean;
   /** content-proved predecessors of the current session (lineage.ts) */

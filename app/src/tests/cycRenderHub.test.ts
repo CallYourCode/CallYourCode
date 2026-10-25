@@ -213,6 +213,23 @@ describe('the settle-regime choke point', () => {
   });
 });
 describe('surface version gates (#403a)', () => {
+  test('a settings-only pin broadcast repaints the strip without repainting the transcript', () => {
+    const {hub, tp, cs} = mk();
+    const s = {id: 's1', messages: [] as Record<string, unknown>[], settings: {pins: [] as unknown[]}};
+    fake.sessions = [s];
+    fake.active = s;
+    sessionState.activeId = 's1';
+    hub.render(true);
+    const before = tp.updateAgentsBar.mock.calls.length;
+    const transcript = cs.bracketMessageRender.mock.calls.length;
+    s.settings.pins = [{id: 'm:old', ts: 1, role: 'user', snippet: 'old', pinnedAt: 2}];
+    hub.render(true);
+    expect(tp.updateAgentsBar).toHaveBeenCalledTimes(before + 1);
+    expect(cs.bracketMessageRender).toHaveBeenCalledTimes(transcript);
+    s.settings.pins = [];
+    hub.render(true);
+    expect(tp.updateAgentsBar).toHaveBeenCalledTimes(before + 2);
+  });
   test('an unchanged tabs version skips renderTabs on the store path, never on a direct render', () => {
     const {hub, list} = mk();
     hub.render(true);

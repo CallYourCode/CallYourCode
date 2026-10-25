@@ -91,6 +91,20 @@ describe('intents: coalescing per kind', () => {
     expect(intents.forEngine(APP_ENGINE_KEY)[0].payload).toEqual({patch: {speed: 2, sound: false}});
   });
 
+  test('pin settings operations coalesce per message without losing other pins or flags', () => {
+    const pin = (id: string, pinned: boolean) => put('session-settings',
+      {paneId: 'p', patch: {pin: {id, pinned}}}, `spin:p:${id}`);
+    pin('m:a', true);
+    pin('m:b', true);
+    pin('m:a', false);
+    put('session-settings', {paneId: 'p', patch: {starred: true}}, 'sset:p');
+    expect(intents.forEngine(K).map((i) => i.payload)).toEqual([
+      {paneId: 'p', patch: {pin: {id: 'm:a', pinned: false}}},
+      {paneId: 'p', patch: {pin: {id: 'm:b', pinned: true}}},
+      {paneId: 'p', patch: {starred: true}}
+    ]);
+  });
+
   test('sends never coalesce; a coalesced row keeps its place in the queue', () => {
     const r = put('rename', {paneId: 'p', name: 'one', before: 'zero'}, 'rename:p');
     vi.setSystemTime(Date.now() + 5);

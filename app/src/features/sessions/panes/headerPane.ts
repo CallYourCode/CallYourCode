@@ -30,7 +30,7 @@ export interface HeaderPaneDeps {
   notifyOn(sessionId: string): boolean;
   goToMessage(
     sessionId: string,
-    ref: {ts: number; role: 'user' | 'claude'; seq?: number}
+    ref: {ts: number; role: 'user' | 'claude'; seq?: number; id?: string}
   ): Promise<boolean>;
   openChat(id: string): void;
 
@@ -421,7 +421,18 @@ export function createHeaderPane(deps: HeaderPaneDeps) {
       .catch(() => {});
   };
 
-  const agentsBar = createAgentsBar();
+  const agentsBar = createAgentsBar({
+    goTo: (pin) => {
+      const s = active();
+      if (s) void deps.goToMessage(s.id, pin);
+    },
+    unpin: (pin) => {
+      const s = active();
+      if (s) void engine.setMessagePinned(s.id, pin.id, false).then((ok) => {
+        if (!ok) toast('Could not unpin message');
+      });
+    }
+  });
   // Producer-owned reservation: the strip floats over the message list, so the
   // list must pad its top by the strip's height (3.25rem == the wrapper's
   // `h-11`/44px + the root `p-1`/8px) plus a small 0.375rem breathing gap so the
@@ -437,7 +448,7 @@ export function createHeaderPane(deps: HeaderPaneDeps) {
     if (dataState.mode !== 'live' || !s) {
       agentsBar.reset();
     } else {
-      agentsBar.update(s.agentRuns ?? []);
+      agentsBar.update(s.agentRuns ?? [], s.settings?.pins ?? []);
     }
     const visible = !agentsBar.el.classList.contains('cyc-off');
     deps.chatEl.classList.toggle('cyc-has-agents-bar', visible);
