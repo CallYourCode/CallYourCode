@@ -776,14 +776,17 @@ export function loadOlder(sessionId: string): Promise<void> {
   })();
 }
 
-const heldFast = (s: CycEngineSession, ref: {ts: number; role: 'user' | 'claude'}) =>
-  s.messages.some((m) => m.ts === ref.ts && m.role === ref.role);
+// A ref with a durable id is held only when THAT row is: two rows can share a
+// ts and role, and a neighbour must not stand in for the target. ts/role stay
+// the fallback for a legacy ref that has no id.
+const heldFast = (s: CycEngineSession, ref: {ts: number; role: 'user' | 'claude'; id?: string}) =>
+  ref.id ? s.messages.some((m) => m.id === ref.id) : s.messages.some((m) => m.ts === ref.ts && m.role === ref.role);
 
 const ensureHeldFills = new Map<string, Promise<boolean>>();
 
 export function ensureMessageHeld(
   sessionId: string,
-  ref: {ts: number; role: 'user' | 'claude'; seq?: number}
+  ref: {ts: number; role: 'user' | 'claude'; seq?: number; id?: string}
 ): Promise<boolean> {
   const s = sessions.get(sessionId);
   if (!s) return Promise.resolve(false);

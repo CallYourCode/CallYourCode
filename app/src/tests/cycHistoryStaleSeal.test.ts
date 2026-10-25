@@ -184,6 +184,24 @@ describe('jump-to-message reaches an older target from the store', () => {
     expect(s.messages.some((m) => m.text === 'row-42')).toBe(true);
   });
 
+  test('a loaded row sharing the target ts and role does not stand in for the target id', async () => {
+    const s = seedSession();
+    // row 199 sits just below the newest window and shares row 200's exact ts
+    // and role; row 200 is the oldest row the window holds.
+    await rowStore.upsert(SID, seedRows().map((r, i) => (i === 199 ? messageRow(SID, {
+      id: 200, role: 'claude', kind: 'text', text: 'row-199', ts: 1000 + 200, seq: 199, mid: 'mr-199'
+    } as never) : r)));
+    reachable();
+    attach(SID);
+    await flush();
+    expect(s.messages.some((m) => m.text === 'row-200')).toBe(true);
+    expect(s.messages.some((m) => m.text === 'row-199')).toBe(false);
+
+    const ok = await ensureMessageHeld(SID, {ts: 1000 + 200, role: 'claude', seq: 199, id: 'm:mr-199'});
+    expect(ok).toBe(true);
+    expect(s.messages.some((m) => m.text === 'row-199')).toBe(true);
+  });
+
   test('a target the store does not hold, offline, is not found', async () => {
     seedSession();
     await rowStore.upsert(SID, seedRows());
