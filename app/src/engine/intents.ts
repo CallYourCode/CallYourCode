@@ -1,3 +1,4 @@
+import type {MessagePinUpdate} from '@shared/message-pins';
 import {INTENTS, transactionOn} from '@/shared/browser';
 import {cyclog} from '@/shared/logging';
 import type {CycReplyTo} from '../types';
@@ -134,7 +135,7 @@ export type UnreadPayload = {
  * for a legacy row with no mid and the coalesce key (furthest wins). */
 export type HeardPayload = {paneId: string; mid?: string; msgId?: string; ts: number};
 export type ProgressPayload = {paneId: string; seq: number; explicit: boolean};
-export type SessionSettingsPayload = {paneId: string; patch: Record<string, boolean | null>};
+export type SessionSettingsPayload = {paneId: string; patch: Record<string, boolean | null | MessagePinUpdate>};
 export type GlobalSettingsPayload = {patch: Record<string, unknown>};
 
 // Global settings live on the app server, not on any engine: their intents

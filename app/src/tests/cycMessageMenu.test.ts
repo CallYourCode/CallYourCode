@@ -56,6 +56,8 @@ function mk(over: Partial<MessageMenuDeps> = {}) {
     retrySend: vi.fn(),
     cancelSend: vi.fn(),
     removeMessage: vi.fn(),
+    isPinned: vi.fn(() => false),
+    setPinned: vi.fn(),
     isTouch: false,
     onTeardown: () => {},
     ...over
@@ -111,12 +113,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe('menu contents', () => {
-  test('whole message: reply + delete only; delete and reply hit the injected hooks', () => {
+  test('whole message: text actions and pin; delete and reply hit the injected hooks', () => {
     const {api, deps, session} = mk();
     api.openMessageMenu(messageFor(2), AT);
     const texts = opened[0]!.map((i) => i.text);
-    expect(texts).toEqual(['Reply', 'Delete']);
+    expect(texts).toEqual(['Reply', 'Copy', 'Quote', 'Pin', 'Delete']);
     opened[0]!.find((i) => i.text === 'Delete')!.onClick();
+    expect(deps.setPinned).toHaveBeenCalledWith(session, session.messages[1], false);
     expect(deps.removeMessage).toHaveBeenCalledWith(session, session.messages[1]);
     opened[0]!.find((i) => i.text === 'Reply')!.onClick();
     expect(deps.startReply).toHaveBeenCalledWith(session, session.messages[1]);
@@ -125,8 +128,8 @@ describe('menu contents', () => {
     const {api, deps} = mk();
     api.openMessageMenu(messageFor(1), AT);
     const texts = opened[0]!.map((i) => i.text);
-    expect(texts).toEqual(['Try again', 'Reply', 'Delete']);
-    opened[0]![0]!.onClick();
+    expect(texts).toEqual(['Reply', 'Copy', 'Quote', 'Pin', 'Try again', 'Delete']);
+    opened[0]!.find((i) => i.text === 'Try again')!.onClick();
     expect(deps.retrySend).toHaveBeenCalledWith('s1', '1');
   });
   test('the not-delivered note under a refused send is a tap that retries the same row', () => {
@@ -219,6 +222,74 @@ describe('menu contents', () => {
     api.openMessageMenu(document.createElement('div'), AT);
     api.openMessageMenu(messageFor(99), AT);
     expect(opened).toHaveLength(0);
+  });
+});
+describe('menu text actions share the stamp path', () => {
+  for (const selected of [false, true]) {
+    for (const action of ['Copy', 'Quote'] as const) {
+      test(`${action} from menu and stamp use ${selected ? 'selection' : 'whole text'}`, async () => {
+        const {api, deps, session} = mk();
+        const node = actMessage(2, 'reply');
+        deps.messageListInner.append(node);
+        if (selected) stubSelection('epl', node);
+        api.openMessageMenu(node, AT);
+        opened.at(-1)!.find((i) => i.text === action)!.onClick();
+        clickAct(node, action.toLowerCase());
+        const text = selected ? 'epl' : 'reply';
+        if (action === 'Copy') {
+          expect(copyTextToClipboard.mock.calls).toEqual([[text], [text]]);
+          await vi.waitFor(() => expect(toast).toHaveBeenCalledTimes(2));
+          expect(toast).toHaveBeenCalledWith(selected ? 'Selection copied' : 'Copied');
+        } else {
+          expect(deps.quoteInto).toHaveBeenCalledTimes(2);
+          expect(deps.quoteInto).toHaveBeenCalledWith(session, session.messages[1], text);
+        }
+      });
+    }
+  }
+  test('pin and unpin reflect engine state and delete also unpins', () => {
+    const {api, deps, session} = mk();
+    api.openMessageMenu(messageFor(2), AT);
+    opened.at(-1)!.find((i) => i.text === 'Pin')!.onClick();
+    expect(deps.setPinned).toHaveBeenLastCalledWith(session, session.messages[1], true);
+    vi.mocked(deps.isPinned).mockReturnValue(true);
+    api.openMessageMenu(messageFor(2), AT);
+    expect(opened.at(-1)!.map((i) => i.text)).toEqual(['Reply', 'Copy', 'Quote', 'Unpin', 'Delete']);
+    opened.at(-1)!.find((i) => i.text === 'Unpin')!.onClick();
+    expect(deps.setPinned).toHaveBeenLastCalledWith(session, session.messages[1], false);
+    vi.mocked(deps.setPinned).mockClear();
+    opened.at(-1)!.find((i) => i.text === 'Delete')!.onClick();
+    expect(deps.setPinned).toHaveBeenCalledWith(session, session.messages[1], false);
+    expect(deps.removeMessage).toHaveBeenCalledWith(session, session.messages[1]);
+  });
+  test('delete supersedes a pending pin before the engine confirms it', () => {
+    const {api, deps, session} = mk();
+    api.openMessageMenu(messageFor(2), AT);
+    opened.at(-1)!.find((i) => i.text === 'Pin')!.onClick();
+    // The pin intent is queued or in flight, but confirmed settings are unchanged.
+    expect(deps.isPinned(session, session.messages[1])).toBe(false);
+    api.openMessageMenu(messageFor(2), AT);
+    opened.at(-1)!.find((i) => i.text === 'Delete')!.onClick();
+    expect(vi.mocked(deps.setPinned).mock.calls).toEqual([
+      [session, session.messages[1], true],
+      [session, session.messages[1], false]
+    ]);
+    expect(deps.removeMessage).toHaveBeenCalledWith(session, session.messages[1]);
+    expect(vi.mocked(deps.setPinned).mock.invocationCallOrder[1])
+      .toBeLessThan(vi.mocked(deps.removeMessage).mock.invocationCallOrder[0]);
+  });
+  test('a message without text has only reply and delete', () => {
+    const {api, session} = mk();
+    session.messages[1].text = '  ';
+    api.openMessageMenu(messageFor(2), AT);
+    expect(opened.at(-1)!.map((i) => i.text)).toEqual(['Reply', 'Delete']);
+  });
+  test('menu copy reports failures through the same toast', async () => {
+    const {api} = mk();
+    copyTextToClipboard.mockResolvedValue(false);
+    api.openMessageMenu(actMessage(2, 'reply'), AT);
+    opened.at(-1)!.find((i) => i.text === 'Copy')!.onClick();
+    await vi.waitFor(() => expect(toast).toHaveBeenCalledWith('Copy failed'));
   });
 });
 describe('copy/quote timestamp icons', () => {
@@ -379,7 +450,7 @@ describe('links in a bubble', () => {
     deps.messageListInner.append(bubble);
     a.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 5, clientY: 5}));
     const items = opened.at(-1)!;
-    expect(items.map((i) => i.text)).toEqual(['Open link', 'Copy link', 'Reply', 'Delete']);
+    expect(items.map((i) => i.text)).toEqual(['Open link', 'Copy link', 'Reply', 'Copy', 'Quote', 'Pin', 'Delete']);
     items[1].onClick();
     await Promise.resolve();
     expect(copyTextToClipboard).toHaveBeenCalledWith('https://play.google.com/store/apps/details?id=ai.coachchat.app');
@@ -391,7 +462,7 @@ describe('links in a bubble', () => {
     bubble.textContent = 'no link here';
     deps.messageListInner.append(bubble);
     bubble.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true}));
-    expect(opened.at(-1)!.map((i) => i.text)).toEqual(['Reply', 'Delete']);
+    expect(opened.at(-1)!.map((i) => i.text)).toEqual(['Reply', 'Copy', 'Quote', 'Pin', 'Delete']);
   });
 
   test('on touch, a long-press on a link keeps the phone own menu', () => {

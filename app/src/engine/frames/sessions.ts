@@ -1,3 +1,4 @@
+import {parseMessagePins} from '@shared/message-pins';
 import type {EngineAskChoice, EngineSession, EngineTab} from '../contract';
 import type {FrameContext, FrameHandler} from './types';
 
@@ -26,6 +27,7 @@ function parseSession(s: any, ctx: FrameContext): EngineSession {
       if (typeof o.notify === 'boolean') es.settings.notify = o.notify;
       if (typeof o.activity === 'boolean') es.settings.activity = o.activity;
       if (typeof o.starred === 'boolean') es.settings.starred = o.starred;
+      if (Array.isArray(o.pins)) es.settings.pins = parseMessagePins(o.pins);
     }
 
     es.photo = typeof s.photo === 'string' && s.photo ? ctx.engineObjectUrl(s.photo) : null;

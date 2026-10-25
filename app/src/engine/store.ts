@@ -776,14 +776,17 @@ export function loadOlder(sessionId: string): Promise<void> {
   })();
 }
 
-const heldFast = (s: CycEngineSession, ref: {ts: number; role: 'user' | 'claude'}) =>
-  s.messages.some((m) => m.ts === ref.ts && m.role === ref.role);
+// A ref with a durable id is held only when THAT row is: two rows can share a
+// ts and role, and a neighbour must not stand in for the target. ts/role stay
+// the fallback for a legacy ref that has no id.
+const heldFast = (s: CycEngineSession, ref: {ts: number; role: 'user' | 'claude'; id?: string}) =>
+  ref.id ? s.messages.some((m) => m.id === ref.id) : s.messages.some((m) => m.ts === ref.ts && m.role === ref.role);
 
 const ensureHeldFills = new Map<string, Promise<boolean>>();
 
 export function ensureMessageHeld(
   sessionId: string,
-  ref: {ts: number; role: 'user' | 'claude'; seq?: number}
+  ref: {ts: number; role: 'user' | 'claude'; seq?: number; id?: string}
 ): Promise<boolean> {
   const s = sessions.get(sessionId);
   if (!s) return Promise.resolve(false);
@@ -1233,6 +1236,21 @@ export function setSessionSettings(
   return drain.whenSettled(row.id);
 }
 
+// Pin operations share the settings intent transport, but coalesce per message.
+// A device never sends its whole pin list over another device's newer list.
+export function setMessagePinned(sessionId: string, messageId: string, pinned: boolean): Promise<boolean> {
+  const s = sessions.get(sessionId);
+  if (!s) return Promise.resolve(false);
+  const row = intents.put({
+    id: 'spin:' + sessionId + ':' + (crypto.randomUUID?.() ?? Date.now().toString(36)),
+    engineKey: s.engineKey, sessionId, kind: 'session-settings',
+    coalesceKey: 'spin:' + sessionId + ':' + messageId,
+    payload: {paneId: s.paneId, patch: {pin: {id: messageId, pinned}}} satisfies SessionSettingsPayload
+  });
+  drain.kick(s.engineKey);
+  return drain.whenSettled(row.id);
+}
+
 drain.registerExecutor('session-settings', async (intent: Intent): Promise<DrainOutcome> => {
   const p = intent.payload as SessionSettingsPayload;
   const res = await postIntent(
@@ -1243,7 +1261,7 @@ drain.registerExecutor('session-settings', async (intent: Intent): Promise<Drain
   if (res.ok === true) return 'done';
   if (res.outcome !== 'transient') {
     const s = sessions.get(intent.engineKey + '|' + p.paneId);
-    if (s) showSessionSettings(s, s.confirmedSettings, p.patch as SessionSettingsPatch);
+    if (s && !('pin' in p.patch)) showSessionSettings(s, s.confirmedSettings, p.patch as SessionSettingsPatch);
   }
   return res.outcome;
 });

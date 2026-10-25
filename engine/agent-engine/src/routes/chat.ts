@@ -12,7 +12,7 @@ import { searchableText } from "../chat/chatmsg.ts";
 import { json, requireOwner } from "../transport/httpx.ts";
 import { normalizeQuery, scanChat } from "../chat/chat-search.ts";
 import { rowsBySeq } from "../chat/chatstore.ts";
-import { chatStore, metaFor, nameOverrideOf, restoredChats, restoredLogs, scheduleAgentSave, sessions } from "../sessions/session-state.ts";
+import { chatStore, pruneMessagePins, metaFor, nameOverrideOf, restoredChats, restoredLogs, scheduleAgentSave, sessions } from "../sessions/session-state.ts";
 
 export async function chatRoutes(ctx: RoutesCtx, req: Request, url: URL, path: string,
   server: import("bun").Server): Promise<Response | null> {
@@ -131,6 +131,7 @@ export async function chatRoutes(ctx: RoutesCtx, req: Request, url: URL, path: s
     /* The new file starts its seq axis at 0: renumber the merged rows in
      * storage order so the pages are dense again. */
     rowsBySeq(s.chat, s.log).forEach((r, i) => { r.seq = i; });
+    pruneMessagePins(id, s.chat);
     bumpRowsGen(s); // both arrays were replaced and re-sequenced: drop the cache
     restoredChats.delete(id);
     restoredLogs.delete(id);

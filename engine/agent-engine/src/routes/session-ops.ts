@@ -18,7 +18,7 @@ import { nextOrder } from "../chat/order.ts";
 import { restartPane } from "../chat/pane-deliver.ts";
 import { markAllRead, markUnread, unreadOf } from "../sessions/readstate.ts";
 import { restartConfirmed, restartLogsToChat, restartTell } from "../terminal/restart.ts";
-import { agentMetas, applySessionSettings, freshAgentId, getManualOrder, isRecentCwd, nameOverrideOf, recentCwds, sessions, setManualOrder, setNameOverride, settingsOf, type Session, type SessionSettings } from "../sessions/session-state.ts";
+import { agentMetas, applySessionSettings, setMessagePinned, freshAgentId, getManualOrder, isRecentCwd, nameOverrideOf, recentCwds, sessions, setManualOrder, setNameOverride, settingsOf, type Session } from "../sessions/session-state.ts";
 import { bindSpawnedPane } from "../sessions/carry.ts";
 import { claimLaunch, waitForLaunch } from "../sessions/launch-claims.ts";
 import { withAgentEnv } from "../runtime/agent-env.ts";
@@ -296,12 +296,17 @@ export async function sessionOpsRoutes(ctx: RoutesCtx, req: Request, url: URL, p
     const got = await readJsonCapped(req, JSON_BODY_MAX_BYTES);
     if (!got.ok) return got.response;
     const body = got.value as Record<string, unknown>;
-    const patch: Partial<Record<keyof SessionSettings, boolean | null>> = {};
+    const patch: Partial<Record<"muted" | "notify" | "starred", boolean | null>> = {};
     for (const k of ["muted", "notify", "starred"] as const) {
       if (typeof body[k] === "boolean" || body[k] === null) patch[k] = body[k] as boolean | null;
     }
-    if (!Object.keys(patch).length) return json({ ok: false, error: "nothing to set" }, 400);
-    applySessionSettings(id, patch);
+    if (body.pin !== undefined) {
+      const pin = body.pin as { id?: unknown; pinned?: unknown } | null;
+      if (!pin || typeof pin.id !== "string" || !pin.id || typeof pin.pinned !== "boolean")
+        return json({ ok: false, error: "invalid pin" }, 400);
+      setMessagePinned(id, pin.id, pin.pinned);
+    } else if (!Object.keys(patch).length) return json({ ok: false, error: "nothing to set" }, 400);
+    if (Object.keys(patch).length) applySessionSettings(id, patch);
     console.log(`[settings] ${id} ${JSON.stringify(settingsOf(id))}`);
     return json({ ok: true, settings: settingsOf(id) });
   }

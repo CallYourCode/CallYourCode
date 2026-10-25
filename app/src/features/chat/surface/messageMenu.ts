@@ -82,12 +82,29 @@ export type MessageMenuDeps = {
   cancelSend: (sessionId: string, msgId: string) => void;
 
   removeMessage: (s: CycSession, m: CycMessage) => void;
+  isPinned: (s: CycSession, m: CycMessage) => boolean;
+  setPinned: (s: CycSession, m: CycMessage, pinned: boolean) => void;
   isTouch: boolean;
   onTeardown: (d: () => void) => void;
 };
 
 export function installMessageMenu(deps: MessageMenuDeps) {
   const {messageListInner, active, onTeardown} = deps;
+
+  // Both the stamp buttons and menu items enter here, including selection and
+  // clipboard feedback. The popup holds the browser selection while it is open.
+  const runTextAction = async (
+    act: 'copy' | 'quote', s: CycSession, m: CycMessage, messageNode: HTMLElement
+  ) => {
+    const selected = selectionInMessage(messageNode);
+    const text = selected ?? m.text;
+    if (act === 'copy') {
+      if (await copyText(text)) toast(selected ? 'Selection copied' : 'Copied');
+      else toast('Copy failed');
+    } else {
+      deps.quoteInto(s, m, text);
+    }
+  };
 
   const openMessageMenu = (
     target: HTMLElement,
@@ -121,21 +138,25 @@ export function installMessageMenu(deps: MessageMenuDeps) {
               }
             ]
           : []),
-        ...(m.role === 'user' && m.status === 'failed'
-          ? [
-              {
-                icon: 'refresh' as const,
-                text: 'Try again',
-                onClick: () => deps.retrySend(s.id, m.id)
-              }
-            ]
-          : []),
         {icon: 'reply', text: 'Reply', onClick: () => deps.startReply(s, m)},
+        ...(m.text.trim() ? [
+          {icon: 'copy' as const, text: 'Copy', onClick: () => { void runTextAction('copy', s, m, target); }},
+          {icon: 'quote' as const, text: 'Quote', onClick: () => { void runTextAction('quote', s, m, target); }},
+          {icon: 'pin' as const, text: deps.isPinned(s, m) ? 'Unpin' : 'Pin',
+            onClick: () => deps.setPinned(s, m, !deps.isPinned(s, m))}
+        ] : []),
+        ...(m.role === 'user' && m.status === 'failed'
+          ? [{icon: 'refresh' as const, text: 'Try again', onClick: () => deps.retrySend(s.id, m.id)}]
+          : []),
         {
           icon: 'delete' as const,
           text: 'Delete',
           danger: true,
-          onClick: () => deps.removeMessage(s, m)
+          onClick: () => {
+            // Supersede queued or in-flight pins too, even before settings confirm them.
+            deps.setPinned(s, m, false);
+            deps.removeMessage(s, m);
+          }
         }
       ],
       at as Touch,
@@ -212,14 +233,7 @@ export function installMessageMenu(deps: MessageMenuDeps) {
     if (!messageNode?.dataset.mid || !s) return;
     const m = messageOfNode(s, messageNode);
     if (!m) return;
-    const selected = selectionInMessage(messageNode);
-    const text = selected ?? m.text;
-    if (btn.dataset.act === 'copy') {
-      if (await copyText(text)) toast(selected ? 'Selection copied' : 'Copied');
-      else toast('Copy failed');
-    } else {
-      deps.quoteInto(s, m, text);
-    }
+    await runTextAction(btn.dataset.act === 'copy' ? 'copy' : 'quote', s, m, messageNode);
   };
   messageListInner.addEventListener('click', onActClick);
   onTeardown(() => messageListInner.removeEventListener('click', onActClick));
