@@ -259,7 +259,7 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
 
   let lastActiveSessionId: string | null = null;
 
-  let lastActiveScrollH = -1;
+  let lastActiveContentH = -1;
 
   // Pin state (R8) is owned by the ScrollOwner (phase 2 step 2): cs.nearBottom()
   // is tracked off the scroll event with the same formula this used locally, so
@@ -391,7 +391,7 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       const prevMsgCount = lastActiveMsgCount;
       const prevSessionId = lastActiveSessionId;
       const prevEvCount = lastActiveEvCount;
-      const prevScrollH = lastActiveScrollH;
+      const prevContentH = lastActiveContentH;
       const wasNearBottom = cs.nearBottom();
       const prevNewestTs = lastNewestTs;
       let newestTs = 0;
@@ -412,14 +412,16 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
       hub.render(true);
 
       // Bookkeeping the next notify needs is settled synchronously (it reads no
-      // layout); only lastActiveScrollH waits for the rAF's post-render measure.
+      // layout); only lastActiveContentH waits for the rAF's post-render measure.
       lastActiveMsgCount = count;
       lastNewestTs = s && s.id === prevSessionId ? Math.max(prevNewestTs, newestTs) : newestTs;
       lastActiveEvCount = evCount;
       lastActiveSessionId = s ? s.id : null;
 
       requestAnimationFrame(() => {
-        const scrollEl = cs.messageListScroll;
+        // Arrival growth is transcript growth, not header/composer clearance.
+        // The scroll owner already carries pad changes in its resize settle.
+        const contentH = cs.messageListInner.scrollHeight;
 
         if (owned || cs.graceOpen()) {
           if (
@@ -427,8 +429,8 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
             (grewCount ||
               (s &&
                 s.id === prevSessionId &&
-                prevScrollH >= 0 &&
-                scrollEl.scrollHeight > prevScrollH))
+                prevContentH >= 0 &&
+                contentH > prevContentH))
           ) {
             cs.holdGraceGrowth();
           }
@@ -444,8 +446,8 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
             (prevEvCount !== -1 && evCount > prevEvCount) ||
             (s.id === prevSessionId &&
               count === prevMsgCount &&
-              prevScrollH >= 0 &&
-              scrollEl.scrollHeight > prevScrollH))
+              prevContentH >= 0 &&
+              contentH > prevContentH))
         ) {
           // A row (or an overlay event, or late growth) arrived for a reader who
           // was near the end: ONE notice to the scroll owner, which keeps the end
@@ -456,7 +458,7 @@ export function installStoreBindings(deps: StoreBindingsDeps) {
         }
 
         if (s && dataState.mode === 'live' && cs.landingOwed()) cs.settleNow(s.id);
-        lastActiveScrollH = s ? scrollEl.scrollHeight : -1;
+        lastActiveContentH = s ? contentH : -1;
         cs.recomputeNearBottom();
       });
 
