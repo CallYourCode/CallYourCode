@@ -303,8 +303,8 @@ export function createRenderHub(deps: RenderHubDeps) {
       sessionState.activeId ?? '',
       deps.mainColumns.dataset.view ?? '',
       s ? cvOf(s) : 'none',
-      // Pins are header inputs, not transcript content. A settings-only
-      // broadcast must repaint the strip even when no message row changed.
+      // Pins paint in the header and bubble stamps. A settings-only broadcast
+      // must repaint both even when no message content changed.
       s ? JSON.stringify((s as CycEngineSession).settings?.pins ?? []) : '',
       d.replyLevel,
       d.complexity,
@@ -664,7 +664,9 @@ export function createRenderHub(deps: RenderHubDeps) {
             typeof tail.sendPct === 'number' ? 1 : 0
           }`
         : '';
-    const paintKey = scanKey + '\x1f' + tailBody;
+    // Pin settings patch stamps on reused rows inside the existing scroll
+    // bracket. They do not change the node set or require the media scans.
+    const paintKey = [scanKey, tailBody, JSON.stringify(es.settings?.pins?.map((p) => p.id) ?? [])].join('\x1f');
     const paintChanged = paintKey !== lastPaintKey;
     lastPaintKey = paintKey;
 

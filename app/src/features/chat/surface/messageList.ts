@@ -1,4 +1,5 @@
 import type {CycMessage, CycSession, CycSessionEvent} from '@/types';
+import type {CycEngineSession} from '@/engine/store';
 import {RENDERABLE_EVENT_KINDS} from '@/engine/store/rows/core';
 import {
   Virtualizer,
@@ -24,7 +25,8 @@ import {
   unreadBannerEl,
   queuedBannerEl,
   sendProgressNode,
-  sendProgressText
+  sendProgressText,
+  setMessagePin
 } from '../messages/messageContent';
 import {markUnreadLanding, setMessageLast} from '../messages/messageFrame';
 import {audioMessage} from '../messages/audioMessages';
@@ -1758,6 +1760,10 @@ function paintMessages(
   // the re-window closure, and a settle-measure of the mounted rows. Shared by
   // the append path and the scroll-up prepend path.
   function commitWindow(finalFrames: ItemFrame[]): void {
+    const pins = new Set((s as CycEngineSession).settings?.pins?.map((p) => p.id));
+    for (const f of finalFrames) {
+      if (f?.node.dataset.mid) setMessagePin(f.node, pins.has(f.node.dataset.mid));
+    }
     if (windowed) {
       inner.style.paddingTop = padTop + 'px';
       inner.style.paddingBottom = padBottom + 'px';
