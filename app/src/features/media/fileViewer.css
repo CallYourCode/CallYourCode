@@ -1,0 +1,25 @@
+/* File-viewer markdown only. Chat markdown and the diff viewer do not opt in. */
+.cyc-fv-markdown > * {
+  max-width: 46rem;
+  margin-inline: auto;
+}
+
+/* Intrinsic width propagates through the whole quote/details/list, including
+   its padding and borders. The viewer caps the unit, not a detached descendant.
+   Narrow-only units retain the original reading-column geometry. */
+.cyc-fv-markdown > :is(.cyc-md-table-wrap, :has(.cyc-md-table-wrap)) {
+  width: max-content;
+  min-width: min(100%, 46rem);
+  max-width: 100%;
+}
+
+/* Prose in an expanded unit stays readable and attached to that unit's left
+   edge. Tables alone can use the extra room; their existing overflow-x:auto
+   supplies local scrolling when even the viewer cannot accommodate them. */
+.cyc-fv-markdown :is(p, pre, h1, h2, h3, h4, h5, h6, summary, .cyc-fv-list-prose) {
+  max-width: 46rem;
+}
+
+.cyc-fv-markdown .cyc-fv-list-prose {
+  display: block;
+}

@@ -2,9 +2,9 @@ import {test, expect, chromium, webkit} from '@playwright/test';
 import {mkdir, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 
-// Run against an isolated production app server and engine with a shown markdown fixture.
-// Include narrow, seven- and twenty-column tables at top level, then the same three
-// inside a nested list, a blockquote and initially closed details, in that order.
+// Show fixtures/md-table.md through an isolated production app server and engine.
+// It includes narrow, seven- and twenty-column tables at top level, in mixed
+// lists/quotes/details, narrow-only and intrinsic-width units, and combined ancestors.
 // The rig exposes /info: {origin, engineId, key, file: {docId, name, fileKind, size}}.
 const control = process.env.CYC_MD_TABLE_RIG;
 const evidence = process.env.CYC_MD_TABLE_EVIDENCE;
@@ -51,18 +51,19 @@ test('markdown tables break out of the reading column without page overflow', as
         file: rig.file,
         url: docUrl
       });
-      await expect(page.locator('.cyc-md-table')).toHaveCount(12, {timeout: 15_000});
+      await expect(page.locator('.cyc-md-table')).toHaveCount(20, {timeout: 15_000});
       await page.evaluate(() => document.fonts.ready);
       for (const width of [390, 1280, 1920]) {
         for (const colorScheme of ['light', 'dark'] as const) {
           await page
             .locator('.cyc-md-details')
-            .evaluate((el) => ((el as HTMLDetailsElement).open = false));
+            .evaluateAll((els) => els.forEach((el) => ((el as HTMLDetailsElement).open = false)));
           await page.setViewportSize({width, height: 900});
           await page.emulateMedia({colorScheme});
           await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme);
-          await page.locator('.cyc-md-details > summary').click();
-          // Let ResizeObserver process the resize and newly visible details tables.
+          for (const summary of await page.locator('.cyc-md-details > summary').all())
+            await summary.click();
+          // Allow layout/paint after resize and details opening.
           await page.evaluate(
             () =>
               new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
@@ -71,7 +72,7 @@ test('markdown tables break out of the reading column without page overflow', as
           const g = await page.evaluate(() => {
             const rect = (el: Element) => {
               const r = el.getBoundingClientRect();
-              return {left: r.left, right: r.right, width: r.width};
+              return {left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width};
             };
             const article = document.querySelector('.cyc-fv-body > .cyc-md')!;
             const scroll = document.querySelector('.cyc-fv-scroll')!;
@@ -81,14 +82,41 @@ test('markdown tables break out of the reading column without page overflow', as
               clientWidth: document.scrollingElement!.clientWidth,
               viewer: rect(scroll),
               prose: [...article.children]
-                .filter((el) => !el.matches('.cyc-md-table-wrap, .cyc-md-anchor'))
+                .filter(
+                  (el) =>
+                    !el.matches('.cyc-md-table-wrap, .cyc-md-anchor') &&
+                    !el.querySelector('.cyc-md-table-wrap')
+                )
                 .map(rect),
               tables: [...article.querySelectorAll<HTMLElement>('.cyc-md-table-wrap')].map(
                 (wrap) => ({
                   ...rect(wrap),
+                  unit: (() => {
+                    let el: Element = wrap;
+                    while (el.parentElement !== article) el = el.parentElement!;
+                    return rect(el);
+                  })(),
                   clientWidth: wrap.clientWidth,
                   scrollWidth: wrap.scrollWidth,
                   table: rect(wrap.querySelector('table')!),
+                  containers: (() => {
+                    const boxes = [];
+                    for (let el = wrap.parentElement; el && el !== article; el = el.parentElement) {
+                      if (!el.matches('blockquote, details, li, ul, ol')) continue;
+                      const r = el.getBoundingClientRect();
+                      const s = getComputedStyle(el);
+                      boxes.push({
+                        tag: el.tagName,
+                        left: r.left + parseFloat(s.borderLeftWidth) + parseFloat(s.paddingLeft),
+                        right:
+                          r.right - parseFloat(s.borderRightWidth) - parseFloat(s.paddingRight),
+                        top: r.top + parseFloat(s.borderTopWidth) + parseFloat(s.paddingTop),
+                        bottom:
+                          r.bottom - parseFloat(s.borderBottomWidth) - parseFloat(s.paddingBottom)
+                      });
+                    }
+                    return boxes;
+                  })(),
                   parentContentLeft:
                     wrap.parentElement!.getBoundingClientRect().left +
                     parseFloat(getComputedStyle(wrap.parentElement!).paddingLeft) +
@@ -101,6 +129,16 @@ test('markdown tables break out of the reading column without page overflow', as
           const labels = ['', 'list-', 'quote-', 'details-'].flatMap((prefix) =>
             ['narrow', 'seven', 'twenty'].map((label) => prefix + label)
           );
+          const extraLabels = [
+            'list-only-narrow',
+            'quote-only-narrow',
+            'details-only-narrow',
+            'intrinsic',
+            'list-intrinsic',
+            'quote-intrinsic',
+            'details-intrinsic',
+            'combined-twenty'
+          ];
           for (const [i, label] of labels.entries()) {
             await page
               .locator('.cyc-md-table-wrap')
@@ -116,6 +154,17 @@ test('markdown tables break out of the reading column without page overflow', as
               animations: 'disabled'
             });
           }
+          const mixedList = page.locator('.cyc-md-list:has(.cyc-md-table-wrap)').first();
+          const mixedHeight = (await mixedList.boundingBox())!.height;
+          // A tall viewport shows the marker, prose and all three tables together,
+          // without an element screenshot being clipped by the viewer scroll box.
+          await page.setViewportSize({width, height: Math.ceil(mixedHeight) + 100});
+          await mixedList.evaluate((el) => el.scrollIntoView({block: 'start'}));
+          await page.screenshot({
+            path: join(evidence, phase, `${id}-mixed-list.png`),
+            animations: 'disabled'
+          });
+          await page.setViewportSize({width, height: 900});
           measurements.push({id, ...g, shots});
           const check = (ok: boolean, message: string) => {
             if (!ok) failures.push(`${id}: ${message}`);
@@ -128,12 +177,26 @@ test('markdown tables break out of the reading column without page overflow', as
           check(g.theme === colorScheme, 'theme did not apply');
           check(
             g.prose.every((r) => Math.abs(r.width - reading) <= 1),
-            'prose width changed'
+            'top-level prose width changed'
           );
           check(
             g.tables.every((r) => r.left >= g.viewer.left + 15 && r.right <= g.viewer.right - 15),
             'table escapes viewer padding'
           );
+          // Check every ancestor, not merely the table's immediate parent. A
+          // locally scrolling table's box must stay inside the quote bar,
+          // details border and every level of list indentation.
+          for (const [i, table] of g.tables.entries()) {
+            for (const container of table.containers) {
+              check(
+                table.left >= container.left - 1 &&
+                  table.right <= container.right + 1 &&
+                  table.top >= container.top - 1 &&
+                  table.bottom <= container.bottom + 1,
+                `${[...labels, ...extraLabels][i]} overlaps ${container.tag} content box`
+              );
+            }
+          }
           for (const offset of [3, 6, 9]) {
             const [narrow, seven, twenty] = g.tables.slice(offset, offset + 3);
             check(
@@ -148,9 +211,32 @@ test('markdown tables break out of the reading column without page overflow', as
               );
             }
             check(
-              Math.abs(twenty.width - (width - 32)) <= 1 && twenty.scrollWidth > twenty.clientWidth,
+              Math.abs(twenty.right - (width - 16 - (offset === 9 ? 13 : 0))) <= 1 &&
+                Math.abs(twenty.left - (16 + (offset === 3 ? 48 : offset === 6 ? 17 : 13))) <= 1 &&
+                twenty.scrollWidth > twenty.clientWidth,
               `${labels[offset + 2]} does not use full viewer width with local scroll`
             );
+          }
+          for (const [index, inset] of [
+            [12, 48],
+            [13, 17],
+            [14, 13]
+          ]) {
+            const narrow = g.tables[index];
+            check(
+              Math.abs(narrow.unit.width - reading) <= 1 &&
+                Math.abs(narrow.table.left - ((width - reading) / 2 + inset)) <= 1 &&
+                Math.abs(narrow.table.width - g.tables[0].table.width) <= 1,
+              `${extraLabels[index - 12]} changed base geometry`
+            );
+          }
+          if (width > 768) {
+            for (const index of [15, 16, 17, 18]) {
+              check(
+                g.tables[index].unit.width > reading && g.tables[index].unit.width < width - 100,
+                `${extraLabels[index - 12]} unit widened beyond intrinsic need`
+              );
+            }
           }
           check(
             Math.abs(g.tables[0].table.left - (width - reading) / 2) <= 1,
