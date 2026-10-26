@@ -143,7 +143,19 @@ export function openFileViewer(
     const kind =
       doc.fileKind === 'markdown' || doc.fileKind === 'diff' ? doc.fileKind : file.fileKind;
     if (kind === 'markdown') {
-      body.append(renderMarkdown(parseMarkdownDocument(content).nodes));
+      // Only this viewer gets a full-width page. Prose keeps the old 48rem body
+      // minus its side padding. A content-sized table is centred once wider
+      // than prose; the minimum keeps narrow tables at the prose's left edge.
+      body.classList.remove('max-w-3xl');
+      const article = renderMarkdown(parseMarkdownDocument(content).nodes);
+      article.classList.add(
+        '[&>*]:max-w-[46rem]',
+        '[&>*]:mx-auto',
+        '[&>.cyc-md-table-wrap]:w-max',
+        '[&>.cyc-md-table-wrap]:min-w-[min(100%,46rem)]',
+        '[&>.cyc-md-table-wrap]:max-w-full'
+      );
+      body.append(article);
     } else if (kind === 'diff') {
       let format: DiffFormat = 'line-by-line';
       let diffEl = renderDiff(content, format);
