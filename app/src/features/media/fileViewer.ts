@@ -1,4 +1,5 @@
 import 'diff2html/bundles/css/diff2html.min.css';
+import './fileViewer.css';
 
 import {html as diff2html} from 'diff2html';
 import {parseMarkdownDocument} from '@/features/content/markdown';
@@ -143,7 +144,26 @@ export function openFileViewer(
     const kind =
       doc.fileKind === 'markdown' || doc.fileKind === 'diff' ? doc.fileKind : file.fileKind;
     if (kind === 'markdown') {
-      body.append(renderMarkdown(parseMarkdownDocument(content).nodes));
+      // Widen a table's entire containing unit, never the table through its
+      // ancestor's border or list marker. CSS handles intrinsic sizing, resizing
+      // and details opening without measuring or repositioning descendants.
+      body.classList.remove('max-w-3xl');
+      const article = renderMarkdown(parseMarkdownDocument(content).nodes);
+      article.classList.add('cyc-fv-markdown');
+      // List item prose is inline in the shared renderer. Give just that inline
+      // run a reading-width box in this viewer, leaving its marker on the li.
+      for (const item of article.querySelectorAll(':scope > :has(.cyc-md-table-wrap) li')) {
+        const prose = h('span', 'cyc-fv-list-prose');
+        while (
+          item.firstChild &&
+          (item.firstChild.nodeType === Node.TEXT_NODE ||
+            (item.firstChild instanceof HTMLElement &&
+              item.firstChild.matches('a, b, i, u, del, mark, sub, sup, code, span, img')))
+        )
+          prose.append(item.firstChild);
+        if (prose.childNodes.length) item.prepend(prose);
+      }
+      body.append(article);
     } else if (kind === 'diff') {
       let format: DiffFormat = 'line-by-line';
       let diffEl = renderDiff(content, format);
