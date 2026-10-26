@@ -269,7 +269,9 @@ function inline(raw: string, defs: Definitions): MarkdownInline[] {
       }
     }
 
-    const math = /^\$([^$\n]+)\$/.exec(rest);
+    // Pandoc's rule: the closing $ may not be followed by a digit, so prices
+    // like "$17.95 a month, then $59.99" stay text instead of becoming math.
+    const math = /^\$([^$\n]+)\$(?!\d)/.exec(rest);
     if (math && !/^\s|\s$/.test(math[1])) {
       append(out, {kind: 'math', source: math[1]});
       cursor += math[0].length;

@@ -38,6 +38,16 @@ describe('Inline math nodes', () => {
     expect(article.textContent).toContain('$5 for one');
   });
 
+  test('leaves prices as text when the closing $ is followed by a digit', () => {
+    const source = 'Quiz then email: $4.95/3, $9.95/20, $17.95/50 as a 7-day trial, then **$59.99 every 4 weeks**';
+    const article = renderMarkdown(parseMarkdownDocument(source).nodes);
+    expect(article.querySelector('.cyc-md-code')).toBeNull();
+    expect(article.textContent).toBe('Quiz then email: $4.95/3, $9.95/20, $17.95/50 as a 7-day trial, then $59.99 every 4 weeks');
+    expect(article.querySelector('b')?.textContent).toBe('$59.99 every 4 weeks');
+    expect(mathIn('pay $5 or $10 today')).toEqual([]);
+    expect(mathIn('area $x^2$ grows')).toEqual([{kind: 'math', source: 'x^2'}]);
+  });
+
   test('routes block math to a dedicated math block', () => {
     const doc = parseMarkdownDocument('$$\n\\int_0^1 x\\,dx\n$$');
     expect(doc.nodes[0]).toEqual({kind: 'mathBlock', value: '\\int_0^1 x\\,dx'});
