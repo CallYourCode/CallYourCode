@@ -156,6 +156,40 @@ export function openFileViewer(
         '[&>.cyc-md-table-wrap]:max-w-full'
       );
       body.append(article);
+
+      // A nested table cannot inherit the article's width through a reading-width
+      // list, quote or details. Size it against the article, keeping its parent's
+      // prose/indentation unchanged and centring only tables that outgrow it.
+      const nestedTables = [...article.querySelectorAll<HTMLElement>('.cyc-md-table-wrap')].filter(
+        (wrap) => wrap.parentElement !== article
+      );
+      if (nestedTables.length) {
+        for (const wrap of nestedTables) {
+          wrap.style.width = 'max-content';
+          wrap.style.minWidth = '100%';
+        }
+        const sizeNestedTables = () => {
+          const page = article.getBoundingClientRect();
+          for (const wrap of nestedTables) {
+            wrap.style.maxWidth = `${page.width}px`;
+            wrap.style.marginLeft = '0px';
+            const table = wrap.getBoundingClientRect();
+            const parent = wrap.parentElement!;
+            const style = getComputedStyle(parent);
+            const available =
+              parent.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+            if (table.width > available) {
+              wrap.style.marginLeft = `${page.left + (page.width - table.width) / 2 - table.left}px`;
+            }
+          }
+        };
+        const observer = new ResizeObserver(sizeNestedTables);
+        observer.observe(article);
+        // Also reflow when details open or fonts change intrinsic table widths.
+        for (const wrap of nestedTables) observer.observe(wrap);
+        sizeNestedTables();
+        cleanups.push(() => observer.disconnect());
+      }
     } else if (kind === 'diff') {
       let format: DiffFormat = 'line-by-line';
       let diffEl = renderDiff(content, format);

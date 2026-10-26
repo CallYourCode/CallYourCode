@@ -2,7 +2,9 @@ import {test, expect, chromium, webkit} from '@playwright/test';
 import {mkdir, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 
-// Run against an isolated production app server and engine with a shown tables.md.
+// Run against an isolated production app server and engine with a shown markdown fixture.
+// Include narrow, seven- and twenty-column tables at top level, then the same three
+// inside a nested list, a blockquote and initially closed details, in that order.
 // The rig exposes /info: {origin, engineId, key, file: {docId, name, fileKind, size}}.
 const control = process.env.CYC_MD_TABLE_RIG;
 const evidence = process.env.CYC_MD_TABLE_EVIDENCE;
@@ -49,13 +51,22 @@ test('markdown tables break out of the reading column without page overflow', as
         file: rig.file,
         url: docUrl
       });
-      await page.locator('.cyc-md-table').nth(2).waitFor({timeout: 15_000});
+      await expect(page.locator('.cyc-md-table')).toHaveCount(12, {timeout: 15_000});
       await page.evaluate(() => document.fonts.ready);
       for (const width of [390, 1280, 1920]) {
         for (const colorScheme of ['light', 'dark'] as const) {
+          await page
+            .locator('.cyc-md-details')
+            .evaluate((el) => ((el as HTMLDetailsElement).open = false));
           await page.setViewportSize({width, height: 900});
           await page.emulateMedia({colorScheme});
           await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme);
+          await page.locator('.cyc-md-details > summary').click();
+          // Let ResizeObserver process the resize and newly visible details tables.
+          await page.evaluate(
+            () =>
+              new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+          );
           const id = `${name}-${width}-${colorScheme}`;
           const g = await page.evaluate(() => {
             const rect = (el: Element) => {
@@ -77,13 +88,20 @@ test('markdown tables break out of the reading column without page overflow', as
                   ...rect(wrap),
                   clientWidth: wrap.clientWidth,
                   scrollWidth: wrap.scrollWidth,
-                  table: rect(wrap.querySelector('table')!)
+                  table: rect(wrap.querySelector('table')!),
+                  parentContentLeft:
+                    wrap.parentElement!.getBoundingClientRect().left +
+                    parseFloat(getComputedStyle(wrap.parentElement!).paddingLeft) +
+                    parseFloat(getComputedStyle(wrap.parentElement!).borderLeftWidth)
                 })
               )
             };
           });
           const shots = [];
-          for (const [i, label] of ['narrow', 'seven', 'twenty'].entries()) {
+          const labels = ['', 'list-', 'quote-', 'details-'].flatMap((prefix) =>
+            ['narrow', 'seven', 'twenty'].map((label) => prefix + label)
+          );
+          for (const [i, label] of labels.entries()) {
             await page
               .locator('.cyc-md-table-wrap')
               .nth(i)
@@ -116,6 +134,24 @@ test('markdown tables break out of the reading column without page overflow', as
             g.tables.every((r) => r.left >= g.viewer.left + 15 && r.right <= g.viewer.right - 15),
             'table escapes viewer padding'
           );
+          for (const offset of [3, 6, 9]) {
+            const [narrow, seven, twenty] = g.tables.slice(offset, offset + 3);
+            check(
+              Math.abs(narrow.table.left - narrow.parentContentLeft) <= 1 &&
+                Math.abs(narrow.table.width - g.tables[0].table.width) <= 1,
+              `${labels[offset]} moved or stretched`
+            );
+            if (width > 768) {
+              check(
+                seven.scrollWidth <= seven.clientWidth + 1 && seven.width > reading + 100,
+                `${labels[offset + 1]} still scrolls inside the reading column`
+              );
+            }
+            check(
+              Math.abs(twenty.width - (width - 32)) <= 1 && twenty.scrollWidth > twenty.clientWidth,
+              `${labels[offset + 2]} does not use full viewer width with local scroll`
+            );
+          }
           check(
             Math.abs(g.tables[0].table.left - (width - reading) / 2) <= 1,
             'narrow table moved from prose edge'
