@@ -95,7 +95,7 @@ Mixed container prose stays readable beside its own marker, quote bar or details
 
 ## Narrow-only container
 
-- Outer
+- Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column.
   - Inner
 
     | Name | Status |
@@ -105,6 +105,8 @@ Mixed container prose stays readable beside its own marker, quote bar or details
 
 ## Narrow-only container
 
+> Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column.
+>
 > | Name | Status |
 > | --- | --- |
 > | Alpha | Ready |
@@ -114,6 +116,8 @@ Mixed container prose stays readable beside its own marker, quote bar or details
 
 <details>
 <summary>Extra tables</summary>
+
+Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column. Long prose must not make a narrow-only container wider than the original reading column.
 
 | Name | Status |
 | --- | --- |

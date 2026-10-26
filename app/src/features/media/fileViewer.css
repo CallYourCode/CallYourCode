@@ -18,6 +18,10 @@
    supplies local scrolling when even the viewer cannot accommodate them. */
 .cyc-fv-markdown :is(p, pre, h1, h2, h3, h4, h5, h6, summary, .cyc-fv-list-prose) {
   max-width: 46rem;
+  /* Prose must not contribute max-content width plus ancestor padding to a
+     unit's intrinsic size. Its used width still fills the available reading
+     box, and its height still follows the text. Only tables drive breakout. */
+  contain: inline-size;
 }
 
 .cyc-fv-markdown .cyc-fv-list-prose {
