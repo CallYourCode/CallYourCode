@@ -153,9 +153,9 @@ function timeoutSignal(ms: number): { signal: AbortSignal; done(): void } {
 }
 
 /* Sleep `ms` on the injected clock, waking early if `signal` aborts. Used
- * between 503 retries so the backoff wait is itself bounded by the decode
- * deadline: the moment the deadline fires the sleep ends and the next fetch
- * sees an aborted signal. */
+ * between retries so the backoff wait is itself bounded by the decode
+ * deadline: the moment the deadline fires the sleep ends, and the loop checks
+ * the aborted signal before starting another fetch. */
 function sleepOn(ms: number, signal: AbortSignal): Promise<void> {
   const clock = CLOCK();
   return new Promise((resolve) => {
@@ -167,6 +167,24 @@ function sleepOn(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/* Only known transport failures, never a generic fetch/programmer TypeError.
+ * Bun uses ECONNRESET for a dropped socket and ConnectionRefused for a listener
+ * that is down. The message fallback covers Bun's socket-close TypeError when
+ * no code is exposed; Node-style fetch may carry the code on cause instead. */
+function transientTransport(e: unknown): string | undefined {
+  if (!e || typeof e !== "object") return;
+  const err = e as { name?: unknown; code?: unknown; message?: unknown; cause?: { code?: unknown } };
+  if (err.name === "AbortError" || err.name === "TimeoutError") return;
+  const code = err.code ?? err.cause?.code;
+  if (code === "ECONNRESET") return "connection-reset";
+  if (code === "ECONNREFUSED" || code === "ConnectionRefused") return "connection-refused";
+  if (code === "EPIPE") return "socket-closed";
+  if (e instanceof TypeError && typeof err.message === "string" &&
+      /^The socket connection was closed unexpectedly\.(?: For more information, pass `verbose: true` in the second argument to fetch\(\))?$/.test(err.message)) {
+    return "socket-closed";
+  }
+}
+
 /* ONE decode of a clip through the voice engine's POST /stt, waiting out a busy
  * (503) engine rather than failing the note (#stt-busy).
  *
@@ -176,9 +194,13 @@ function sleepOn(ms: number, signal: AbortSignal): Promise<void> {
  * could not be read: log `stt.queued`/`stt.retry`, back off on the injected
  * clock, and try again until a slot frees or `deadlineMs` runs out. The single
  * timeout signal spans every retry, so the whole wait -- decode plus every
- * busy-backoff -- is bounded by the one deadline. When it fires the fetch aborts,
- * which closes the socket and cancels the decode on the voice engine
- * (`stt.cancelled`). The voice op is recorded once, for the final outcome. */
+ * busy-backoff -- is bounded by the one deadline. Transient connection failures
+ * get only three retries (1/2/4 seconds), independently of the 503 queue wait:
+ * a busy response neither spends nor resets that budget. The saved body is
+ * reused, without re-storing audio or re-delivering chat. When the deadline
+ * fires the fetch aborts, which closes the socket and cancels the decode on
+ * the voice engine (`stt.cancelled`). The voice op is recorded once, for the
+ * final outcome. */
 async function sttFetch(opts: {
   url: string; mime: string; body: ArrayBuffer;
   deadlineMs: number; cid?: string; msgId?: string;
@@ -186,14 +208,28 @@ async function sttFetch(opts: {
   const t0 = performance.now();
   const bound = timeoutSignal(opts.deadlineMs);
   let attempt = 0;
+  let transportRetries = 0;
   try {
     for (;;) {
-      const res = await fetch(opts.url, {
-        method: "POST",
-        headers: { "Content-Type": opts.mime },
-        body: opts.body,
-        signal: bound.signal,
-      });
+      bound.signal.throwIfAborted();
+      let res: Response;
+      try {
+        res = await fetch(opts.url, {
+          method: "POST",
+          headers: { "Content-Type": opts.mime },
+          body: opts.body,
+          signal: bound.signal,
+        });
+      } catch (e) {
+        bound.signal.throwIfAborted();
+        const category = transientTransport(e);
+        if (!category || transportRetries >= 3) throw e;
+        const waitMs = 1000 * 2 ** transportRetries++;
+        D().log("stt.transport-retry", { cid: opts.cid, msgId: opts.msgId,
+          attempt: transportRetries, waitMs, category });
+        await sleepOn(waitMs, bound.signal);
+        continue;
+      }
       if (res.status === 503) {
         /* The engine is busy (every batch slot taken). Wait our turn and retry
          * rather than shipping the placeholder; the backoff is bounded by the
